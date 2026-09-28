@@ -1,0 +1,201 @@
+// gRPC contract between the backend (api + worker) and the vm-manager.
+// SOURCE OF TRUTH. Never break existing RPCs or fields; add new ones instead.
+// Auth: every call carries the shared secret in metadata `x-internal-secret`.
+syntax = "proto3";
+
+package vm.v1;
+
+option go_package = "github.com/personal-agent/vm-manager/gen/vm/v1;vmv1";
+
+service VmManager {
+  // New container + /data volume + Platform MCP token + Bridge secret. Leaves it stopped.
+  // Idempotent per user_id: a second call returns the existing sandbox.
+  rpc CreateSandbox(CreateSandboxRequest) returns (CreateSandboxResponse);
+  // Start if needed and wait until the Bridge is healthy.
+  // At the awake cap with nothing evictable -> RESOURCE_EXHAUSTED (retryable).
+  rpc WakeSandbox(WakeSandboxRequest) returns (WakeSandboxResponse);
+  // Deliver a message or approval answer. Streams accepted -> working... -> turn_done | error.
+  rpc Deliver(DeliverRequest) returns (stream DeliverEvent);
+  // Refresh last-active (every delivered message and every Platform MCP call).
+  rpc Touch(TouchRequest) returns (TouchResponse);
+  // Polite stop (Hermes saves to /data). force=true for stuck turns.
+  rpc StopSandbox(StopSandboxRequest) returns (StopSandboxResponse);
+  // Remove container, volume and egress rules. Only on account deletion.
+  rpc DeleteSandbox(DeleteSandboxRequest) returns (DeleteSandboxResponse);
+  rpc GetSandbox(GetSandboxRequest) returns (Sandbox);
+  rpc ListSandboxes(ListSandboxesRequest) returns (ListSandboxesResponse);
+  // Awake time per user in [since, until) (for credits).
+  rpc GetUsage(GetUsageRequest) returns (GetUsageResponse);
+  // The user's MCP servers / domains changed.
+  rpc SetEgressAllowlist(SetEgressAllowlistRequest) returns (SetEgressAllowlistResponse);
+  // Archive /data for backup.
+  rpc SnapshotVolume(SnapshotVolumeRequest) returns (SnapshotVolumeResponse);
+}
+
+enum SandboxState {
+  SANDBOX_STATE_UNSPECIFIED = 0;
+  SANDBOX_STATE_STOPPED = 1;
+  SANDBOX_STATE_WAKING = 2;
+  SANDBOX_STATE_AWAKE = 3;
+  SANDBOX_STATE_BUSY = 4;
+  SANDBOX_STATE_BROKEN = 5;
+}
+
+// Awake-cap priority: lower is evicted first.
+enum Priority {
+  PRIORITY_UNSPECIFIED = 0;
+  PRIORITY_LOW = 1;    // free
+  PRIORITY_NORMAL = 2; // pro
+  PRIORITY_HIGH = 3;   // max
+}
+
+message UserMcpServer {
+  string id = 1;
+  string name = 2;
+  string url = 3;
+  string auth_header_name = 4;
+  // The user's own secret for their own server (decrypted by the backend just for this call).
+  string auth_secret = 5;
+}
+
+message Sandbox {
+  string user_id = 1;
+  string container_id = 2;
+  string image_version = 3;
+  SandboxState state = 4;
+  int64 last_active_at_unix_ms = 5;
+  int64 memory_bytes = 6;
+  repeated string allowlist = 7;
+}
+
+message CreateSandboxRequest {
+  string user_id = 1;
+  // This user's LiteLLM virtual key (the only AI credential in the container).
+  string litellm_key = 2;
+  Priority priority = 3;
+  repeated string allowlist = 4;
+  repeated UserMcpServer mcp_servers = 5;
+  string timezone = 6;
+}
+
+message CreateSandboxResponse {
+  Sandbox sandbox = 1;
+  // sha256 hex of the Platform MCP token. The backend stores it to map token -> user id.
+  // The plaintext token never leaves the vm-manager except into the container.
+  string mcp_token_hash = 2;
+}
+
+message WakeSandboxRequest {
+  string user_id = 1;
+  Priority priority = 2;
+}
+
+message WakeSandboxResponse {
+  Sandbox sandbox = 1;
+  bool was_stopped = 2;
+}
+
+enum DeliverKind {
+  DELIVER_KIND_UNSPECIFIED = 0;
+  DELIVER_KIND_MESSAGE = 1;
+  DELIVER_KIND_APPROVAL_ANSWER = 2;
+  DELIVER_KIND_AUTOMATION = 3;
+  DELIVER_KIND_APP_EVENT = 4;
+}
+
+message Attachment {
+  string id = 1;
+  string name = 2;
+  string mime_type = 3;
+  // Short-lived URL the container can fetch through the egress proxy (api domain).
+  string url = 4;
+}
+
+message DeliverRequest {
+  string user_id = 1;
+  // Idempotency key (the event id). A repeated delivery_id is not re-run by the Bridge.
+  string delivery_id = 2;
+  DeliverKind kind = 3;
+  // Session key, e.g. "telegram:12345" or "web". Hermes keeps one session per chat.
+  string session_key = 4;
+  string channel = 5;
+  string text = 6;
+  repeated Attachment attachments = 7;
+  // For approval answers.
+  string approval_id = 8;
+  bool approved = 9;
+  // Free-form JSON for the Bridge.
+  string metadata_json = 10;
+  // 0 = default 15 minutes.
+  int32 timeout_seconds = 11;
+}
+
+enum DeliverEventType {
+  DELIVER_EVENT_TYPE_UNSPECIFIED = 0;
+  DELIVER_EVENT_TYPE_ACCEPTED = 1;
+  DELIVER_EVENT_TYPE_WORKING = 2;
+  DELIVER_EVENT_TYPE_TURN_DONE = 3;
+  DELIVER_EVENT_TYPE_ERROR = 4;
+}
+
+message DeliverEvent {
+  DeliverEventType type = 1;
+  string message = 2;
+  // For ERROR: true if caused by us (the turn is not charged).
+  bool platform_fault = 3;
+  int64 at_unix_ms = 4;
+}
+
+message TouchRequest { string user_id = 1; }
+message TouchResponse {}
+
+message StopSandboxRequest {
+  string user_id = 1;
+  bool force = 2;
+  string reason = 3;
+}
+message StopSandboxResponse { Sandbox sandbox = 1; }
+
+message DeleteSandboxRequest { string user_id = 1; }
+message DeleteSandboxResponse {}
+
+message GetSandboxRequest { string user_id = 1; }
+
+message ListSandboxesRequest {
+  // Empty = all states.
+  repeated SandboxState states = 1;
+}
+message ListSandboxesResponse { repeated Sandbox sandboxes = 1; }
+
+message GetUsageRequest {
+  int64 since_unix_ms = 1;
+  int64 until_unix_ms = 2;
+  // Empty = all users.
+  string user_id = 3;
+}
+
+message UserUsage {
+  string user_id = 1;
+  int64 awake_seconds = 2;
+  int64 browser_seconds = 3;
+}
+
+message GetUsageResponse { repeated UserUsage usage = 1; }
+
+message SetEgressAllowlistRequest {
+  string user_id = 1;
+  repeated string domains = 2;
+  // Written into the Hermes config; applied on the next wake.
+  repeated UserMcpServer mcp_servers = 3;
+}
+message SetEgressAllowlistResponse {}
+
+message SnapshotVolumeRequest {
+  string user_id = 1;
+  // Directory (or bucket key prefix) where the archive is written.
+  string destination = 2;
+}
+message SnapshotVolumeResponse {
+  string location = 1;
+  int64 size_bytes = 2;
+}
