@@ -1,0 +1,5 @@
+.git
+agent-image
+*.md
+.env
+.env.*
