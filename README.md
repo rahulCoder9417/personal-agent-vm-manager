@@ -6,6 +6,7 @@ it, records awake time for billing, and writes each container's egress allowlist
 The backend calls it over gRPC (`proto/vm/v1/vm.proto`, the source of truth).
 
 Design: `../beckend/docs/mvp-hld.md` sections 0.5, 0.6, 1.2, 4, 6, 8, 9 (Phase 2).
+What was built vs the design: `docs/build-report.md`.
 
 ## Layout
 
