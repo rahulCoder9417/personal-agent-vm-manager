@@ -7,13 +7,13 @@ import (
 	"io"
 	"time"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
-	"github.com/docker/docker/errdefs"
 )
 
 // Client is the real Engine backed by the Docker Engine SDK.
@@ -39,7 +39,7 @@ func NewClient(ctx context.Context) (*Client, error) {
 func (c *Client) Close() error { return c.api.Close() }
 
 func notFound(err error) error {
-	if errdefs.IsNotFound(err) {
+	if cerrdefs.IsNotFound(err) {
 		return ErrNotFound
 	}
 	return err
@@ -87,7 +87,7 @@ func BuildConfigs(spec ContainerSpec) (*container.Config, *container.HostConfig,
 func (c *Client) EnsureVolume(ctx context.Context, name, driver string, opts, labels map[string]string) error {
 	if _, err := c.api.VolumeInspect(ctx, name); err == nil {
 		return nil
-	} else if !errdefs.IsNotFound(err) {
+	} else if !cerrdefs.IsNotFound(err) {
 		return fmt.Errorf("inspect volume %s: %w", name, err)
 	}
 	_, err := c.api.VolumeCreate(ctx, volume.CreateOptions{Name: name, Driver: driver, DriverOpts: opts, Labels: labels})
@@ -99,7 +99,7 @@ func (c *Client) EnsureVolume(ctx context.Context, name, driver string, opts, la
 
 // RemoveVolume implements Engine.
 func (c *Client) RemoveVolume(ctx context.Context, name string) error {
-	if err := c.api.VolumeRemove(ctx, name, true); err != nil && !errdefs.IsNotFound(err) {
+	if err := c.api.VolumeRemove(ctx, name, true); err != nil && !cerrdefs.IsNotFound(err) {
 		return fmt.Errorf("remove volume %s: %w", name, err)
 	}
 	return nil
@@ -133,7 +133,7 @@ func (c *Client) StopContainer(ctx context.Context, id string, timeout time.Dura
 		opts.Timeout = &zero
 	}
 	if err := c.api.ContainerStop(ctx, id, opts); err != nil {
-		if errdefs.IsNotFound(err) {
+		if cerrdefs.IsNotFound(err) {
 			return ErrNotFound
 		}
 		return fmt.Errorf("stop container: %w", err)
@@ -144,7 +144,7 @@ func (c *Client) StopContainer(ctx context.Context, id string, timeout time.Dura
 // RemoveContainer implements Engine.
 func (c *Client) RemoveContainer(ctx context.Context, id string) error {
 	err := c.api.ContainerRemove(ctx, id, container.RemoveOptions{Force: true, RemoveVolumes: false})
-	if err != nil && !errdefs.IsNotFound(err) {
+	if err != nil && !cerrdefs.IsNotFound(err) {
 		return fmt.Errorf("remove container: %w", err)
 	}
 	return nil
@@ -237,7 +237,7 @@ func (c *Client) MemoryUsage(ctx context.Context, id string) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("stats: %w", notFound(err))
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var s container.StatsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&s); err != nil {
 		return 0, fmt.Errorf("decode stats: %w", err)

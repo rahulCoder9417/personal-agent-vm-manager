@@ -92,7 +92,7 @@ func (c *Client) Health(ctx context.Context, addr string) (Health, error) {
 	if err != nil {
 		return Health{}, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		return Health{}, fmt.Errorf("bridge healthz: status %d", resp.StatusCode)
@@ -115,7 +115,7 @@ func (c *Client) Shutdown(ctx context.Context, addr, secret string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 	switch resp.StatusCode {
 	case http.StatusOK:
@@ -158,7 +158,7 @@ func (c *Client) Deliver(ctx context.Context, addr, secret string, body DeliverR
 	}
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 			return nil, ErrUnauthorized
 		}

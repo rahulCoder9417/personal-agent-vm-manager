@@ -31,7 +31,7 @@ func TestDeliverStreamsNDJSON(t *testing.T) {
 		for _, line := range []string{
 			`{"type":"accepted"}`, ``, `{"type":"working","message":"using tool"}`, `{"type":"turn_done"}`,
 		} {
-			fmt.Fprintln(w, line)
+			_, _ = fmt.Fprintln(w, line)
 			fl.Flush()
 		}
 	}))
@@ -42,7 +42,7 @@ func TestDeliverStreamsNDJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	var types []string
 	for {
 		ev, err := st.Next()
@@ -71,7 +71,7 @@ func TestHealthAndShutdown(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/healthz":
-			fmt.Fprint(w, `{"ok":true,"busy":2}`)
+			_, _ = fmt.Fprint(w, `{"ok":true,"busy":2}`)
 		case "/shutdown":
 			if r.Header.Get(SecretHeader) != "s3cret" {
 				w.WriteHeader(http.StatusUnauthorized)

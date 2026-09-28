@@ -55,7 +55,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	defer eng.Close()
+	defer func() { _ = eng.Close() }()
 
 	eg := egress.NewWriter(cfg.EgressAllowlistDir, cfg.EgressProxyContainer, eng, cfg.EgressReloadMinInterval, log)
 	if err := eg.Init(); err != nil {

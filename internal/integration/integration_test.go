@@ -151,7 +151,7 @@ func TestIdleStopAndWakeKeepsMemory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hermes home missing after wake: %v", err)
 	}
-	rc.Close()
+	_ = rc.Close()
 	deliver(t, e.m, uid, "it-2", "What is my favourite colour?") // check the reply in the channel / api logs
 }
 

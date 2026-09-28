@@ -185,23 +185,23 @@ func (m *Manager) Snapshot(ctx context.Context, userID, destination string) (str
 	if err != nil {
 		return "", 0, err
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 	tmp, err := os.CreateTemp(dest, ".tmp-"+name+"-*")
 	if err != nil {
 		return "", 0, fmt.Errorf("snapshot: %w", err)
 	}
-	defer os.Remove(tmp.Name())
+	defer func() { _ = os.Remove(tmp.Name()) }() // no-op after the rename
 	gz := gzip.NewWriter(tmp)
 	if _, err := io.Copy(gz, rc); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return "", 0, fmt.Errorf("snapshot copy: %w", err)
 	}
 	if err := gz.Close(); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return "", 0, err
 	}
 	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return "", 0, err
 	}
 	if err := tmp.Close(); err != nil {

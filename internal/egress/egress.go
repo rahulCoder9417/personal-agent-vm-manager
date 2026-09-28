@@ -236,13 +236,13 @@ func (w *Writer) writeIfChanged(name, content string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("write allowlist: %w", err)
 	}
-	defer os.Remove(tmp.Name())
+	defer func() { _ = os.Remove(tmp.Name()) }() // no-op after the rename
 	if _, err := tmp.WriteString(content); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return false, fmt.Errorf("write allowlist: %w", err)
 	}
 	if err := tmp.Chmod(0o644); err != nil { // squid runs as its own user and must read it
-		tmp.Close()
+		_ = tmp.Close()
 		return false, err
 	}
 	if err := tmp.Close(); err != nil {

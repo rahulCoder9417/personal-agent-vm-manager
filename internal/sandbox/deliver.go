@@ -140,7 +140,7 @@ func (m *Manager) relay(parent context.Context, sb store.Sandbox, body bridge.De
 		emit(bridge.EventError, "could not reach the agent", true)
 		return
 	}
-	defer stream.Close()
+	defer func() { _ = stream.Close() }()
 
 	for {
 		ev, err := stream.Next()

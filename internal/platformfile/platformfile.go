@@ -99,7 +99,7 @@ func Read(ctx context.Context, eng docker.Engine, containerID string) (File, err
 	if err != nil {
 		return File{}, fmt.Errorf("read platform file: %w", err)
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 	tr := tar.NewReader(rc)
 	for {
 		h, err := tr.Next()

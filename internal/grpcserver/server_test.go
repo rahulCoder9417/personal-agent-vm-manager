@@ -72,7 +72,7 @@ func newHarness(t *testing.T, awakeCap int) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { conn.Close() })
+	t.Cleanup(func() { _ = conn.Close() })
 	return &harness{client: vmv1.NewVmManagerClient(conn), br: br, eng: eng, clk: clk}
 }
 
