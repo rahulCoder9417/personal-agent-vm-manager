@@ -141,6 +141,12 @@ func (m *Manager) HealthOnce(ctx context.Context) {
 				m.log.Warn("restart after failed health check did not help", "user_id", cur.UserID, "err", err)
 				if restarts >= m.cfg.HealthMaxRestarts {
 					m.markBroken(rctx, cur, "restart failed")
+					return
+				}
+				// Don't leave it "awake" with a dead container (and an open, billed awake
+				// period): stop it; the next wake retries and re-creates if needed.
+				if err := m.stopLocked(rctx, cur, true, "restart failed", store.StateStopped); err != nil {
+					m.log.Error("stopping sandbox after failed restart failed", "user_id", cur.UserID, "err", err)
 				}
 			}
 		}()

@@ -241,6 +241,23 @@ func TestHealthCheckerRestartsThenMarksBroken(t *testing.T) {
 	}
 }
 
+func TestHealthCheckerFailedRestartStopsAndClosesPeriod(t *testing.T) {
+	e := newEnv(t, func(c *config.Config) { c.HealthFailuresBeforeRestart = 1; c.HealthMaxRestarts = 3 })
+	e.create(t, "u1")
+	e.wake(t, "u1")
+	e.br.SetUnhealthy("u1", true) // stays unhealthy after the restart too
+	e.m.HealthOnce(context.Background())
+	if e.state(t, "u1") != store.StateStopped || e.eng.RunningCount() != 0 {
+		t.Fatalf("failed restart: state=%s running=%d", e.state(t, "u1"), e.eng.RunningCount())
+	}
+	u1, _ := e.m.Usage(context.Background(), "u1", t0, t0.Add(time.Hour))
+	e.clk.Advance(time.Hour)
+	u2, _ := e.m.Usage(context.Background(), "u1", t0, t0.Add(2*time.Hour))
+	if u1[0].AwakeSeconds != u2[0].AwakeSeconds {
+		t.Fatal("awake period must be closed after a failed restart")
+	}
+}
+
 func TestHealthCheckerSkipsBusy(t *testing.T) {
 	e := newEnv(t, func(c *config.Config) { c.HealthFailuresBeforeRestart = 1 })
 	sb, _ := e.create(t, "u1")
