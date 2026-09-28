@@ -59,12 +59,13 @@ Go (latest stable) · gRPC + protobuf generated with **buf** · Docker Engine Go
 
 ## Commands
 
-Fill these in when the project is set up:
-
-- Generate: `buf generate`
-- Lint / vet / test: `golangci-lint run && go vet ./... && go test ./...`
-- Integration tests (needs Docker + runsc): `go test -tags=integration ./...`
-- Build agent image: `docker build -t agent:dev agent-image/`
+- Generate (needs `protoc-gen-go` + `protoc-gen-go-grpc` on PATH, e.g. `go install google.golang.org/protobuf/cmd/protoc-gen-go@latest google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest`): `go run github.com/bufbuild/buf/cmd/buf@latest generate` (fallback: `protoc -I proto --go_out=gen --go_opt=paths=source_relative --go-grpc_out=gen --go-grpc_opt=paths=source_relative proto/vm/v1/vm.proto`)
+- Lint: `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest run ./...` (add `--build-tags=integration` to include the integration tests)
+- Vet / test: `go vet ./... && go test ./...` (race: `go test -race ./...`; store tests start embedded Postgres, or set `VM_TEST_DATABASE_URL`; skip with `VM_TEST_SKIP_POSTGRES=1`)
+- Integration tests (needs Docker + runsc + the backend's infra stack + `IT_LITELLM_KEY`): `go test -tags=integration -v -timeout 30m ./internal/integration/`
+- Bridge tests: `cd agent-image && python3 -m unittest discover -s tests -t .`
+- Build images: `docker build -t personal-agent/vm-manager:dev .` and `docker build -t personal-agent/agent:dev agent-image/`
+- Measure RAM of an awake container: `docker stats --no-stream pa-sbx-<user_id>`
 
 ## Paths
 
