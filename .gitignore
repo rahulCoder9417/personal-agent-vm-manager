@@ -1,0 +1,26 @@
+# Binaries
+/bin/
+/vm-manager
+*.exe
+*.test
+*.out
+coverage.*
+
+# Local env
+.env
+.env.*
+!.env.example
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Python (agent-image)
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# embedded-postgres test cache
+.embedded-postgres/
