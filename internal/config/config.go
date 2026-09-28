@@ -26,15 +26,15 @@ type Config struct {
 	AgentImageVersion string // AGENT_IMAGE_VERSION (default = AGENT_IMAGE); change it to roll out a new image.
 
 	// Container spec
-	SandboxNetwork  string            // SANDBOX_NETWORK (default "personal-agent_sandbox")
-	Runtime         string            // SANDBOX_RUNTIME (default "runsc" = gVisor)
-	MemoryBytes     int64             // SANDBOX_MEMORY_MB (default 600)
-	NanoCPUs        int64             // SANDBOX_CPUS (default 1.0)
-	PidsLimit       int64             // SANDBOX_PIDS_LIMIT (default 256)
-	VolumeDriver    string            // SANDBOX_VOLUME_DRIVER (default "local")
-	VolumeOpts      map[string]string // SANDBOX_VOLUME_OPTS ("k=v,k=v"; e.g. a size quota for a driver that supports it)
-	AgentUID        int               // SANDBOX_AGENT_UID (default 10001): owner of files written into /data
-	BridgePort      int               // BRIDGE_PORT (default 8765)
+	SandboxNetwork string            // SANDBOX_NETWORK (default "personal-agent_sandbox")
+	Runtime        string            // SANDBOX_RUNTIME (default "runsc" = gVisor)
+	MemoryBytes    int64             // SANDBOX_MEMORY_MB (default 600)
+	NanoCPUs       int64             // SANDBOX_CPUS (default 1.0)
+	PidsLimit      int64             // SANDBOX_PIDS_LIMIT (default 256)
+	VolumeDriver   string            // SANDBOX_VOLUME_DRIVER (default "local")
+	VolumeOpts     map[string]string // SANDBOX_VOLUME_OPTS ("k=v,k=v"; e.g. a size quota for a driver that supports it)
+	AgentUID       int               // SANDBOX_AGENT_UID (default 10001): owner of files written into /data
+	BridgePort     int               // BRIDGE_PORT (default 8765)
 
 	// Where the container talks to (all through the egress proxy)
 	LiteLLMBaseURL string // LITELLM_BASE_URL (default "http://litellm:4000")
@@ -43,8 +43,8 @@ type Config struct {
 	EgressProxyURL string // EGRESS_PROXY_URL (default "http://172.30.0.2:3128"): HTTP(S)_PROXY in containers
 
 	// Egress allowlists (Squid)
-	EgressAllowlistDir     string        // EGRESS_ALLOWLIST_DIR (default "/allowlists")
-	EgressProxyContainer   string        // EGRESS_PROXY_CONTAINER (default "egress-proxy"): gets SIGHUP after a change
+	EgressAllowlistDir      string        // EGRESS_ALLOWLIST_DIR (default "/allowlists")
+	EgressProxyContainer    string        // EGRESS_PROXY_CONTAINER (default "egress-proxy"): gets SIGHUP after a change
 	EgressReloadMinInterval time.Duration // EGRESS_RELOAD_MIN_INTERVAL (default 1s): coalesces SIGHUPs
 
 	// Capacity and loops
