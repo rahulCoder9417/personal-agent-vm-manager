@@ -36,7 +36,7 @@ func TestIdleReaperStopsAfterThreeMinutesAndWakeKeepsMemory(t *testing.T) {
 	if e.state(t, "u1") != store.StateStopped {
 		t.Fatal("must stop after 3 idle minutes")
 	}
-	if e.br.shutdownCount() != 1 {
+	if e.br.ShutdownCount() != 1 {
 		t.Fatal("idle stop must be polite (/shutdown first)")
 	}
 	c, _ := e.eng.Get(sb.ContainerID)
@@ -80,7 +80,7 @@ func TestTouchPostponesIdleStop(t *testing.T) {
 func TestReaperNeverStopsMidTurn(t *testing.T) {
 	e := newEnv(t)
 	e.create(t, "u1")
-	e.br.block = make(chan struct{})
+	e.br.Block = make(chan struct{})
 	done := make(chan struct{})
 	go func() { _, _ = collect(t, e.m, deliverReq("u1", "long")); close(done) }()
 	waitFor(t, func() bool { return e.state(t, "u1") == store.StateBusy })
@@ -89,13 +89,11 @@ func TestReaperNeverStopsMidTurn(t *testing.T) {
 	if e.state(t, "u1") != store.StateBusy || e.eng.RunningCount() != 1 {
 		t.Fatal("reaper stopped a busy sandbox")
 	}
-	close(e.br.block)
+	close(e.br.Block)
 	<-done
 
 	// Awake in the table, but the Bridge says Hermes is still working (e.g. after a vm-manager restart).
-	e.br.mu.Lock()
-	e.br.busy["u1"] = 1
-	e.br.mu.Unlock()
+	e.br.SetBusy("u1", 1)
 	e.clk.Advance(10 * time.Minute)
 	e.m.ReapOnce(context.Background())
 	if e.state(t, "u1") != store.StateAwake {
@@ -118,7 +116,7 @@ func TestCapacityGuardEvictsLongestIdleLowestPriority(t *testing.T) {
 	if e.state(t, "old") != store.StateStopped || e.state(t, "newer") != store.StateAwake || e.eng.RunningCount() != 2 {
 		t.Fatalf("longest idle must be evicted: old=%s newer=%s running=%d", e.state(t, "old"), e.state(t, "newer"), e.eng.RunningCount())
 	}
-	if e.br.shutdownCount() != 1 {
+	if e.br.ShutdownCount() != 1 {
 		t.Fatal("eviction must be polite")
 	}
 
@@ -141,7 +139,7 @@ func TestCapacityGuardNothingEvictable(t *testing.T) {
 	e := newEnv(t, func(c *config.Config) { c.AwakeCap = 1 })
 	e.create(t, "a")
 	e.create(t, "b")
-	e.br.block = make(chan struct{})
+	e.br.Block = make(chan struct{})
 	done := make(chan struct{})
 	go func() { _, _ = collect(t, e.m, deliverReq("a", "d1")); close(done) }()
 	waitFor(t, func() bool { return e.state(t, "a") == store.StateBusy })
@@ -152,7 +150,7 @@ func TestCapacityGuardNothingEvictable(t *testing.T) {
 	if e.state(t, "b") != store.StateStopped || e.state(t, "a") != store.StateBusy {
 		t.Fatal("a failed wake must leave both untouched")
 	}
-	close(e.br.block)
+	close(e.br.Block)
 	<-done
 	// Now a is idle-awake and can be evicted.
 	e.wake(t, "b")
@@ -218,12 +216,12 @@ func TestHealthCheckerRestartsThenMarksBroken(t *testing.T) {
 		t.Fatal("healthy container must not restart")
 	}
 	// Bridge stops answering, then recovers after the restart.
-	e.br.setUnhealthy("u1", true)
+	e.br.SetUnhealthy("u1", true)
 	e.m.HealthOnce(context.Background()) // 1st failure
 	if starts() != 1 {
 		t.Fatal("one failure is not enough to restart")
 	}
-	e.eng.OnStart = func(docker.Container) { e.br.setUnhealthy("u1", false) }
+	e.eng.OnStart = func(docker.Container) { e.br.SetUnhealthy("u1", false) }
 	e.m.HealthOnce(context.Background()) // 2nd failure -> restart
 	if starts() != 2 || e.state(t, "u1") != store.StateAwake {
 		t.Fatalf("restart expected: starts=%d state=%s", starts(), e.state(t, "u1"))
@@ -231,7 +229,7 @@ func TestHealthCheckerRestartsThenMarksBroken(t *testing.T) {
 	e.eng.OnStart = nil
 
 	// Keeps failing: restart budget exhausted -> broken.
-	e.br.setUnhealthy("u1", true)
+	e.br.SetUnhealthy("u1", true)
 	e.m.HealthOnce(context.Background())
 	e.m.HealthOnce(context.Background()) // restart #2 > max 1 -> broken
 	if e.state(t, "u1") != store.StateBroken {
@@ -246,16 +244,16 @@ func TestHealthCheckerRestartsThenMarksBroken(t *testing.T) {
 func TestHealthCheckerSkipsBusy(t *testing.T) {
 	e := newEnv(t, func(c *config.Config) { c.HealthFailuresBeforeRestart = 1 })
 	sb, _ := e.create(t, "u1")
-	e.br.block = make(chan struct{})
+	e.br.Block = make(chan struct{})
 	done := make(chan struct{})
 	go func() { _, _ = collect(t, e.m, deliverReq("u1", "d1")); close(done) }()
 	waitFor(t, func() bool { return e.state(t, "u1") == store.StateBusy })
-	e.br.setUnhealthy("u1", true)
+	e.br.SetUnhealthy("u1", true)
 	e.m.HealthOnce(context.Background())
 	if c, _ := e.eng.Get(sb.ContainerID); c.Starts != 1 {
 		t.Fatal("must not restart mid-turn")
 	}
-	close(e.br.block)
+	close(e.br.Block)
 	<-done
 }
 

@@ -106,7 +106,7 @@ func TestCreateWakeDeliverHello(t *testing.T) {
 	}
 
 	var midState store.State
-	e.br.onEvent = func(uid string, ev bridge.Event) {
+	e.br.OnEvent = func(uid string, ev bridge.Event) {
 		if ev.Type == "working" {
 			midState = e.state(t, uid)
 		}
@@ -124,8 +124,8 @@ func TestCreateWakeDeliverHello(t *testing.T) {
 	if e.state(t, "u1") != store.StateAwake || e.m.inflightCount("u1") != 0 {
 		t.Fatal("after turn_done: awake and nothing in flight")
 	}
-	if len(e.br.delivered) != 1 || e.br.delivered[0].DeliveryID != "evt-1" || e.br.delivered[0].Text != "hello" {
-		t.Fatalf("bridge got: %+v", e.br.delivered)
+	if len(e.br.Delivered()) != 1 || e.br.Delivered()[0].DeliveryID != "evt-1" || e.br.Delivered()[0].Text != "hello" {
+		t.Fatalf("bridge got: %+v", e.br.Delivered())
 	}
 }
 
@@ -157,7 +157,7 @@ func TestDeliverValidationAndNotFound(t *testing.T) {
 func TestDeliverRelaysBridgeErrorAndBrokenStream(t *testing.T) {
 	e := newEnv(t)
 	e.create(t, "u1")
-	e.br.script = func(string, bridge.DeliverRequest) []bridge.Event {
+	e.br.Script = func(string, bridge.DeliverRequest) []bridge.Event {
 		return []bridge.Event{{Type: "accepted"}, {Type: "error", Message: "model refused", PlatformFault: false}}
 	}
 	evs, _ := collect(t, e.m, deliverReq("u1", "d1"))
@@ -168,7 +168,7 @@ func TestDeliverRelaysBridgeErrorAndBrokenStream(t *testing.T) {
 		t.Fatal("error ends the turn: awake")
 	}
 	// Stream closes without turn_done -> platform fault.
-	e.br.script = func(string, bridge.DeliverRequest) []bridge.Event {
+	e.br.Script = func(string, bridge.DeliverRequest) []bridge.Event {
 		return []bridge.Event{{Type: "accepted"}, {Type: "working"}}
 	}
 	evs, _ = collect(t, e.m, deliverReq("u1", "d2"))
@@ -181,7 +181,7 @@ func TestDeliverRelaysBridgeErrorAndBrokenStream(t *testing.T) {
 func TestDeliverTimeoutForceStops(t *testing.T) {
 	e := newEnv(t)
 	sb, _ := e.create(t, "u1")
-	e.br.block = make(chan struct{}) // never released
+	e.br.Block = make(chan struct{}) // never released
 	req := deliverReq("u1", "slow")
 	req.Timeout = 50 * time.Millisecond
 	evs, err := collect(t, e.m, req)
@@ -199,7 +199,7 @@ func TestDeliverTimeoutForceStops(t *testing.T) {
 	if c.Running || !slices.Contains(e.eng.Stops, ids.ContainerName("u1")+":0s") {
 		t.Fatalf("container must be force-stopped (timeout 0): stops=%v", e.eng.Stops)
 	}
-	if e.br.shutdownCount() != 0 {
+	if e.br.ShutdownCount() != 0 {
 		t.Fatal("a forced stop must not wait for a polite shutdown")
 	}
 }
@@ -208,7 +208,7 @@ func TestDeliverTimeoutForceStops(t *testing.T) {
 func TestDeliverContinuesWhenCallerGoesAway(t *testing.T) {
 	e := newEnv(t)
 	e.create(t, "u1")
-	e.br.block = make(chan struct{})
+	e.br.Block = make(chan struct{})
 	gone := errors.New("client gone")
 	err := e.m.Deliver(context.Background(), deliverReq("u1", "d1"), func(ev Event) error { return gone })
 	if !errors.Is(err, gone) {
@@ -217,7 +217,7 @@ func TestDeliverContinuesWhenCallerGoesAway(t *testing.T) {
 	if e.m.inflightCount("u1") != 1 {
 		t.Fatal("the turn must still be tracked")
 	}
-	close(e.br.block)
+	close(e.br.Block)
 	waitFor(t, func() bool { return e.m.inflightCount("u1") == 0 && e.state(t, "u1") == store.StateAwake })
 }
 
@@ -225,20 +225,20 @@ func TestStopRules(t *testing.T) {
 	e := newEnv(t)
 	e.create(t, "u1")
 	e.wake(t, "u1")
-	e.br.block = make(chan struct{})
+	e.br.Block = make(chan struct{})
 	done := make(chan struct{})
 	go func() { _, _ = collect(t, e.m, deliverReq("u1", "d1")); close(done) }()
 	waitFor(t, func() bool { return e.state(t, "u1") == store.StateBusy })
 	if _, err := e.m.Stop(context.Background(), "u1", false, "test"); !errors.Is(err, ErrBusy) {
 		t.Fatalf("polite stop mid-turn must be refused, got %v", err)
 	}
-	close(e.br.block)
+	close(e.br.Block)
 	<-done
 	sb, err := e.m.Stop(context.Background(), "u1", false, "test")
 	if err != nil || sb.State != store.StateStopped {
 		t.Fatalf("stop: %+v %v", sb, err)
 	}
-	if e.br.shutdownCount() != 1 {
+	if e.br.ShutdownCount() != 1 {
 		t.Fatal("polite stop must call /shutdown first")
 	}
 	if _, err := os.Stat(filepath.Join(e.dir, "u1.conf")); !os.IsNotExist(err) {
@@ -332,7 +332,7 @@ func TestWakeRetriesThenRecreatesThenBroken(t *testing.T) {
 func TestWakeUnhealthyBridgeMarksBroken(t *testing.T) {
 	e := newEnv(t)
 	e.create(t, "u1")
-	e.br.setUnhealthy("u1", true)
+	e.br.SetUnhealthy("u1", true)
 	if _, _, err := e.m.Wake(context.Background(), "u1", 0); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("want ErrUnavailable, got %v", err)
 	}

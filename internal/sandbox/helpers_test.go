@@ -2,11 +2,9 @@ package sandbox
 
 import (
 	"context"
-	"errors"
 	"io"
 	"log/slog"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -15,151 +13,17 @@ import (
 	"github.com/personal-agent/vm-manager/internal/config"
 	"github.com/personal-agent/vm-manager/internal/docker"
 	"github.com/personal-agent/vm-manager/internal/egress"
-	"github.com/personal-agent/vm-manager/internal/platformfile"
+	"github.com/personal-agent/vm-manager/internal/sandbox/sandboxtest"
 	"github.com/personal-agent/vm-manager/internal/store"
 )
 
 var t0 = time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 
-// fakeBridge answers like the Bridge in each fake container, found by IP.
-type fakeBridge struct {
-	eng *docker.Fake
-
-	mu        sync.Mutex
-	unhealthy map[string]bool // user -> /healthz fails
-	busy      map[string]int  // user -> busy count reported by /healthz
-	shutdowns []string        // users
-	delivered []bridge.DeliverRequest
-	// script returns the events for a delivery; block (if set) is waited on before the last event.
-	script func(userID string, req bridge.DeliverRequest) []bridge.Event
-	block  chan struct{}
-	// onEvent runs after each event is handed out (lets tests look at state mid-turn).
-	onEvent func(userID string, ev bridge.Event)
-}
-
-func newFakeBridge(eng *docker.Fake) *fakeBridge {
-	return &fakeBridge{eng: eng, unhealthy: map[string]bool{}, busy: map[string]int{}}
-}
-
-func (b *fakeBridge) containerFor(addr string) (docker.Container, bool) {
-	ip := addr[:strings.LastIndex(addr, ":")]
-	list, _ := b.eng.ListContainers(context.Background(), nil)
-	for _, c := range list {
-		for _, cip := range c.IPs {
-			if cip == ip && c.Running {
-				return c, true
-			}
-		}
-	}
-	return docker.Container{}, false
-}
-
-func (b *fakeBridge) checkSecret(c docker.Container, secret string) error {
-	f, err := platformfile.Read(context.Background(), b.eng, c.ID)
-	if err != nil {
-		return err
-	}
-	if f.BridgeSecret != secret {
-		return bridge.ErrUnauthorized
-	}
-	return nil
-}
-
-func (b *fakeBridge) Health(_ context.Context, addr string) (bridge.Health, error) {
-	c, ok := b.containerFor(addr)
-	if !ok {
-		return bridge.Health{}, errors.New("connection refused")
-	}
-	uid := c.Labels[LabelUserID]
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.unhealthy[uid] {
-		return bridge.Health{}, errors.New("healthz: 503")
-	}
-	return bridge.Health{OK: true, Busy: b.busy[uid]}, nil
-}
-
-func (b *fakeBridge) Shutdown(_ context.Context, addr, secret string) error {
-	c, ok := b.containerFor(addr)
-	if !ok {
-		return errors.New("connection refused")
-	}
-	if err := b.checkSecret(c, secret); err != nil {
-		return err
-	}
-	b.mu.Lock()
-	b.shutdowns = append(b.shutdowns, c.Labels[LabelUserID])
-	b.mu.Unlock()
-	return nil
-}
-
-type sliceStream struct {
-	b      *fakeBridge
-	userID string
-	ctx    context.Context
-	events []bridge.Event
-	block  chan struct{}
-	i      int
-}
-
-func (s *sliceStream) Next() (bridge.Event, error) {
-	if s.i >= len(s.events) {
-		return bridge.Event{}, io.EOF
-	}
-	if s.block != nil && s.i == len(s.events)-1 {
-		select {
-		case <-s.block:
-		case <-s.ctx.Done():
-			return bridge.Event{}, s.ctx.Err()
-		}
-	}
-	ev := s.events[s.i]
-	s.i++
-	if s.b.onEvent != nil {
-		s.b.onEvent(s.userID, ev)
-	}
-	return ev, nil
-}
-
-func (s *sliceStream) Close() error { return nil }
-
-func (b *fakeBridge) Deliver(ctx context.Context, addr, secret string, req bridge.DeliverRequest) (bridge.EventStream, error) {
-	c, ok := b.containerFor(addr)
-	if !ok {
-		return nil, errors.New("connection refused")
-	}
-	if err := b.checkSecret(c, secret); err != nil {
-		return nil, err
-	}
-	uid := c.Labels[LabelUserID]
-	b.mu.Lock()
-	b.delivered = append(b.delivered, req)
-	script, block := b.script, b.block
-	b.mu.Unlock()
-	events := []bridge.Event{{Type: "accepted"}, {Type: "working", Message: "thinking"}, {Type: "turn_done"}}
-	if script != nil {
-		events = script(uid, req)
-	}
-	return &sliceStream{b: b, userID: uid, ctx: ctx, events: events, block: block}, nil
-}
-
-func (b *fakeBridge) setUnhealthy(uid string, v bool) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.unhealthy[uid] = v
-}
-
-func (b *fakeBridge) shutdownCount() int {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return len(b.shutdowns)
-}
-
 type testEnv struct {
 	m   *Manager
 	st  *store.Memory
 	eng *docker.Fake
-	br  *fakeBridge
+	br  *sandboxtest.FakeBridge
 	eg  *egress.Writer
 	clk *clock.Fake
 	cfg *config.Config
@@ -194,7 +58,7 @@ func newEnv(t *testing.T, mutate ...func(*config.Config)) *testEnv {
 		fn(cfg)
 	}
 	eng := docker.NewFake()
-	br := newFakeBridge(eng)
+	br := sandboxtest.NewFakeBridge(eng)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	eg := egress.NewWriter(cfg.EgressAllowlistDir, cfg.EgressProxyContainer, eng, 0, log)
 	if err := eg.Init(); err != nil {
