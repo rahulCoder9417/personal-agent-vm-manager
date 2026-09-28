@@ -205,7 +205,10 @@ func (c *Client) ListContainers(ctx context.Context, labels map[string]string) (
 
 // CopyTo implements Engine.
 func (c *Client) CopyTo(ctx context.Context, id, dir string, tarStream io.Reader) error {
-	if err := c.api.CopyToContainer(ctx, id, dir, tarStream, container.CopyToContainerOptions{}); err != nil {
+	// CopyUIDGID makes the daemon chown extracted files to the container's configured user
+	// (the non-root agent uid) instead of root.
+	opts := container.CopyToContainerOptions{CopyUIDGID: true}
+	if err := c.api.CopyToContainer(ctx, id, dir, tarStream, opts); err != nil {
 		return fmt.Errorf("copy to container: %w", notFound(err))
 	}
 	return nil
