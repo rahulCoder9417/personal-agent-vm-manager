@@ -127,8 +127,14 @@ func (c *Client) Shutdown(ctx context.Context, addr, secret string) error {
 	}
 }
 
+// EventStream yields Deliver events until io.EOF.
+type EventStream interface {
+	Next() (Event, error)
+	Close() error
+}
+
 // Deliver calls POST /deliver and returns the NDJSON event stream.
-func (c *Client) Deliver(ctx context.Context, addr, secret string, body DeliverRequest) (*Stream, error) {
+func (c *Client) Deliver(ctx context.Context, addr, secret string, body DeliverRequest) (EventStream, error) {
 	if body.Attachments == nil {
 		body.Attachments = []Attachment{}
 	}
