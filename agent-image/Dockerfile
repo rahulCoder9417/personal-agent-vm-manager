@@ -21,11 +21,20 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 RUN python -m venv /opt/venv
 ENV PATH=/opt/venv/bin:$PATH
+# Hermes no longer builds wheels (its setup.py refuses outside Nix: the wheel would miss the
+# bundled skills, locales and plugin manifests). It supports a source checkout with an editable
+# install, so: the pinned source tree at /opt/hermes (read-only at runtime) + `pip install -e`.
 # [mcp] = MCP client for the Platform MCP and user servers; aiohttp = the API server platform.
-RUN pip install "hermes-agent[mcp] @ git+https://github.com/NousResearch/hermes-agent@${HERMES_REF}" "aiohttp==3.14.3"
+RUN git init -q /opt/hermes \
+ && git -C /opt/hermes fetch -q --depth 1 https://github.com/NousResearch/hermes-agent "${HERMES_REF}" \
+ && git -C /opt/hermes checkout -q FETCH_HEAD \
+ && rm -rf /opt/hermes/.git
+RUN pip install -e "/opt/hermes[mcp]" "aiohttp==3.14.3"
 COPY bridge /opt/bridge/bridge
 # Precompile so nothing needs to write .pyc files at runtime (read-only rootfs).
-RUN python -m compileall -q /opt/venv /opt/bridge
+# (Hermes's tree also holds skill/template files that aren't importable modules: best effort.)
+RUN python -m compileall -q /opt/venv /opt/bridge \
+ && (python -m compileall -q /opt/hermes >/dev/null || true)
 
 FROM ${PYTHON_IMAGE} AS claude
 # Pin Claude Code to an exact release; bump deliberately (code.claude.com/docs/en/setup).
@@ -63,6 +72,7 @@ RUN apt-get update \
  && chmod 0700 /data
 COPY --from=build /opt/venv /opt/venv
 COPY --from=build /opt/bridge /opt/bridge
+COPY --from=build /opt/hermes /opt/hermes
 # The installed release tree as published (launcher symlink + versions/<version>), unmodified.
 COPY --from=claude /opt/claude/.local /opt/claude/.local
 RUN ln -s /opt/claude/.local/bin/claude /usr/local/bin/claude
