@@ -31,6 +31,11 @@ var (
 	ErrCapacity    = errors.New("awake cap reached")          // RESOURCE_EXHAUSTED (retryable)
 	ErrBusy        = errors.New("sandbox is in a turn")       // FAILED_PRECONDITION
 	ErrUnavailable = errors.New("sandbox could not be woken") // UNAVAILABLE
+	// ErrLoginNotFound: no pending Claude sign-in with that id (unknown, expired, already used,
+	// or the sandbox stopped since). FAILED_PRECONDITION: start a new sign-in.
+	ErrLoginNotFound = errors.New("claude sign-in not found or expired")
+	// ErrAgentUnavailable: the Bridge (or Claude Code in it) could not be reached. UNAVAILABLE.
+	ErrAgentUnavailable = errors.New("the agent could not be reached")
 )
 
 func invalid(format string, args ...any) error {
@@ -56,6 +61,9 @@ type BridgeAPI interface {
 	Health(ctx context.Context, addr string) (bridge.Health, error)
 	Shutdown(ctx context.Context, addr, secret string) error
 	Deliver(ctx context.Context, addr, secret string, req bridge.DeliverRequest) (bridge.EventStream, error)
+	ClaudeLoginStart(ctx context.Context, addr, secret string) (bridge.ClaudeLogin, error)
+	ClaudeLoginComplete(ctx context.Context, addr, secret, loginID, code string) (bridge.ClaudeLoginResult, error)
+	ClaudeLogout(ctx context.Context, addr, secret string) (bool, error)
 }
 
 // Egress is what the manager needs from the allowlist writer.
@@ -83,11 +91,13 @@ type Manager struct {
 
 	capMu sync.Mutex // serialises capacity decisions
 
-	mu          sync.Mutex        // guards the maps below
-	secrets     map[string]string // user -> Bridge secret (memory only, loaded from /data)
-	inflight    map[string]int    // user -> Deliver calls in progress
-	healthFails map[string]int    // user -> consecutive failed health checks
-	restarts    map[string]int    // user -> restarts since the last good check
+	mu          sync.Mutex           // guards the maps below
+	secrets     map[string]string    // user -> Bridge secret (memory only, loaded from /data)
+	inflight    map[string]int       // user -> Deliver calls in progress
+	healthFails map[string]int       // user -> consecutive failed health checks
+	restarts    map[string]int       // user -> restarts since the last good check
+	logins      map[string]time.Time // user -> pending Claude sign-in expiry (keeps the sandbox awake)
+	claudeOps   map[string]int       // user -> Claude sign-out calls in progress (need Anthropic's hosts)
 }
 
 // New builds a Manager.
@@ -100,6 +110,8 @@ func New(cfg *config.Config, st store.Store, eng docker.Engine, br BridgeAPI, eg
 		inflight:     map[string]int{},
 		healthFails:  map[string]int{},
 		restarts:     map[string]int{},
+		logins:       map[string]time.Time{},
+		claudeOps:    map[string]int{},
 	}
 }
 
@@ -135,6 +147,8 @@ func (m *Manager) forget(userID string) {
 	delete(m.secrets, userID)
 	delete(m.healthFails, userID)
 	delete(m.restarts, userID)
+	delete(m.logins, userID)
+	delete(m.claudeOps, userID)
 }
 
 func (m *Manager) resetHealth(userID string) {

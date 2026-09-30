@@ -40,6 +40,10 @@ func TestLoadDefaults(t *testing.T) {
 	if c.AgentImageVersion != c.AgentImage {
 		t.Errorf("image version should default to the image: %q vs %q", c.AgentImageVersion, c.AgentImage)
 	}
+	if strings.Join(c.ClaudeEgressDomains, ",") != "api.anthropic.com,claude.ai,claude.com,platform.claude.com" ||
+		c.ClaudeLoginTTL != 10*time.Minute {
+		t.Errorf("unexpected claude defaults: %v %v", c.ClaudeEgressDomains, c.ClaudeLoginTTL)
+	}
 }
 
 func TestLoadOverrides(t *testing.T) {
@@ -49,6 +53,7 @@ func TestLoadOverrides(t *testing.T) {
 	e["IDLE_TIMEOUT"] = "90s"
 	e["SANDBOX_VOLUME_OPTS"] = "type=xfs, o=size=2g"
 	e["AGENT_IMAGE_VERSION"] = "v42"
+	e["CLAUDE_EGRESS_DOMAINS"] = " api.anthropic.com, *.claude.ai "
 	c, err := Load(env(e))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -58,6 +63,9 @@ func TestLoadOverrides(t *testing.T) {
 	}
 	if c.VolumeOpts["type"] != "xfs" || c.VolumeOpts["o"] != "size=2g" {
 		t.Errorf("volume opts: %v", c.VolumeOpts)
+	}
+	if strings.Join(c.ClaudeEgressDomains, ",") != ".claude.ai,api.anthropic.com" {
+		t.Errorf("claude egress domains: %v", c.ClaudeEgressDomains)
 	}
 }
 
@@ -72,6 +80,8 @@ func TestLoadRejectsBadValues(t *testing.T) {
 		"relative dir": {"EGRESS_ALLOWLIST_DIR": "allowlists"},
 		"root uid":     {"SANDBOX_AGENT_UID": "0"},
 		"bad opts":     {"SANDBOX_VOLUME_OPTS": "novalue"},
+		"bad domains":  {"CLAUDE_EGRESS_DOMAINS": "api.anthropic.com,10.0.0.1"},
+		"zero ttl":     {"CLAUDE_LOGIN_TTL": "0s"},
 	}
 	for name, override := range cases {
 		t.Run(name, func(t *testing.T) {

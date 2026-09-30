@@ -37,6 +37,10 @@ type Manager interface {
 	Usage(ctx context.Context, userID string, since, until time.Time) ([]store.Usage, error)
 	SetEgressAllowlist(ctx context.Context, userID string, domains []string, servers []sandbox.MCPServer) error
 	Snapshot(ctx context.Context, userID, destination string) (string, int64, error)
+	SetAgentRuntime(ctx context.Context, userID string, runtime store.Runtime) (store.Sandbox, error)
+	StartClaudeLogin(ctx context.Context, userID string) (bridge.ClaudeLogin, error)
+	CompleteClaudeLogin(ctx context.Context, userID, loginID, code string) (bridge.ClaudeLoginResult, error)
+	ClaudeLogout(ctx context.Context, userID string) error
 }
 
 // Server implements vmv1.VmManagerServer.
@@ -88,8 +92,23 @@ func (a *auth) unary(ctx context.Context, req any, info *grpc.UnaryServerInfo, h
 	}
 	start := time.Now()
 	resp, err := handler(ctx, req)
-	a.logResult(info.FullMethod, start, err)
+	a.logResult(info.FullMethod, start, err, requestFields(req)...)
 	return resp, err
+}
+
+type userIDGetter interface{ GetUserId() string }
+
+// requestFields are the only request values ever logged: the user id, and a marker that the
+// Claude sign-in code was present but redacted. Request bodies are never logged.
+func requestFields(req any) []any {
+	var f []any
+	if r, ok := req.(userIDGetter); ok && r.GetUserId() != "" {
+		f = append(f, "user_id", r.GetUserId())
+	}
+	if _, ok := req.(*vmv1.CompleteClaudeLoginRequest); ok {
+		f = append(f, "code", "[REDACTED]")
+	}
+	return f
 }
 
 func (a *auth) stream(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
@@ -102,13 +121,14 @@ func (a *auth) stream(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo
 	return err
 }
 
-func (a *auth) logResult(method string, start time.Time, err error) {
+func (a *auth) logResult(method string, start time.Time, err error, fields ...any) {
 	code := status.Code(err)
 	lvl := slog.LevelDebug
 	if code != codes.OK && code != codes.NotFound && code != codes.ResourceExhausted {
 		lvl = slog.LevelWarn
 	}
-	a.log.Log(context.Background(), lvl, "grpc", "method", method, "code", code.String(), "ms", time.Since(start).Milliseconds())
+	args := append([]any{"method", method, "code", code.String(), "ms", time.Since(start).Milliseconds()}, fields...)
+	a.log.Log(context.Background(), lvl, "grpc", args...)
 }
 
 // --- error mapping ---
@@ -131,6 +151,10 @@ func (s *Server) toStatus(err error) error {
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, sandbox.ErrUnavailable):
 		return status.Error(codes.Unavailable, "sandbox could not be started; retry later")
+	case errors.Is(err, sandbox.ErrLoginNotFound):
+		return status.Error(codes.FailedPrecondition, "unknown or expired Claude sign-in; start again")
+	case errors.Is(err, sandbox.ErrAgentUnavailable):
+		return status.Error(codes.Unavailable, "the agent could not be reached; retry later")
 	case errors.Is(err, context.Canceled):
 		return status.Error(codes.Canceled, "canceled")
 	case errors.Is(err, context.DeadlineExceeded):
@@ -159,10 +183,30 @@ func stateFromProto(s vmv1.SandboxState) (store.State, bool) {
 	return "", false
 }
 
+var runtimeToProto = map[store.Runtime]vmv1.AgentRuntime{
+	store.RuntimeHermes:     vmv1.AgentRuntime_AGENT_RUNTIME_HERMES,
+	store.RuntimeClaudeCode: vmv1.AgentRuntime_AGENT_RUNTIME_CLAUDE_CODE,
+}
+
+// runtimeFromProto: UNSPECIFIED means hermes; unknown values are rejected.
+func runtimeFromProto(r vmv1.AgentRuntime) (store.Runtime, error) {
+	switch r {
+	case vmv1.AgentRuntime_AGENT_RUNTIME_UNSPECIFIED, vmv1.AgentRuntime_AGENT_RUNTIME_HERMES:
+		return store.RuntimeHermes, nil
+	case vmv1.AgentRuntime_AGENT_RUNTIME_CLAUDE_CODE:
+		return store.RuntimeClaudeCode, nil
+	}
+	return "", status.Error(codes.InvalidArgument, "unknown runtime")
+}
+
 func toProto(sb store.Sandbox, memory int64) *vmv1.Sandbox {
 	allow := sb.Allowlist
 	if allow == nil {
 		allow = []string{}
+	}
+	rt, ok := runtimeToProto[sb.Runtime]
+	if !ok {
+		rt = vmv1.AgentRuntime_AGENT_RUNTIME_HERMES
 	}
 	return &vmv1.Sandbox{
 		UserId:             sb.UserID,
@@ -172,6 +216,8 @@ func toProto(sb store.Sandbox, memory int64) *vmv1.Sandbox {
 		LastActiveAtUnixMs: sb.LastActiveAt.UnixMilli(),
 		MemoryBytes:        memory,
 		Allowlist:          allow,
+		Runtime:            rt,
+		ClaudeConnected:    sb.ClaudeConnected,
 	}
 }
 
@@ -202,9 +248,14 @@ var eventToProto = map[string]vmv1.DeliverEventType{
 
 // CreateSandbox implements vmv1.VmManagerServer.
 func (s *Server) CreateSandbox(ctx context.Context, req *vmv1.CreateSandboxRequest) (*vmv1.CreateSandboxResponse, error) {
+	rt, err := runtimeFromProto(req.GetRuntime())
+	if err != nil {
+		return nil, err
+	}
 	sb, hash, err := s.m.Create(ctx, sandbox.CreateRequest{
 		UserID: req.GetUserId(), LiteLLMKey: req.GetLitellmKey(), Priority: int32(req.GetPriority()),
 		Allowlist: req.GetAllowlist(), MCPServers: mcpServers(req.GetMcpServers()), Timezone: req.GetTimezone(),
+		Runtime: rt,
 	})
 	if err != nil {
 		return nil, s.toStatus(err)
@@ -342,4 +393,44 @@ func (s *Server) SnapshotVolume(ctx context.Context, req *vmv1.SnapshotVolumeReq
 		return nil, s.toStatus(err)
 	}
 	return &vmv1.SnapshotVolumeResponse{Location: loc, SizeBytes: size}, nil
+}
+
+// SetAgentRuntime implements vmv1.VmManagerServer.
+func (s *Server) SetAgentRuntime(ctx context.Context, req *vmv1.SetAgentRuntimeRequest) (*vmv1.SetAgentRuntimeResponse, error) {
+	rt, err := runtimeFromProto(req.GetRuntime())
+	if err != nil {
+		return nil, err
+	}
+	sb, err := s.m.SetAgentRuntime(ctx, req.GetUserId(), rt)
+	if err != nil {
+		return nil, s.toStatus(err)
+	}
+	return &vmv1.SetAgentRuntimeResponse{Sandbox: toProto(sb, 0)}, nil
+}
+
+// StartClaudeLogin implements vmv1.VmManagerServer.
+func (s *Server) StartClaudeLogin(ctx context.Context, req *vmv1.StartClaudeLoginRequest) (*vmv1.StartClaudeLoginResponse, error) {
+	l, err := s.m.StartClaudeLogin(ctx, req.GetUserId())
+	if err != nil {
+		return nil, s.toStatus(err)
+	}
+	return &vmv1.StartClaudeLoginResponse{LoginId: l.LoginID, AuthorizeUrl: l.AuthorizeURL, ExpiresAtUnixMs: l.ExpiresAt}, nil
+}
+
+// CompleteClaudeLogin implements vmv1.VmManagerServer. The code is passed straight through
+// and never logged (the interceptor logs it as [REDACTED]).
+func (s *Server) CompleteClaudeLogin(ctx context.Context, req *vmv1.CompleteClaudeLoginRequest) (*vmv1.CompleteClaudeLoginResponse, error) {
+	res, err := s.m.CompleteClaudeLogin(ctx, req.GetUserId(), req.GetLoginId(), req.GetCode())
+	if err != nil {
+		return nil, s.toStatus(err)
+	}
+	return &vmv1.CompleteClaudeLoginResponse{Connected: res.Connected, Message: res.Message}, nil
+}
+
+// ClaudeLogout implements vmv1.VmManagerServer.
+func (s *Server) ClaudeLogout(ctx context.Context, req *vmv1.ClaudeLogoutRequest) (*vmv1.ClaudeLogoutResponse, error) {
+	if err := s.m.ClaudeLogout(ctx, req.GetUserId()); err != nil {
+		return nil, s.toStatus(err)
+	}
+	return &vmv1.ClaudeLogoutResponse{}, nil
 }

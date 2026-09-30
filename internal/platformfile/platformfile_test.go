@@ -14,7 +14,7 @@ func TestWriteReadRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	in := File{UserID: "u1", MCPToken: "tok", BridgeSecret: "sec", LiteLLMKey: "sk-1", Timezone: "Europe/Berlin",
+	in := File{UserID: "u1", MCPToken: "tok", BridgeSecret: "sec", LiteLLMKey: "sk-1", Timezone: "Europe/Berlin", Runtime: "claude_code",
 		MCPServers: []MCPServer{{ID: "m1", Name: "notes", URL: "https://mcp.example.com", AuthHeaderName: "X-Key", AuthSecret: "k"}}}
 	if err := Write(ctx, f, id, 10001, in); err != nil {
 		t.Fatal(err)
@@ -28,7 +28,7 @@ func TestWriteReadRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	if out.Version != Version || out.MCPToken != "tok" || out.BridgeSecret != "sec" || out.LiteLLMKey != "sk-1" ||
-		len(out.MCPServers) != 1 || out.MCPServers[0].AuthSecret != "k" || out.Timezone != "Europe/Berlin" {
+		len(out.MCPServers) != 1 || out.MCPServers[0].AuthSecret != "k" || out.Timezone != "Europe/Berlin" || out.Runtime != "claude_code" {
 		t.Fatalf("round trip: %+v", out)
 	}
 	if err := Write(ctx, f, id, 10001, File{UserID: "u1"}); err == nil {

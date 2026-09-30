@@ -104,3 +104,83 @@ func TestHealthFailsOnNon200(t *testing.T) {
 		t.Fatal("expected an error")
 	}
 }
+
+func TestHealthReportsClaudeFields(t *testing.T) {
+	body := `{"ok":true,"busy":0,"runtime":"claude_code","claude_connected":true,"claude_login_pending":true}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = fmt.Fprint(w, body) }))
+	defer srv.Close()
+	h, err := NewClient().Health(context.Background(), addr(srv))
+	if err != nil || h.Runtime != "claude_code" || h.ClaudeConnected == nil || !*h.ClaudeConnected || !h.ClaudeLoginPending {
+		t.Fatalf("health: %+v %v", h, err)
+	}
+	body = `{"ok":true,"busy":0}` // older image: status unknown
+	h, _ = NewClient().Health(context.Background(), addr(srv))
+	if h.ClaudeConnected != nil || h.ClaudeLoginPending {
+		t.Fatalf("older bridge: %+v", h)
+	}
+}
+
+func TestClaudeSignIn(t *testing.T) {
+	const code = "the-code-from-anthropic"
+	var gotCode string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(SecretHeader) != "s3cret" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/claude/login/start":
+			_, _ = fmt.Fprint(w, `{"login_id":"L1","authorize_url":"https://claude.ai/oauth/authorize?x=1","expires_at":1700000000000}`)
+		case "/claude/login/complete":
+			var b struct {
+				LoginID string `json:"login_id"`
+				Code    string `json:"code"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&b)
+			switch {
+			case b.LoginID != "L1":
+				w.WriteHeader(http.StatusConflict)
+			case b.Code == "":
+				w.WriteHeader(http.StatusBadRequest)
+			default:
+				gotCode = b.Code
+				_, _ = fmt.Fprint(w, `{"connected":true,"message":"Claude plan connected"}`)
+			}
+		case "/claude/logout":
+			_, _ = fmt.Fprint(w, `{"ok":true,"claude_connected":false}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	c := NewClient()
+	ctx := context.Background()
+	l, err := c.ClaudeLoginStart(ctx, addr(srv), "s3cret")
+	if err != nil || l.LoginID != "L1" || l.ExpiresAt != 1700000000000 || !strings.HasPrefix(l.AuthorizeURL, "https://claude.ai/") {
+		t.Fatalf("start: %+v %v", l, err)
+	}
+	res, err := c.ClaudeLoginComplete(ctx, addr(srv), "s3cret", "L1", code)
+	if err != nil || !res.Connected || gotCode != code {
+		t.Fatalf("complete: %+v %v", res, err)
+	}
+	if _, err := c.ClaudeLoginComplete(ctx, addr(srv), "s3cret", "L2", code); !errors.Is(err, ErrLoginNotFound) {
+		t.Fatalf("unknown login: %v", err)
+	} else if strings.Contains(err.Error(), code) {
+		t.Fatal("errors must not carry the code")
+	}
+	if _, err := c.ClaudeLoginComplete(ctx, addr(srv), "s3cret", "L1", ""); !errors.Is(err, ErrBadRequest) {
+		t.Fatalf("bad request: %v", err)
+	}
+	if _, err := c.ClaudeLoginStart(ctx, addr(srv), "wrong"); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("secret: %v", err)
+	}
+	if connected, err := c.ClaudeLogout(ctx, addr(srv), "s3cret"); err != nil || connected {
+		t.Fatalf("logout: %v %v", connected, err)
+	}
+	// An older image without the endpoints.
+	old := httptest.NewServer(http.NotFoundHandler())
+	defer old.Close()
+	if _, err := c.ClaudeLoginStart(ctx, addr(old), "s3cret"); !errors.Is(err, ErrClaudeUnavailable) {
+		t.Fatalf("old image: %v", err)
+	}
+}

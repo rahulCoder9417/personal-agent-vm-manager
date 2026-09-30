@@ -7,6 +7,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/personal-agent/vm-manager/internal/bridge"
 	"github.com/personal-agent/vm-manager/internal/docker"
 	"github.com/personal-agent/vm-manager/internal/egress"
 	"github.com/personal-agent/vm-manager/internal/ids"
@@ -22,6 +23,7 @@ type CreateRequest struct {
 	Allowlist  []string
 	MCPServers []MCPServer
 	Timezone   string
+	Runtime    store.Runtime // "" = hermes
 }
 
 // Create makes the container, its /data volume and its secrets, and leaves it
@@ -43,6 +45,12 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (store.Sandbox,
 	}
 	if len(req.Timezone) > 64 {
 		return store.Sandbox{}, "", invalid("timezone too long")
+	}
+	if req.Runtime == "" {
+		req.Runtime = store.RuntimeHermes
+	}
+	if !req.Runtime.Valid() {
+		return store.Sandbox{}, "", invalid("runtime must be hermes or claude_code")
 	}
 
 	l := m.userLock(req.UserID)
@@ -80,7 +88,7 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (store.Sandbox,
 	}
 	pf := platformfile.File{
 		UserID: req.UserID, MCPToken: token, BridgeSecret: secret, LiteLLMKey: req.LiteLLMKey,
-		Timezone: req.Timezone, MCPServers: req.MCPServers,
+		Timezone: req.Timezone, MCPServers: req.MCPServers, Runtime: string(req.Runtime),
 	}
 	if err := platformfile.Write(ctx, m.eng, containerID, m.cfg.AgentUID, pf); err != nil {
 		_ = m.eng.RemoveContainer(ctx, containerID)
@@ -91,7 +99,7 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (store.Sandbox,
 		UserID: req.UserID, ContainerID: containerID, ImageVersion: m.cfg.AgentImageVersion,
 		State: store.StateStopped, Priority: normPriority(req.Priority), LastActiveAt: now,
 		MCPTokenHash: ids.Hash(token), BridgeSecretHash: ids.Hash(secret), Allowlist: allow,
-		CreatedAt: now, UpdatedAt: now,
+		Runtime: req.Runtime, CreatedAt: now, UpdatedAt: now,
 	}
 	if err := m.store.Insert(ctx, sb); err != nil {
 		_ = m.eng.RemoveContainer(ctx, containerID)
@@ -100,7 +108,8 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (store.Sandbox,
 	m.mu.Lock()
 	m.secrets[req.UserID] = secret
 	m.mu.Unlock()
-	m.log.Info("sandbox created", "user_id", req.UserID, "container_id", containerID, "image_version", sb.ImageVersion)
+	m.log.Info("sandbox created", "user_id", req.UserID, "container_id", containerID, "image_version", sb.ImageVersion,
+		"runtime", string(sb.Runtime))
 	return sb, sb.MCPTokenHash, nil
 }
 
@@ -217,7 +226,7 @@ func (m *Manager) reserveCapacity(ctx context.Context, self store.Sandbox) error
 func (m *Manager) pickVictim(active []store.Sandbox, self string) (store.Sandbox, func()) {
 	cands := []store.Sandbox{}
 	for _, a := range active {
-		if a.UserID != self && a.State == store.StateAwake && m.inflightCount(a.UserID) == 0 {
+		if a.UserID != self && a.State == store.StateAwake && m.inflightCount(a.UserID) == 0 && !m.loginPending(a.UserID) {
 			cands = append(cands, a)
 		}
 	}
@@ -348,13 +357,15 @@ func (m *Manager) startLocked(ctx context.Context, sb *store.Sandbox) error {
 			lastErr = err
 			continue
 		}
-		if err := m.waitHealthy(ctx, ip); err != nil {
+		h, err := m.waitHealthy(ctx, ip)
+		if err != nil {
 			lastErr = err
 			_ = m.eng.StopContainer(ctx, sb.ContainerID, 0)
 			_ = m.store.EndAwake(ctx, sb.UserID, m.clk.Now())
 			continue
 		}
-		if err := m.eg.Write(sb.UserID, ip, sb.Allowlist); err != nil {
+		m.noteClaudeStatus(ctx, *sb, h)
+		if err := m.eg.Write(sb.UserID, ip, m.egressDomains(*sb)); err != nil {
 			m.log.Error("egress allowlist write failed", "user_id", sb.UserID, "err", err, "alert", true)
 		}
 		now := m.clk.Now()
@@ -398,22 +409,22 @@ func (m *Manager) startContainer(ctx context.Context, sb store.Sandbox) (string,
 }
 
 // waitHealthy polls GET /healthz until it answers 200 or WakeTimeout passes.
-func (m *Manager) waitHealthy(ctx context.Context, ip string) error {
+func (m *Manager) waitHealthy(ctx context.Context, ip string) (bridge.Health, error) {
 	wctx, cancel := context.WithTimeout(ctx, m.cfg.WakeTimeout)
 	defer cancel()
 	addr := m.bridgeAddr(ip)
 	var lastErr error
 	for {
 		hctx, hcancel := context.WithTimeout(wctx, 5*time.Second)
-		_, err := m.br.Health(hctx, addr)
+		h, err := m.br.Health(hctx, addr)
 		hcancel()
 		if err == nil {
-			return nil
+			return h, nil
 		}
 		lastErr = err
 		select {
 		case <-wctx.Done():
-			return fmt.Errorf("bridge not healthy after %s: %v", m.cfg.WakeTimeout, lastErr)
+			return bridge.Health{}, fmt.Errorf("bridge not healthy after %s: %v", m.cfg.WakeTimeout, lastErr)
 		case <-time.After(m.PollInterval):
 		}
 	}

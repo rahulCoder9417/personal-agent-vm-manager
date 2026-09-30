@@ -109,6 +109,8 @@ class RunResult:
     output: str
     error: str = ""
     reason: str = ""
+    message: str = ""  # shown to the user on failure (default: "the agent could not finish (...)")
+    platform_fault: Optional[bool] = None  # None: decided from reason
 
 
 class Runner(Protocol):
@@ -269,10 +271,13 @@ class Bridge:
                 )
                 if result.status != "completed":
                     reason = getattr(result, "reason", "") or ""
-                    # The agent did real work and hit its own limit: not a platform fault.
-                    fault = not reason.startswith("max_iterations")
+                    fault = getattr(result, "platform_fault", None)
+                    if fault is None:
+                        # The agent did real work and hit its own limit: not a platform fault.
+                        fault = not reason.startswith("max_iterations")
+                    message = getattr(result, "message", "") or f"the agent could not finish ({result.status})"
                     self.store.put(req.delivery_id, state="failed")
-                    turn.publish(event(ERROR, f"the agent could not finish ({result.status})", platform_fault=fault))
+                    turn.publish(event(ERROR, message, platform_fault=fault))
                     return
                 output = result.output or ""
                 self.store.put(req.delivery_id, state="answered", output=output)

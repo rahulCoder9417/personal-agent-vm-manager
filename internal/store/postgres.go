@@ -96,14 +96,14 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, migrations fs.FS) error {
 }
 
 const sandboxCols = `user_id, container_id, image_version, state, priority, last_active_at,
-	mcp_token_hash, bridge_secret_hash, allowlist, created_at, updated_at`
+	mcp_token_hash, bridge_secret_hash, allowlist, created_at, updated_at, runtime, claude_connected`
 
 func scanSandbox(row pgx.Row) (Sandbox, error) {
 	var sb Sandbox
-	var state string
+	var state, runtime string
 	var priority int16
 	err := row.Scan(&sb.UserID, &sb.ContainerID, &sb.ImageVersion, &state, &priority, &sb.LastActiveAt,
-		&sb.MCPTokenHash, &sb.BridgeSecretHash, &sb.Allowlist, &sb.CreatedAt, &sb.UpdatedAt)
+		&sb.MCPTokenHash, &sb.BridgeSecretHash, &sb.Allowlist, &sb.CreatedAt, &sb.UpdatedAt, &runtime, &sb.ClaudeConnected)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Sandbox{}, ErrNotFound
 	}
@@ -111,6 +111,7 @@ func scanSandbox(row pgx.Row) (Sandbox, error) {
 		return Sandbox{}, err
 	}
 	sb.State = State(state)
+	sb.Runtime = Runtime(runtime)
 	sb.Priority = int32(priority)
 	sb.LastActiveAt = sb.LastActiveAt.UTC()
 	sb.CreatedAt = sb.CreatedAt.UTC()
@@ -127,10 +128,14 @@ func (p *Postgres) Insert(ctx context.Context, sb Sandbox) error {
 	if allow == nil {
 		allow = []string{}
 	}
+	runtime := sb.Runtime
+	if runtime == "" {
+		runtime = RuntimeHermes
+	}
 	_, err := p.pool.Exec(ctx, `INSERT INTO sandboxes (`+sandboxCols+`)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
 		sb.UserID, sb.ContainerID, sb.ImageVersion, string(sb.State), int16(sb.Priority), sb.LastActiveAt,
-		sb.MCPTokenHash, sb.BridgeSecretHash, allow, sb.CreatedAt, sb.UpdatedAt)
+		sb.MCPTokenHash, sb.BridgeSecretHash, allow, sb.CreatedAt, sb.UpdatedAt, string(runtime), sb.ClaudeConnected)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 		return ErrExists
@@ -211,6 +216,16 @@ func (p *Postgres) SetAllowlist(ctx context.Context, userID string, domains []st
 // SetPriority implements Store.
 func (p *Postgres) SetPriority(ctx context.Context, userID string, priority int32, at time.Time) error {
 	return p.exec1(ctx, `UPDATE sandboxes SET priority = $2, updated_at = $3 WHERE user_id = $1`, userID, int16(priority), at)
+}
+
+// SetRuntime implements Store.
+func (p *Postgres) SetRuntime(ctx context.Context, userID string, runtime Runtime, at time.Time) error {
+	return p.exec1(ctx, `UPDATE sandboxes SET runtime = $2, updated_at = $3 WHERE user_id = $1`, userID, string(runtime), at)
+}
+
+// SetClaudeConnected implements Store.
+func (p *Postgres) SetClaudeConnected(ctx context.Context, userID string, connected bool, at time.Time) error {
+	return p.exec1(ctx, `UPDATE sandboxes SET claude_connected = $2, updated_at = $3 WHERE user_id = $1`, userID, connected, at)
 }
 
 // Delete implements Store.
