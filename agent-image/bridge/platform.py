@@ -35,6 +35,8 @@ class PlatformFile:
     litellm_key: str
     timezone: str = ""
     mcp_servers: list[MCPServer] = field(default_factory=list)
+    # Which agent answers: "hermes" (default) or "claude_code". Read again on every delivery.
+    runtime: str = "hermes"
 
 
 def load_platform_file(path: str) -> PlatformFile:
@@ -60,10 +62,11 @@ def load_platform_file(path: str) -> PlatformFile:
         litellm_key=raw["litellm_key"],
         timezone=raw.get("timezone") or "",
         mcp_servers=servers,
+        runtime=str(raw.get("runtime") or "hermes"),
     )
 
 
-def _server_key(server: MCPServer) -> str:
+def server_key(server: MCPServer) -> str:
     safe = re.sub(r"[^a-z0-9_]", "_", server.id.lower())[:40] or "server"
     return f"user_{safe}"
 
@@ -96,7 +99,7 @@ def render_hermes_config(pf: PlatformFile, env: dict[str, str], data_dir: str = 
         entry: dict[str, Any] = {"url": s.url, "timeout": 120, "connect_timeout": 30, "enabled": True}
         if s.auth_header_name and s.auth_secret:
             entry["headers"] = {s.auth_header_name: s.auth_secret}
-        servers[_server_key(s)] = entry
+        servers[server_key(s)] = entry
 
     cfg: dict[str, Any] = {
         "model": {

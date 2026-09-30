@@ -1,6 +1,7 @@
 import os
 import tempfile
 import threading
+import time
 import unittest
 
 from bridge.core import (Bridge, DeliverRequest, DeliveryStore, build_input)
@@ -115,6 +116,10 @@ class BridgeCoreTest(unittest.TestCase):
         events = list(self.bridge.deliver(req()))
         self.assertEqual(types(events)[-1], "error")
         self.assertTrue(events[-1]["platform_fault"])
+        # The turn is dropped in the run thread's `finally`, just after the last event.
+        deadline = time.monotonic() + 2
+        while self.bridge.busy() and time.monotonic() < deadline:
+            time.sleep(0.01)
         self.assertEqual(self.bridge.busy(), 0)
 
     def test_empty_answer_is_not_sent(self):
