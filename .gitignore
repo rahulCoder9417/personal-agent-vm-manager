@@ -24,3 +24,4 @@ __pycache__/
 
 # embedded-postgres test cache
 .embedded-postgres/
+.worktrees

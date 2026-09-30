@@ -30,6 +30,24 @@ service VmManager {
   rpc SetEgressAllowlist(SetEgressAllowlistRequest) returns (SetEgressAllowlistResponse);
   // Archive /data for backup.
   rpc SnapshotVolume(SnapshotVolumeRequest) returns (SnapshotVolumeResponse);
+
+  // --- Agent runtime: Hermes (API key / platform models) or Claude Code (user's Claude plan) ---
+  // Which agent answers in this sandbox. Applied on the next delivery (restart not needed).
+  rpc SetAgentRuntime(SetAgentRuntimeRequest) returns (SetAgentRuntimeResponse);
+  // Starts the official Claude Code sign-in inside the user's container (wakes it) and returns
+  // Anthropic's authorize URL. The user completes sign-in on Anthropic's own page.
+  rpc StartClaudeLogin(StartClaudeLoginRequest) returns (StartClaudeLoginResponse);
+  // Hands the code Anthropic showed the user to the waiting Claude Code sign-in. The code is
+  // passed straight through and never stored; Claude Code keeps its own credentials in /data.
+  rpc CompleteClaudeLogin(CompleteClaudeLoginRequest) returns (CompleteClaudeLoginResponse);
+  // Signs Claude Code out (removes its credentials from /data).
+  rpc ClaudeLogout(ClaudeLogoutRequest) returns (ClaudeLogoutResponse);
+}
+
+enum AgentRuntime {
+  AGENT_RUNTIME_UNSPECIFIED = 0; // = HERMES
+  AGENT_RUNTIME_HERMES = 1;
+  AGENT_RUNTIME_CLAUDE_CODE = 2;
 }
 
 enum SandboxState {
@@ -66,6 +84,9 @@ message Sandbox {
   int64 last_active_at_unix_ms = 5;
   int64 memory_bytes = 6;
   repeated string allowlist = 7;
+  AgentRuntime runtime = 8;
+  // Claude Code has valid credentials in /data (as last seen by the vm-manager).
+  bool claude_connected = 9;
 }
 
 message CreateSandboxRequest {
@@ -76,6 +97,7 @@ message CreateSandboxRequest {
   repeated string allowlist = 4;
   repeated UserMcpServer mcp_servers = 5;
   string timezone = 6;
+  AgentRuntime runtime = 7;
 }
 
 message CreateSandboxResponse {
@@ -199,3 +221,31 @@ message SnapshotVolumeResponse {
   string location = 1;
   int64 size_bytes = 2;
 }
+
+message SetAgentRuntimeRequest {
+  string user_id = 1;
+  AgentRuntime runtime = 2;
+}
+message SetAgentRuntimeResponse { Sandbox sandbox = 1; }
+
+message StartClaudeLoginRequest { string user_id = 1; }
+message StartClaudeLoginResponse {
+  string login_id = 1;
+  string authorize_url = 2;
+  int64 expires_at_unix_ms = 3;
+}
+
+message CompleteClaudeLoginRequest {
+  string user_id = 1;
+  string login_id = 2;
+  // The code from Anthropic's page. Not logged, not stored.
+  string code = 3;
+}
+message CompleteClaudeLoginResponse {
+  bool connected = 1;
+  // Why it failed (wrong/expired code), safe to show the user.
+  string message = 2;
+}
+
+message ClaudeLogoutRequest { string user_id = 1; }
+message ClaudeLogoutResponse {}
