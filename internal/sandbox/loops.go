@@ -50,8 +50,8 @@ func (m *Manager) ReapOnce(ctx context.Context) {
 	}
 	now := m.clk.Now()
 	for _, sb := range list {
-		if now.Sub(sb.LastActiveAt) < m.cfg.IdleTimeout || m.inflightCount(sb.UserID) > 0 {
-			continue
+		if now.Sub(sb.LastActiveAt) < m.cfg.IdleTimeout || m.inflightCount(sb.UserID) > 0 || m.loginPending(sb.UserID) {
+			continue // a pending Claude sign-in counts as busy: its CLI waits in the container
 		}
 		l := m.userLock(sb.UserID)
 		if !l.TryLock() {
@@ -61,12 +61,13 @@ func (m *Manager) ReapOnce(ctx context.Context) {
 			defer l.Unlock()
 			cur, err := m.store.Get(ctx, sb.UserID)
 			if err != nil || cur.State != store.StateAwake || m.inflightCount(cur.UserID) > 0 ||
-				m.clk.Now().Sub(cur.LastActiveAt) < m.cfg.IdleTimeout {
+				m.loginPending(cur.UserID) || m.clk.Now().Sub(cur.LastActiveAt) < m.cfg.IdleTimeout {
 				return
 			}
-			// Belt and braces: ask the Bridge whether Hermes is still in a turn.
+			// Belt and braces: ask the Bridge whether a turn or a Claude sign-in is in progress
+			// (covers a vm-manager restart, which forgets its own pending sign-ins).
 			if m.bridgeBusy(ctx, cur) {
-				m.log.Info("reaper: bridge reports a turn in progress; not stopping", "user_id", cur.UserID)
+				m.log.Info("reaper: bridge reports a turn or sign-in in progress; not stopping", "user_id", cur.UserID)
 				return
 			}
 			sctx, cancel := detached(ctx, m.cfg.ShutdownGrace+time.Minute)
@@ -86,7 +87,7 @@ func (m *Manager) bridgeBusy(ctx context.Context, sb store.Sandbox) bool {
 	hctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	h, err := m.br.Health(hctx, m.bridgeAddr(c.IPs[m.cfg.SandboxNetwork]))
-	return err == nil && h.Busy > 0
+	return err == nil && (h.Busy > 0 || h.ClaudeLoginPending)
 }
 
 // HealthOnce checks every awake (not busy) sandbox's Bridge. After
@@ -160,8 +161,12 @@ func (m *Manager) checkHealth(ctx context.Context, sb store.Sandbox) bool {
 	}
 	hctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	_, err = m.br.Health(hctx, m.bridgeAddr(c.IPs[m.cfg.SandboxNetwork]))
-	return err == nil
+	h, err := m.br.Health(hctx, m.bridgeAddr(c.IPs[m.cfg.SandboxNetwork]))
+	if err != nil {
+		return false
+	}
+	m.noteClaudeStatus(ctx, sb, h)
+	return true
 }
 
 // restartLocked restarts an unresponsive container; the awake period stays open.
@@ -174,10 +179,12 @@ func (m *Manager) restartLocked(ctx context.Context, sb store.Sandbox) error {
 	if err != nil {
 		return err
 	}
-	if err := m.waitHealthy(ctx, ip); err != nil {
+	h, err := m.waitHealthy(ctx, ip)
+	if err != nil {
 		return err
 	}
-	if err := m.eg.Write(sb.UserID, ip, sb.Allowlist); err != nil {
+	m.noteClaudeStatus(ctx, sb, h)
+	if err := m.eg.Write(sb.UserID, ip, m.egressDomains(sb)); err != nil {
 		m.log.Error("egress allowlist write failed", "user_id", sb.UserID, "err", err, "alert", true)
 	}
 	return nil
@@ -304,7 +311,7 @@ func (m *Manager) reconcileOne(ctx context.Context, sb store.Sandbox, byID map[s
 	}
 	_ = m.store.StartAwake(ctx, sb.UserID, m.clk.Now()) // no-op when already open
 	if ip := c.IPs[m.cfg.SandboxNetwork]; ip != "" {
-		if err := m.eg.Write(sb.UserID, ip, sb.Allowlist); err != nil {
+		if err := m.eg.Write(sb.UserID, ip, m.egressDomains(sb)); err != nil {
 			m.log.Error("reconcile: egress write failed", "user_id", sb.UserID, "err", err)
 		}
 	}

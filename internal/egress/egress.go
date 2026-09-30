@@ -42,6 +42,21 @@ func NormalizeDomains(in []string) ([]string, error) {
 	if len(in) > MaxDomains {
 		return nil, fmt.Errorf("too many domains (%d > %d)", len(in), MaxDomains)
 	}
+	return normalize(in)
+}
+
+// MergeDomains combines already-validated lists (e.g. a user's allowlist and the platform's
+// Claude Code hosts) into one normalised list. Unlike NormalizeDomains it has no size cap,
+// because the platform's own entries must not push a full user list over the limit.
+func MergeDomains(lists ...[]string) ([]string, error) {
+	var all []string
+	for _, l := range lists {
+		all = append(all, l...)
+	}
+	return normalize(all)
+}
+
+func normalize(in []string) ([]string, error) {
 	set := map[string]bool{}
 	for _, raw := range in {
 		d := strings.ToLower(strings.TrimSpace(raw))

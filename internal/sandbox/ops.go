@@ -140,7 +140,7 @@ func (m *Manager) SetEgressAllowlist(ctx context.Context, userID string, domains
 	if sb.State.Running() {
 		c, err := m.eng.InspectContainer(ctx, sb.ContainerID)
 		if err == nil && c.Running && c.IPs[m.cfg.SandboxNetwork] != "" {
-			if err := m.eg.Write(userID, c.IPs[m.cfg.SandboxNetwork], allow); err != nil {
+			if err := m.eg.Write(userID, c.IPs[m.cfg.SandboxNetwork], m.egressDomains(sb)); err != nil {
 				return err
 			}
 		}

@@ -2,6 +2,7 @@ package egress
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -149,4 +150,25 @@ func waitFor(t *testing.T, cond func() bool) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("condition not met in time")
+}
+
+func TestMergeDomains(t *testing.T) {
+	user := make([]string, 0, MaxDomains)
+	for i := range MaxDomains {
+		user = append(user, fmt.Sprintf("d%d.example.com", i))
+	}
+	got, err := MergeDomains(user, []string{"api.anthropic.com", "claude.ai", "d1.example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != MaxDomains+2 {
+		t.Fatalf("merge must dedupe and not cap: %d", len(got))
+	}
+	got, _ = MergeDomains([]string{".anthropic.com"}, []string{"api.anthropic.com"})
+	if strings.Join(got, ",") != ".anthropic.com" {
+		t.Fatalf("covered entries dropped: %v", got)
+	}
+	if _, err := MergeDomains([]string{"10.0.0.1"}); err == nil {
+		t.Fatal("IPs are still rejected")
+	}
 }
