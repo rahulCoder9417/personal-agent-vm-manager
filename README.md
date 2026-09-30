@@ -185,7 +185,7 @@ approval prompts are denied by policy (`BRIDGE_HERMES_APPROVAL`); risky real-wor
 actions go through the platform's `request_approval` tool.
 
 Hermes keeps running while the runtime is `claude_code`, so switching back is instant (its
-RAM counts either way; not measured yet).
+RAM counts either way; see "Measured RAM per container").
 
 ## Claude Code runtime (the user's own Claude plan)
 
@@ -270,15 +270,22 @@ Squid config.
 
 ## Measured RAM per container
 
-**Not measured yet.** Docker and gVisor are not available on the development machine,
-so no container has run. Measure one awake container after a real turn:
+Measured 2026-09-30 on AWS `m7i-flex.large` (2 vCPU, 7.6 GiB, Ubuntu 24.04, Docker 29.8,
+gVisor `runsc` release-20260921.0), `docker stats --no-stream pa-sbx-<user_id>`:
+
+| State | RAM |
+|---|---|
+| Awake, idle: Bridge + `hermes gateway run` + a pending `claude auth login` | **325 MiB** (limit 600 MiB) |
+
+Not yet measured after a real turn (no model provider key on that server; Claude Code turns
+come next). The platform services took ~0.85 GiB (LiteLLM alone ~545 MiB), so on the 7.6 GiB
+test server ~5.5 GiB is left for sandboxes: ~15 awake at ~350 MiB, fewer once turns add
+Claude Code's own process. `AWAKE_CAP` is 3 there for the first test; re-measure during a
+Claude Code turn before raising it:
 
 ```bash
 docker stats --no-stream pa-sbx-<user_id>
 ```
-
-(or run `TestCreateWakeDeliverHello` with `-tags=integration`; it logs the number).
-Write the result here and set `AWAKE_CAP` from it (server RAM for sandboxes / RAM per container).
 
 ## Not verified yet
 
