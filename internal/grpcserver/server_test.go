@@ -39,6 +39,12 @@ type harness struct {
 
 func newHarness(t *testing.T, awakeCap int) *harness {
 	t.Helper()
+	return newHarnessLog(t, awakeCap, io.Discard)
+}
+
+// newHarnessLog logs everything (debug level) to w.
+func newHarnessLog(t *testing.T, awakeCap int, w io.Writer) *harness {
+	t.Helper()
 	cfg, err := config.Load(func(k string) string {
 		return map[string]string{
 			"VM_INTERNAL_SECRET": secret, "DATABASE_URL": "postgres://unused",
@@ -51,7 +57,7 @@ func newHarness(t *testing.T, awakeCap int) *harness {
 	cfg.AwakeCap = awakeCap
 	cfg.EgressAllowlistDir = t.TempDir()
 	cfg.SnapshotRoot = t.TempDir()
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	log := slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	eng := docker.NewFake()
 	br := sandboxtest.NewFakeBridge(eng)
 	eg := egress.NewWriter(cfg.EgressAllowlistDir, cfg.EgressProxyContainer, eng, 0, log)
