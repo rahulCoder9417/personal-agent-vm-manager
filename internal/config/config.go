@@ -11,7 +11,14 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/personal-agent/vm-manager/internal/egress"
 )
+
+// DefaultClaudeEgressDomains are the hosts the official Claude Code CLI needs for the model
+// API and for claude.ai sign-in / OAuth token exchange and refresh
+// (code.claude.com/docs/en/network-config#network-access-requirements).
+const DefaultClaudeEgressDomains = "api.anthropic.com,claude.ai,claude.com,platform.claude.com"
 
 // Config holds every setting. Field comments name the env var.
 type Config struct {
@@ -46,6 +53,12 @@ type Config struct {
 	EgressAllowlistDir      string        // EGRESS_ALLOWLIST_DIR (default "/allowlists")
 	EgressProxyContainer    string        // EGRESS_PROXY_CONTAINER (default "egress-proxy"): gets SIGHUP after a change
 	EgressReloadMinInterval time.Duration // EGRESS_RELOAD_MIN_INTERVAL (default 1s): coalesces SIGHUPs
+
+	// Claude Code runtime (the user's own Claude plan)
+	// CLAUDE_EGRESS_DOMAINS (comma-separated, default DefaultClaudeEgressDomains): added to a user's
+	// egress file while their runtime is claude_code or a Claude sign-in / sign-out is in progress.
+	ClaudeEgressDomains []string
+	ClaudeLoginTTL      time.Duration // CLAUDE_LOGIN_TTL (default 10m): a pending sign-in keeps the sandbox awake this long
 
 	// Capacity and loops
 	AwakeCap                    int           // AWAKE_CAP (default 20)
@@ -92,6 +105,9 @@ func Load(getenv func(string) string) (*Config, error) {
 		EgressAllowlistDir:      p.str("EGRESS_ALLOWLIST_DIR", "/allowlists"),
 		EgressProxyContainer:    p.str("EGRESS_PROXY_CONTAINER", "egress-proxy"),
 		EgressReloadMinInterval: p.dur("EGRESS_RELOAD_MIN_INTERVAL", time.Second),
+
+		ClaudeEgressDomains: p.domains("CLAUDE_EGRESS_DOMAINS", DefaultClaudeEgressDomains),
+		ClaudeLoginTTL:      p.dur("CLAUDE_LOGIN_TTL", 10*time.Minute),
 
 		AwakeCap:                    p.int("AWAKE_CAP", 20),
 		IdleTimeout:                 p.dur("IDLE_TIMEOUT", 3*time.Minute),
@@ -166,7 +182,7 @@ func Load(getenv func(string) string) (*Config, error) {
 	for name, d := range map[string]time.Duration{
 		"IDLE_TIMEOUT": c.IdleTimeout, "REAPER_INTERVAL": c.ReaperInterval, "HEALTH_INTERVAL": c.HealthInterval,
 		"RECONCILE_INTERVAL": c.ReconcileInterval, "DELIVER_TIMEOUT": c.DeliverTimeout,
-		"SHUTDOWN_GRACE": c.ShutdownGrace, "WAKE_TIMEOUT": c.WakeTimeout,
+		"SHUTDOWN_GRACE": c.ShutdownGrace, "WAKE_TIMEOUT": c.WakeTimeout, "CLAUDE_LOGIN_TTL": c.ClaudeLoginTTL,
 	} {
 		if d <= 0 {
 			p.fail(name, "must be a positive duration")
@@ -253,6 +269,23 @@ func (p *parser) level(name string, def slog.Level) slog.Level {
 		return def
 	}
 	return l
+}
+
+// domains parses a comma-separated egress domain list (validated like user allowlists).
+func (p *parser) domains(name, def string) []string {
+	v := p.str(name, def)
+	var in []string
+	for _, d := range strings.Split(v, ",") {
+		if d = strings.TrimSpace(d); d != "" {
+			in = append(in, d)
+		}
+	}
+	out, err := egress.NormalizeDomains(in)
+	if err != nil {
+		p.fail(name, "must be a comma-separated list of domains: "+err.Error())
+		return nil
+	}
+	return out
 }
 
 func (p *parser) kv(name string) map[string]string {

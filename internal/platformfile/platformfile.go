@@ -45,6 +45,9 @@ type File struct {
 	LiteLLMKey   string      `json:"litellm_key"`
 	Timezone     string      `json:"timezone,omitempty"`
 	MCPServers   []MCPServer `json:"mcp_servers"`
+	// Runtime is the agent that answers: "hermes" (also when empty) or "claude_code".
+	// The Bridge reads it on every delivery, so a change needs no restart.
+	Runtime string `json:"runtime,omitempty"`
 }
 
 // Validate checks the required fields.

@@ -29,6 +29,17 @@ const (
 // ErrUnauthorized means the Bridge rejected the secret.
 var ErrUnauthorized = errors.New("bridge: unauthorized")
 
+// ErrLoginNotFound means the Bridge has no pending Claude sign-in with that id (unknown,
+// expired or already used).
+var ErrLoginNotFound = errors.New("bridge: unknown or expired claude sign-in")
+
+// ErrBadRequest means the Bridge rejected the request body (e.g. a code that is not one line).
+var ErrBadRequest = errors.New("bridge: bad request")
+
+// ErrClaudeUnavailable means Claude Code could not do it (not installed in this image, or the
+// CLI did not start the sign-in).
+var ErrClaudeUnavailable = errors.New("bridge: claude code unavailable")
+
 // Attachment is a file the container can fetch through the egress proxy.
 type Attachment struct {
 	ID       string `json:"id"`
@@ -59,13 +70,33 @@ type Event struct {
 
 // Health is the /healthz answer.
 type Health struct {
-	OK   bool
-	Busy int // turns in progress, as reported by the Bridge
+	OK      bool
+	Busy    int    // turns in progress, as reported by the Bridge
+	Runtime string // runtime the Bridge will use for the next delivery ("" from older images)
+	// ClaudeConnected is Claude Code's sign-in status (from `claude auth status`); nil when
+	// the Bridge did not report it (older image).
+	ClaudeConnected *bool
+	// ClaudeLoginPending is true while a Claude sign-in waits for its code.
+	ClaudeLoginPending bool
+}
+
+// ClaudeLogin is a started Claude Code sign-in.
+type ClaudeLogin struct {
+	LoginID      string `json:"login_id"`
+	AuthorizeURL string `json:"authorize_url"`
+	ExpiresAt    int64  `json:"expires_at"` // unix ms
+}
+
+// ClaudeLoginResult is the outcome of handing the code to the waiting sign-in.
+type ClaudeLoginResult struct {
+	Connected bool   `json:"connected"`
+	Message   string `json:"message"`
 }
 
 // Client talks to Bridges on the sandbox network. Never through a proxy.
 type Client struct {
 	http *http.Client
+	slow *http.Client // Claude sign-in calls wait on the CLI (up to ~2 min)
 }
 
 // NewClient builds a Bridge client.
@@ -77,7 +108,9 @@ func NewClient() *Client {
 		MaxIdleConnsPerHost:   2,
 		IdleConnTimeout:       30 * time.Second,
 	}
-	return &Client{http: &http.Client{Transport: tr}}
+	slowTr := tr.Clone()
+	slowTr.ResponseHeaderTimeout = 3 * time.Minute
+	return &Client{http: &http.Client{Transport: tr}, slow: &http.Client{Transport: slowTr}}
 }
 
 func url(addr, path string) string { return "http://" + addr + path }
@@ -98,10 +131,93 @@ func (c *Client) Health(ctx context.Context, addr string) (Health, error) {
 		return Health{}, fmt.Errorf("bridge healthz: status %d", resp.StatusCode)
 	}
 	var body struct {
-		Busy int `json:"busy"`
+		Busy               int    `json:"busy"`
+		Runtime            string `json:"runtime"`
+		ClaudeConnected    *bool  `json:"claude_connected"`
+		ClaudeLoginPending bool   `json:"claude_login_pending"`
 	}
 	_ = json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&body) // body is optional
-	return Health{OK: true, Busy: body.Busy}, nil
+	return Health{OK: true, Busy: body.Busy, Runtime: body.Runtime, ClaudeConnected: body.ClaudeConnected,
+		ClaudeLoginPending: body.ClaudeLoginPending}, nil
+}
+
+// postJSON posts body (nil = empty object) with the secret and decodes a 200 answer into out.
+// Errors carry only the status, never the request body (it may hold a sign-in code).
+func (c *Client) postJSON(ctx context.Context, hc *http.Client, addr, path, secret string, body, out any) error {
+	if body == nil {
+		body = struct{}{}
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url(addr, path), bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(SecretHeader, secret)
+	resp, err := hc.Do(req)
+	if err != nil {
+		return fmt.Errorf("bridge %s: %w", path, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		if out == nil {
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+			return nil
+		}
+		if err := json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(out); err != nil {
+			return fmt.Errorf("bridge %s: bad answer: %w", path, err)
+		}
+		return nil
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return ErrUnauthorized
+	case http.StatusConflict:
+		return ErrLoginNotFound
+	case http.StatusBadRequest:
+		return ErrBadRequest
+	case http.StatusNotFound, http.StatusBadGateway, http.StatusServiceUnavailable:
+		return fmt.Errorf("%w (status %d)", ErrClaudeUnavailable, resp.StatusCode)
+	default:
+		return fmt.Errorf("bridge %s: status %d", path, resp.StatusCode)
+	}
+}
+
+// ClaudeLoginStart calls POST /claude/login/start: the Bridge starts the official
+// `claude auth login` and returns Anthropic's authorize URL.
+func (c *Client) ClaudeLoginStart(ctx context.Context, addr, secret string) (ClaudeLogin, error) {
+	var out ClaudeLogin
+	if err := c.postJSON(ctx, c.slow, addr, "/claude/login/start", secret, nil, &out); err != nil {
+		return ClaudeLogin{}, err
+	}
+	if out.LoginID == "" || out.AuthorizeURL == "" {
+		return ClaudeLogin{}, fmt.Errorf("%w: incomplete answer", ErrClaudeUnavailable)
+	}
+	return out, nil
+}
+
+// ClaudeLoginComplete calls POST /claude/login/complete: the Bridge writes the code to the
+// waiting CLI and reports whether Claude Code is now signed in. The code is never logged.
+func (c *Client) ClaudeLoginComplete(ctx context.Context, addr, secret, loginID, code string) (ClaudeLoginResult, error) {
+	var out ClaudeLoginResult
+	body := struct {
+		LoginID string `json:"login_id"`
+		Code    string `json:"code"`
+	}{loginID, code}
+	err := c.postJSON(ctx, c.slow, addr, "/claude/login/complete", secret, body, &out)
+	return out, err
+}
+
+// ClaudeLogout calls POST /claude/logout (the official `claude auth logout`) and returns
+// the sign-in status afterwards.
+func (c *Client) ClaudeLogout(ctx context.Context, addr, secret string) (bool, error) {
+	var out struct {
+		ClaudeConnected bool `json:"claude_connected"`
+	}
+	err := c.postJSON(ctx, c.slow, addr, "/claude/logout", secret, nil, &out)
+	return out.ClaudeConnected, err
 }
 
 // Shutdown calls POST /shutdown and waits (bounded by ctx) for Hermes to save to /data.
