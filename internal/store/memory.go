@@ -32,6 +32,9 @@ func copySandbox(sb Sandbox) Sandbox {
 	if sb.Allowlist == nil {
 		sb.Allowlist = []string{}
 	}
+	if sb.Runtime == "" {
+		sb.Runtime = RuntimeHermes
+	}
 	return sb
 }
 
@@ -120,6 +123,16 @@ func (m *Memory) SetAllowlist(_ context.Context, userID string, domains []string
 // SetPriority implements Store.
 func (m *Memory) SetPriority(_ context.Context, userID string, priority int32, at time.Time) error {
 	return m.update(userID, func(sb *Sandbox) { sb.Priority = priority; sb.UpdatedAt = at })
+}
+
+// SetRuntime implements Store.
+func (m *Memory) SetRuntime(_ context.Context, userID string, runtime Runtime, at time.Time) error {
+	return m.update(userID, func(sb *Sandbox) { sb.Runtime = runtime; sb.UpdatedAt = at })
+}
+
+// SetClaudeConnected implements Store.
+func (m *Memory) SetClaudeConnected(_ context.Context, userID string, connected bool, at time.Time) error {
+	return m.update(userID, func(sb *Sandbox) { sb.ClaudeConnected = connected; sb.UpdatedAt = at })
 }
 
 // Delete implements Store.

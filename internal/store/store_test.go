@@ -47,6 +47,9 @@ func runSuite(t *testing.T, newStore func(t *testing.T) Store) {
 			got.MCPTokenHash != "mcp-u1" || !slices.Equal(got.Allowlist, []string{"example.com"}) || got.Priority != 1 {
 			t.Fatalf("unexpected row: %+v", got)
 		}
+		if got.Runtime != RuntimeHermes || got.ClaudeConnected {
+			t.Fatalf("an unset runtime is stored as hermes, not connected: %+v", got)
+		}
 		all, _ := s.List(ctx)
 		if len(all) != 2 || all[0].UserID != "u1" || all[1].UserID != "u2" {
 			t.Fatalf("list all: %+v", all)
@@ -73,6 +76,12 @@ func runSuite(t *testing.T, newStore func(t *testing.T) Store) {
 		if err := s.SetPriority(ctx, "u1", 3, later); err != nil {
 			t.Fatal(err)
 		}
+		if err := s.SetRuntime(ctx, "u1", RuntimeClaudeCode, later); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetClaudeConnected(ctx, "u1", true, later); err != nil {
+			t.Fatal(err)
+		}
 		if err := s.Touch(ctx, "u1", later); err != nil {
 			t.Fatal(err)
 		}
@@ -81,11 +90,18 @@ func runSuite(t *testing.T, newStore func(t *testing.T) Store) {
 		}
 		got, _ := s.Get(ctx, "u1")
 		if got.State != StateBusy || got.ContainerID != "c-new" || got.ImageVersion != "v2" || got.Priority != 3 ||
-			!slices.Equal(got.Allowlist, []string{"a.com", ".b.org"}) || !got.LastActiveAt.Equal(later) {
+			!slices.Equal(got.Allowlist, []string{"a.com", ".b.org"}) || !got.LastActiveAt.Equal(later) ||
+			got.Runtime != RuntimeClaudeCode || !got.ClaudeConnected {
 			t.Fatalf("unexpected row: %+v", got)
 		}
 		if err := s.SetState(ctx, "nobody", StateAwake, later); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("want ErrNotFound, got %v", err)
+		}
+		if err := s.SetRuntime(ctx, "nobody", RuntimeHermes, later); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("SetRuntime: want ErrNotFound, got %v", err)
+		}
+		if err := s.SetClaudeConnected(ctx, "nobody", true, later); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("SetClaudeConnected: want ErrNotFound, got %v", err)
 		}
 		if err := s.Delete(ctx, "u1"); err != nil {
 			t.Fatal(err)

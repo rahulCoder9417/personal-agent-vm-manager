@@ -41,6 +41,18 @@ func (s State) Running() bool {
 	return s == StateWaking || s == StateAwake || s == StateBusy
 }
 
+// Runtime is the agent that answers in the sandbox (same names as the table's CHECK constraint).
+type Runtime string
+
+// Agent runtimes.
+const (
+	RuntimeHermes     Runtime = "hermes"      // Hermes Agent on the platform's models (LiteLLM)
+	RuntimeClaudeCode Runtime = "claude_code" // the official Claude Code CLI on the user's own Claude plan
+)
+
+// Valid reports whether r is a known runtime.
+func (r Runtime) Valid() bool { return r == RuntimeHermes || r == RuntimeClaudeCode }
+
 // Sandbox is one row of the sandboxes table.
 type Sandbox struct {
 	UserID           string
@@ -52,6 +64,8 @@ type Sandbox struct {
 	MCPTokenHash     string
 	BridgeSecretHash string
 	Allowlist        []string
+	Runtime          Runtime // "" is stored as hermes
+	ClaudeConnected  bool    // last status seen from the Bridge
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
 }
@@ -82,6 +96,10 @@ type Store interface {
 	SetAllowlist(ctx context.Context, userID string, domains []string, at time.Time) error
 	// SetPriority changes the awake-cap priority.
 	SetPriority(ctx context.Context, userID string, priority int32, at time.Time) error
+	// SetRuntime changes the agent runtime.
+	SetRuntime(ctx context.Context, userID string, runtime Runtime, at time.Time) error
+	// SetClaudeConnected records the last seen Claude Code sign-in status.
+	SetClaudeConnected(ctx context.Context, userID string, connected bool, at time.Time) error
 	// Delete removes the sandbox row (awake periods are kept for billing). No error if missing.
 	Delete(ctx context.Context, userID string) error
 
