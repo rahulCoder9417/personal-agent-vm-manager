@@ -1,10 +1,15 @@
+import http.server
 import json
 import os
+import shutil
 import stat
+import subprocess
 import tempfile
+import threading
 import unittest
 
-from bridge.platform import load_platform_file, render_hermes_config, write_hermes_config
+from bridge.platform import (git_gateway_url, load_platform_file, render_gitconfig, render_hermes_config,
+                             write_gitconfig, write_hermes_config)
 
 
 class PlatformTest(unittest.TestCase):
@@ -54,6 +59,66 @@ class PlatformTest(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
         with open(path) as fh:
             self.assertEqual(json.load(fh)["model"]["api_key"], "sk-1")
+
+    def test_git_gateway_url(self):
+        self.assertEqual(git_gateway_url({}), "http://api:8080/git/")
+        self.assertEqual(git_gateway_url({"PLATFORM_MCP_URL": "http://host.docker.internal:8080/mcp/"}),
+                         "http://host.docker.internal:8080/git/")
+
+    def test_gitconfig_written_private_and_included_once(self):
+        pf = load_platform_file(self.path)
+        home = os.path.join(self.tmp, "home")
+        os.makedirs(home)
+        user_cfg = os.path.join(home, ".gitconfig")
+        with open(user_cfg, "w") as fh:
+            fh.write("[user]\n\tname = Mine\n")
+        content = render_gitconfig(pf, {})
+        self.assertIn("Authorization: Bearer tok-123", content)
+        for _ in range(2):
+            path = write_gitconfig(content, self.tmp, home)
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+        with open(user_cfg) as fh:
+            written = fh.read()
+        self.assertEqual(written.count("[include]"), 1)
+        self.assertTrue(written.startswith("[include]"))
+        self.assertTrue(written.endswith("[user]\n\tname = Mine\n"))
+
+    @unittest.skipUnless(shutil.which("git"), "git is not installed")
+    def test_real_git_goes_through_the_gateway_with_the_container_token(self):
+        seen = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                seen.append((self.path, self.headers.get("Authorization")))
+                self.send_response(403)
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        pf = load_platform_file(self.path)
+        home = os.path.join(self.tmp, "home")
+        env = {"PLATFORM_MCP_URL": f"http://127.0.0.1:{server.server_port}/mcp"}
+        write_gitconfig(render_gitconfig(pf, env), self.tmp, home)
+        git_env = {"HOME": home, "PATH": os.environ["PATH"], "GIT_TERMINAL_PROMPT": "0",
+                   "GIT_CONFIG_NOSYSTEM": "1", "NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"}
+
+        def git(*args):
+            return subprocess.run(["git", *args], env=git_env, cwd=self.tmp, capture_output=True, text=True,
+                                  timeout=30)
+
+        self.assertEqual(git("config", "--get", "user.name").stdout.strip(), "Personal Agent")
+        for url in ("https://github.com/acme/app", "git@github.com:acme/app.git", "ssh://git@github.com/acme/app"):
+            seen.clear()
+            self.assertNotEqual(git("ls-remote", url).returncode, 0)
+            self.assertEqual(len(seen), 1, url)
+            path, auth = seen[0]
+            self.assertTrue(path.startswith("/git/acme/app"), path)
+            self.assertTrue(path.endswith("/info/refs?service=git-upload-pack"), path)
+            self.assertEqual(auth, "Bearer tok-123")
 
 
 if __name__ == "__main__":

@@ -139,3 +139,66 @@ def write_hermes_config(cfg: dict[str, Any], hermes_home: str) -> str:
         fh.write("\n")
     os.replace(tmp, path)
     return path
+
+
+GIT_USER_NAME = "Personal Agent"
+GIT_USER_EMAIL = "agent@users.noreply.github.com"
+
+
+def git_gateway_url(env: dict[str, str]) -> str:
+    """The api's git gateway, next to the Platform MCP: http://api:8080/mcp -> http://api:8080/git/."""
+    mcp = env.get("PLATFORM_MCP_URL", "http://api:8080/mcp").rstrip("/")
+    base = mcp[: -len("/mcp")] if mcp.endswith("/mcp") else mcp
+    return base + "/git/"
+
+
+def render_gitconfig(pf: PlatformFile, env: dict[str, str]) -> str:
+    """Git config that sends github.com through the platform's git gateway.
+
+    The container never holds a GitHub token: git talks to the gateway with this container's
+    own token, and the api adds the user's GitHub credentials on its side.
+    """
+    gateway = git_gateway_url(env)
+    return (
+        "# Written by the platform at every start. Do not edit: changes are overwritten.\n"
+        f'[url "{gateway}"]\n'
+        "\tinsteadOf = https://github.com/\n"
+        "\tinsteadOf = http://github.com/\n"
+        "\tinsteadOf = git@github.com:\n"
+        "\tinsteadOf = ssh://git@github.com/\n"
+        f'[http "{gateway}"]\n'
+        f"\textraHeader = Authorization: Bearer {pf.mcp_token}\n"
+        "[user]\n"
+        f"\tname = {GIT_USER_NAME}\n"
+        f"\temail = {GIT_USER_EMAIL}\n"
+        "[init]\n"
+        "\tdefaultBranch = main\n"
+    )
+
+
+def write_gitconfig(content: str, data_dir: str, home: str) -> str:
+    """Writes the managed config to /data/.platform/gitconfig and includes it from ~/.gitconfig.
+
+    The include goes first, so anything the agent sets itself in ~/.gitconfig (e.g. user.name)
+    still wins.
+    """
+    path = os.path.join(data_dir, ".platform", "gitconfig")
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(content)
+    os.replace(tmp, path)
+
+    os.makedirs(home, mode=0o700, exist_ok=True)
+    user_path = os.path.join(home, ".gitconfig")
+    include = f"[include]\n\tpath = {path}\n"
+    try:
+        with open(user_path, encoding="utf-8") as fh:
+            current = fh.read()
+    except FileNotFoundError:
+        current = ""
+    if f"path = {path}" not in current:
+        with open(user_path, "w", encoding="utf-8") as fh:
+            fh.write(include + current)
+    return path
