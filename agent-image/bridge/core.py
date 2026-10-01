@@ -99,7 +99,11 @@ def build_instructions(req: DeliverRequest) -> str:
         f"The user is talking to you through {channel}. Your final answer for this turn is delivered to "
         "them automatically, so do not try to send it yourself. Keep replies suited to a chat app. "
         "Before anything risky (sending to other people, deleting, paying, posting publicly) call "
-        "request_approval and end your turn; the user's answer arrives as a later message."
+        "request_approval and end your turn; the user's answer arrives as a later message. "
+        "When the user's GitHub is connected, git works for their repositories: clone "
+        "https://github.com/<owner>/<repo> into your workspace, commit on a new branch and push it, "
+        "then open the pull request with the GitHub app action. Pushing to a repository's default "
+        "branch is refused, so always work on a branch."
     )
 
 

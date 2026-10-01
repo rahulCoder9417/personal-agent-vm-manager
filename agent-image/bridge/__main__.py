@@ -22,7 +22,8 @@ from .claude import RUNTIME_CLAUDE, RUNTIME_HERMES, ClaudeAuth, ClaudeRunner
 from .core import Bridge, DeliveryStore
 from .hermes import HermesClient, HermesProcess
 from .mcp_client import PlatformMCP
-from .platform import HERMES_API_PORT, load_platform_file, render_hermes_config, write_hermes_config
+from .platform import (HERMES_API_PORT, load_platform_file, render_gitconfig, render_hermes_config, write_gitconfig,
+                       write_hermes_config)
 from .runtime import PlatformReader, RuntimeRunner
 from .server import BridgeHTTPServer
 
@@ -43,6 +44,7 @@ def main() -> int:
     platform_path = env.get("PLATFORM_FILE", os.path.join(data, ".platform", "platform.json"))
     pf = load_platform_file(platform_path)
     write_hermes_config(render_hermes_config(pf, env, data), hermes_home)
+    write_gitconfig(render_gitconfig(pf, env), data, env.get("HOME", os.path.join(data, "home")))
     if pf.timezone:
         env["TZ"] = pf.timezone
 
