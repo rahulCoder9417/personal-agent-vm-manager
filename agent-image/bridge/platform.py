@@ -13,6 +13,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from . import crew
+
 HERMES_API_HOST = "127.0.0.1"
 HERMES_API_PORT = 8642
 PLATFORM_SERVER_NAME = "platform"
@@ -78,6 +80,7 @@ def render_hermes_config(pf: PlatformFile, env: dict[str, str], data_dir: str = 
     - MCP: the Platform MCP (with this container's token; `send_message` hidden because the
       Bridge sends the final answer itself) + the user's own MCP servers
     - Hermes's own chat connectors and cron off (only the local API server runs)
+    - delegation (the crew): children cannot delegate, BRIDGE_CREW_MAX_PARALLEL at a time (default 3)
     - memory, skills and sessions under HERMES_HOME (= /data/hermes)
     """
     base = env.get("LITELLM_BASE_URL", "http://litellm:4000").rstrip("/")
@@ -112,6 +115,8 @@ def render_hermes_config(pf: PlatformFile, env: dict[str, str], data_dir: str = 
         # No Hermes-side scheduling or outbound messaging: the platform owns both.
         "cron": {"enabled": False},
         "agent": {"disabled_toolsets": ["cronjob", "messaging"]},
+        # The crew: the lead hands work over with delegate_task, one level deep, a few at a time.
+        "delegation": crew.hermes_delegation(crew.max_parallel(env)),
         "terminal": {"backend": "local", "cwd": os.path.join(data_dir, "workspace"), "timeout": 180},
         "memory": {"memory_enabled": True, "user_profile_enabled": True},
         # The only "platform" Hermes runs: its local API server, loopback only.
