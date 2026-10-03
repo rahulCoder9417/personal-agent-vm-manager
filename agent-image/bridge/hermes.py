@@ -2,7 +2,8 @@
 
 Hermes runs as `hermes gateway run` with only its API server enabled, bound to
 127.0.0.1 and protected by a random per-boot key that never leaves this process
-tree. One Hermes run = one delivered message. Hermes keeps one conversation per
+tree. One Hermes run = one delivered message (plus follow-up runs when the lead handed work
+to its crew, see HermesClient.run). Hermes keeps one conversation per
 `X-Hermes-Session-Key` (we pass the platform's session key, e.g. "telegram:42").
 """
 
@@ -21,9 +22,24 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Iterator, Optional
 
+from . import crew
+
 log = logging.getLogger("bridge.hermes")
 
 TERMINAL_EVENTS = {"run.completed", "run.failed", "run.cancelled", "run.interrupted"}
+
+# The crew on Hermes: follow-up turns after specialists that ran in the background.
+MAX_CREW_ROUNDS = 3
+CREW_FOLLOW_UP = ("[Crew update: the specialists you started have finished, and their reports are now in this "
+                  "conversation. Use them to write the final answer for the user. Start another specialist only "
+                  "if the job still needs one.]")
+_DISPATCHED = '"status": "dispatched"'  # start of delegate_task's answer when the children run in the background
+_CHILD_OUTCOMES = {"completed": crew.DONE, "failed": crew.FAILED, "error": crew.FAILED, "timeout": crew.FAILED,
+                   "interrupted": crew.STOPPED}
+
+
+def _child_id(ev: dict) -> str:
+    return str(ev.get("subagent_id") or f"{ev.get('delegation_id') or ''}#{ev.get('task_index') or 0}")
 
 
 class HermesError(Exception):
@@ -41,10 +57,11 @@ class RunResult:
 class HermesClient:
     """Minimal client for Hermes's local API server (no proxy: loopback only)."""
 
-    def __init__(self, base_url: str, api_key: str, approval_choice: str = "deny"):
+    def __init__(self, base_url: str, api_key: str, approval_choice: str = "deny", poll_interval: float = 2.0):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.approval_choice = approval_choice
+        self.poll_interval = poll_interval  # between checks on specialists that work in the background
         self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
     def _req(self, method: str, path: str, body: Optional[dict] = None, headers: Optional[dict] = None,
@@ -136,18 +153,54 @@ class HermesClient:
 
     def run(self, text: str, instructions: str, session_key: str, idempotency_key: str,
             on_progress, timeout: float = 900) -> RunResult:
-        """Run one turn to the end. on_progress(message) is called for tool activity."""
-        run_id = self.start_run(text, instructions, session_key, idempotency_key)
+        """Run one turn to the end. on_progress(message) is called for tool activity.
+
+        The crew: on this API Hermes runs the lead's specialists in the background. The lead's run
+        ends with a short status, the specialists' reports are stored in the session when they
+        finish, and the client has to start the next turn. So after a run that handed work over,
+        wait for the specialists and run again in the same session; the last run's answer is the
+        turn's answer.
+        """
+        instructions = f"{instructions}\n\n{crew.hermes_handoff()}"
         deadline = time.monotonic() + timeout
+        progress = crew.Progress(on_progress)
+        result, handed_over = self._run_once(text, instructions, session_key, idempotency_key, on_progress,
+                                             progress, deadline)
+        rounds = 0
+        while result.status == "completed" and handed_over and rounds < MAX_CREW_ROUNDS:
+            if not self._wait_for_crew(deadline):
+                break  # Hermes does not say whether they are done: keep the lead's status as the answer
+            progress.finish_all()
+            rounds += 1
+            result, handed_over = self._run_once(CREW_FOLLOW_UP, instructions, session_key,
+                                                 f"{idempotency_key}/crew{rounds}", on_progress, progress, deadline)
+        return result
+
+    def _run_once(self, text: str, instructions: str, session_key: str, idempotency_key: str, on_progress,
+                  progress: crew.Progress, deadline: float) -> tuple[RunResult, bool]:
+        """One Hermes run. Returns (result, whether specialists are still working in the background)."""
+        run_id = self.start_run(text, instructions, session_key, idempotency_key)
+        children: set[str] = set()  # started and not yet finished
+        detached = False
         try:
-            for ev in self.events(run_id, timeout=timeout):
+            for ev in self.events(run_id, timeout=max(deadline - time.monotonic(), 1)):
                 name = ev.get("event", "")
                 if name == "tool.started":
                     on_progress(f"using {ev.get('tool') or 'a tool'}")
+                elif name == "tool.completed" and ev.get("tool") == crew.HERMES_DELEGATE_TOOL:
+                    detached = detached or _DISPATCHED in str(ev.get("preview") or "")
+                elif name == "subagent.start":
+                    children.add(_child_id(ev))
+                    member, what = crew.from_goal(ev.get("goal") or ev.get("preview"))
+                    if member is not None:
+                        progress.start(_child_id(ev), member, what)
+                elif name == "subagent.complete":
+                    children.discard(_child_id(ev))
+                    progress.finish(_child_id(ev), _CHILD_OUTCOMES.get(str(ev.get("status") or ""), crew.FINISHED))
                 elif name == "approval.request":
                     self.resolve_approval(run_id)
                 elif name in TERMINAL_EVENTS:
-                    return _result(name.split(".", 1)[1], ev)
+                    return _result(name.split(".", 1)[1], ev), detached or bool(children)
         except HermesError:
             raise
         except OSError as exc:  # stream broke; fall back to polling
@@ -159,10 +212,40 @@ class HermesClient:
             except (OSError, urllib.error.URLError) as exc:
                 raise HermesError(f"status: {exc}") from exc
             if st.get("status") in {"completed", "failed", "cancelled", "interrupted"}:
-                return _result(st["status"], st)
+                return _result(st["status"], st), detached or bool(children)
             time.sleep(1)
         self.stop_run(run_id)
         raise HermesError("run did not finish in time")
+
+    def background_work(self) -> Optional[int]:
+        """Delegations Hermes still runs, plus finished ones it has not stored in their session yet
+        (GET /health/detailed). None when Hermes does not say."""
+        try:
+            with self._req("GET", "/health/detailed", timeout=10) as resp:
+                payload = json.loads(resp.read() or b"{}")
+            queues = payload["readiness"]["checks"]["background_queues"]
+            return int(queues["active_delegations"]) + int(queues.get("process_completions") or 0)
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+
+    def _wait_for_crew(self, deadline: float) -> bool:
+        """Wait until the background specialists are done (two quiet checks in a row). False when
+        Hermes does not report it; HermesError when they are still working at the deadline."""
+        quiet = unknown = 0
+        while time.monotonic() < deadline:
+            work = self.background_work()
+            if work is None:
+                unknown += 1
+                if unknown >= 3:
+                    log.warning("hermes does not report its background delegations; not waiting for the crew")
+                    return False
+            else:
+                unknown = 0
+                quiet = quiet + 1 if work == 0 else 0
+                if quiet >= 2:
+                    return True
+            time.sleep(self.poll_interval)
+        raise HermesError("the specialists did not finish in time")
 
 
 def _result(status: str, payload: dict) -> RunResult:

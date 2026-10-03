@@ -52,6 +52,17 @@ class PlatformTest(unittest.TestCase):
         self.assertEqual(cfg["terminal"]["cwd"], "/data/workspace")
         self.assertEqual(cfg["timezone"], "Europe/Berlin")
 
+    def test_render_delegation_for_the_crew(self):
+        pf = load_platform_file(self.path)
+        cfg = render_hermes_config(pf, {})
+        # One level deep (a child never gets delegate_task), at most 3 children at a time.
+        self.assertEqual(cfg["delegation"], {"max_concurrent_children": 3, "max_spawn_depth": 1,
+                                             "orchestrator_enabled": False, "subagent_auto_approve": False})
+        cfg = render_hermes_config(pf, {"BRIDGE_CREW_MAX_PARALLEL": "2"})
+        self.assertEqual(cfg["delegation"]["max_concurrent_children"], 2)
+        # The lead keeps delegate_task: only scheduling and messaging are switched off.
+        self.assertEqual(cfg["agent"]["disabled_toolsets"], ["cronjob", "messaging"])
+
     def test_write_is_private_json(self):
         pf = load_platform_file(self.path)
         home = os.path.join(self.tmp, "hermes")
