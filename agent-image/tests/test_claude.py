@@ -12,7 +12,8 @@ import unittest
 import urllib.error
 import urllib.request
 
-from bridge.claude import (MSG_NOT_SIGNED_IN, ClaudeAuth, ClaudeError, ClaudeRunner, LoginNotFound,
+from bridge import crew
+from bridge.claude import (MSG_NOT_SIGNED_IN, ClaudeAuth, ClaudeError, ClaudeRunner, CrewEvents, LoginNotFound,
                            find_authorize_url)
 from bridge.core import Bridge, DeliverRequest, DeliveryStore
 from bridge.platform import load_platform_file
@@ -153,6 +154,65 @@ class ClaudeRunnerTest(unittest.TestCase):
         self.assertEqual(call["mcp_mode"], oct(0o600))
         self.assertTrue(self.auth.connected())
 
+    def test_crew_is_passed_as_sub_agents(self):
+        self.e.sign_in()
+        self.run_turn()
+        call = self.e.calls()[0]
+        argv = call["argv"]
+        agents = json.loads(flag(argv, "--agents"))
+        self.assertEqual(agents, crew.claude_agents("platform"))
+        self.assertEqual(list(agents), ["byte", "patch", "scout"])
+        self.assertEqual(agents["scout"]["tools"],
+                         ["Read", "Glob", "Grep", "mcp__platform__web_search", "mcp__platform__read_page"])
+        for a in agents.values():
+            self.assertEqual(a["model"], "inherit")
+            self.assertNotIn("Agent", a["tools"], "a specialist cannot start helpers")
+            self.assertIn("Agent", a["disallowedTools"])
+            self.assertFalse([t for t in a["tools"] if t.startswith("mcp__user_")], "platform tools only")
+            self.assertNotIn("permissionMode", a, "specialists run in the lead's permission mode")
+        # Only the lead can start a specialist, one level deep, at most 3 at once, no built-in agents.
+        self.assertIn("Agent", flag(argv, "--allowedTools").split(","))
+        self.assertEqual(call["env"]["CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH"], "1")
+        self.assertEqual(call["env"]["CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS"], "1")
+        self.assertEqual(call["env"]["CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS"], "3")
+        self.assertIn("subagent_type byte, patch or scout", flag(argv, "--append-system-prompt"))
+        # The rest of the command line is as before.
+        self.assertIn("--strict-mcp-config", argv)
+        self.assertEqual(flag(argv, "--permission-mode"), "dontAsk")
+        self.assertEqual(flag(argv, "--disallowedTools"), "mcp__platform__send_message")
+
+    def test_crew_settings(self):
+        self.e.sign_in()
+        runner = ClaudeRunner([self.e.cli], self.e.env, self.e.data, self.e.reader().load, model="opus",
+                              crew_model="haiku", crew_parallel=2)
+        runner.run(text="x", instructions="i", session_key="s", idempotency_key="k", on_progress=lambda m: None,
+                   timeout=20)
+        call = self.e.calls()[0]
+        self.assertEqual(flag(call["argv"], "--model"), "opus")
+        self.assertEqual({a["model"] for a in call["agents"].values()}, {"haiku"})
+        self.assertEqual(call["env"]["CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS"], "2")
+
+    def test_crew_progress_lines(self):
+        self.e.sign_in()
+        self.e.mode("crew")
+        res = self.run_turn()
+        self.assertEqual(res.output, "the crew is done")
+        self.assertEqual(self.progress, [
+            "Scout: researching flight options",  # the lead starts Scout
+            "using web_search",  # Scout's own tool call: the progress line it always was
+            "Scout: done",
+            "Byte: fixing the login bug",
+            "using Agent",  # a sub-agent that is not a crew member gets no crew line
+            "Byte: could not finish",
+        ])
+
+    def test_crew_progress_lines_for_a_background_specialist(self):
+        self.e.sign_in()
+        self.e.mode("crew_background")
+        self.run_turn()
+        # "done" comes with the task notification, not when the Agent call returns "launched".
+        self.assertEqual(self.progress, ["Patch: reviewing pull request 12", "using Read", "Patch: done"])
+
     def test_per_session_resume(self):
         self.e.sign_in()
         self.run_turn("one", "telegram:42")
@@ -224,6 +284,42 @@ class ClaudeRunnerTest(unittest.TestCase):
         self.assertFalse(r.healthy())
         with self.assertRaises(ClaudeError):
             r.run(text="x", instructions="", session_key="s", idempotency_key="k", on_progress=print, timeout=5)
+
+
+class CrewEventsTest(unittest.TestCase):
+    """stream-json events about sub-agents -> crew progress lines (no CLI needed)."""
+
+    def setUp(self):
+        self.lines = []
+        self.events = CrewEvents(self.lines.append)
+
+    def start(self, call_id, agent, parent=None, tool="Agent"):
+        block = {"type": "tool_use", "id": call_id, "name": tool,
+                 "input": {"subagent_type": agent, "description": f"job {call_id}"}}
+        return self.events.started({"type": "assistant", "parent_tool_use_id": parent}, block)
+
+    def test_only_the_leads_calls_to_crew_members_count(self):
+        self.assertTrue(self.start("a1", "scout"))
+        self.assertFalse(self.start("a2", "scout", parent="a1"), "a call from inside a specialist")
+        self.assertFalse(self.start("a3", "Explore"), "not a crew member")
+        self.assertFalse(self.start("a4", "byte", tool="Bash"), "not the Agent tool")
+        self.assertEqual(self.lines, ["Scout: job a1"])
+
+    def test_background_outcomes(self):
+        for call_id, agent, status in (("a1", "scout", "failed"), ("a2", "byte", "stopped"), ("a3", "patch", "new")):
+            self.start(call_id, agent)
+            self.events.task({"subtype": "task_started", "task_id": "t" + call_id, "tool_use_id": call_id})
+            self.events.result({"type": "user", "tool_use_result": {"status": "async_launched"}},
+                               {"type": "tool_result", "tool_use_id": call_id})
+            self.events.task({"subtype": "task_notification", "task_id": "t" + call_id, "status": status})
+        self.assertEqual(self.lines[1::2], ["Scout: could not finish", "Byte: stopped", "Patch: finished"])
+
+    def test_a_launch_that_fails_is_a_finish(self):
+        self.start("a1", "byte")
+        self.events.result({"type": "user", "tool_use_result": {"status": "async_launched"}},
+                           {"type": "tool_result", "tool_use_id": "a1", "is_error": True})
+        self.events.task({"subtype": "task_notification", "tool_use_id": "a1", "status": "completed"})
+        self.assertEqual(self.lines, ["Byte: job a1", "Byte: could not finish"])
 
 
 def types(events):

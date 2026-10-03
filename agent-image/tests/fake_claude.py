@@ -2,8 +2,9 @@
 
 State lives in $CLAUDE_CONFIG_DIR:
   .credentials.json   present = signed in (written by `auth login`, removed by `auth logout`)
-  fake_mode           optional behaviour switch: limit | crash | hang | max_turns | login_hang | login_no_url
-  fake_calls.jsonl    one line per -p run: argv, prompt (stdin), cwd, selected env, the MCP config
+  fake_mode           optional behaviour switch: limit | crash | hang | max_turns | login_hang | login_no_url |
+                      crew (the lead starts specialists in the foreground) | crew_background
+  fake_calls.jsonl    one line per -p run: argv, prompt (stdin), cwd, selected env, the MCP config, --agents
   fake_sessions.json  known session ids -> number of turns
 """
 
@@ -88,10 +89,20 @@ def print_mode(args) -> int:
     if mcp_path and os.path.exists(mcp_path):
         with open(mcp_path) as fh:
             mcp = json.load(fh)
+    agents_arg = flag(args, "--agents")
+    try:
+        agents = json.loads(agents_arg) if agents_arg else None
+    except ValueError:
+        # Like the real CLI: an invalid --agents value ends the run before the session starts.
+        sys.stderr.write("Error: Invalid --agents configuration:\ninvalid JSON\n")
+        return 1
     call = {"argv": args, "prompt": prompt, "cwd": os.getcwd(),
             "env": {k: os.environ.get(k) for k in ("CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY", "DISABLE_AUTOUPDATER",
-                                                   "HTTPS_PROXY")},
-            "mcp": mcp, "mcp_mode": oct(os.stat(mcp_path).st_mode & 0o777) if mcp_path else None}
+                                                   "HTTPS_PROXY", "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH",
+                                                   "CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS",
+                                                   "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS")},
+            "mcp": mcp, "mcp_mode": oct(os.stat(mcp_path).st_mode & 0o777) if mcp_path else None,
+            "agents": agents}
     with open(os.path.join(CFG, "fake_calls.jsonl"), "a") as fh:
         fh.write(json.dumps(call) + "\n")
 
@@ -131,6 +142,11 @@ def print_mode(args) -> int:
     if m == "max_turns":
         out({"type": "result", "subtype": "error_max_turns", "is_error": True, "session_id": sid})
         return 1
+    if m in ("crew", "crew_background"):
+        (crew_foreground if m == "crew" else crew_background)(sid)
+        out({"type": "result", "subtype": "success", "is_error": False, "result": "the crew is done",
+             "session_id": sid})
+        return 0
     out({"type": "assistant", "session_id": sid, "message": {"content": [
         {"type": "tool_use", "id": "t1", "name": "mcp__platform__web_search", "input": {"q": "x"}}]}})
     out({"type": "user", "session_id": sid, "message": {"content": [
@@ -140,6 +156,58 @@ def print_mode(args) -> int:
          "result": f"reply {sessions[sid]} to: {prompt.strip().splitlines()[-1] if prompt.strip() else ''}",
          "session_id": sid, "total_cost_usd": 0.01})
     return 0
+
+
+def msg(sid, role, content, parent=None, **extra) -> None:
+    """One `assistant` / `user` message; `parent` = the Agent tool call a sub-agent's message belongs to."""
+    out({"type": role, "session_id": sid, "parent_tool_use_id": parent, "message": {"role": role, "content": content},
+         **extra})
+
+
+def agent_call(call_id, agent, description, tool="Agent", **extra):
+    return {"type": "tool_use", "id": call_id, "name": tool,
+            "input": {"subagent_type": agent, "description": description, "prompt": "the task", **extra}}
+
+
+def crew_foreground(sid) -> None:
+    """The lead starts Scout, then Byte (which fails) next to a sub-agent that is not a crew member."""
+    msg(sid, "assistant", [agent_call("a1", "scout", "researching flight options")])
+    out({"type": "system", "subtype": "task_started", "task_id": "t1", "tool_use_id": "a1", "session_id": sid,
+         "description": "researching flight options", "task_type": "local_agent", "is_backgrounded": False})
+    msg(sid, "user", [{"type": "text", "text": "the task"}], parent="a1")
+    # Scout's own work: its tool calls show up with parent_tool_use_id set.
+    msg(sid, "assistant", [{"type": "tool_use", "id": "s1", "name": "mcp__platform__web_search", "input": {}}],
+        parent="a1")
+    msg(sid, "user", [{"type": "tool_result", "tool_use_id": "s1", "content": "results"}], parent="a1")
+    msg(sid, "user", [{"type": "tool_result", "tool_use_id": "a1", "content": [{"type": "text", "text": "report"}]}],
+        tool_use_result={"status": "completed", "agentId": "x1", "agentType": "scout", "prompt": "the task",
+                         "content": [{"type": "text", "text": "report"}]})
+    msg(sid, "assistant", [agent_call("a2", "byte", "Byte: fixing the login bug"),
+                           agent_call("a3", "general-purpose", "something else")])
+    msg(sid, "user", [{"type": "tool_result", "tool_use_id": "a2", "is_error": True,
+                       "content": "Agent terminated early due to an API error"}])
+    msg(sid, "user", [{"type": "tool_result", "tool_use_id": "a3", "is_error": True,
+                       "content": "Agent type 'general-purpose' not found"}])
+    msg(sid, "assistant", [{"type": "text", "text": "the crew is done"}])
+
+
+def crew_background(sid) -> None:
+    """The lead starts Patch in the background (old tool name `Task`); it ends with a task_notification."""
+    msg(sid, "assistant", [agent_call("b1", "patch", "reviewing pull request 12", tool="Task",
+                                      run_in_background=True)])
+    out({"type": "system", "subtype": "task_started", "task_id": "t9", "tool_use_id": "b1", "session_id": sid,
+         "description": "reviewing pull request 12", "task_type": "local_agent", "is_backgrounded": True})
+    msg(sid, "user", [{"type": "tool_result", "tool_use_id": "b1", "content": "Async agent launched"}],
+        tool_use_result={"status": "async_launched", "agentId": "x2", "description": "reviewing pull request 12",
+                         "prompt": "the task", "outputFile": "/data/tmp/x2.output"})
+    msg(sid, "assistant", [{"type": "tool_use", "id": "l1", "name": "Read", "input": {}}])  # the lead carries on
+    msg(sid, "user", [{"type": "tool_result", "tool_use_id": "l1", "content": "file"}])
+    # A background shell task of the lead must not be taken for a specialist.
+    out({"type": "system", "subtype": "task_notification", "task_id": "t0", "tool_use_id": "l1",
+         "status": "completed", "output_file": "", "summary": "", "session_id": sid})
+    out({"type": "system", "subtype": "task_notification", "task_id": "t9", "status": "completed",
+         "output_file": "/data/tmp/x2.output", "summary": "review posted", "session_id": sid})
+    msg(sid, "assistant", [{"type": "text", "text": "the crew is done"}])
 
 
 def main() -> int:

@@ -18,6 +18,7 @@ import signal
 import sys
 import threading
 
+from . import crew
 from .claude import RUNTIME_CLAUDE, RUNTIME_HERMES, ClaudeAuth, ClaudeRunner
 from .core import Bridge, DeliveryStore
 from .hermes import HermesClient, HermesProcess
@@ -58,7 +59,9 @@ def main() -> int:
     claude_auth = ClaudeAuth(claude_cmd, env)
     claude = ClaudeRunner(claude_cmd, env, data, reader.load, auth=claude_auth,
                           model=env.get("BRIDGE_CLAUDE_MODEL", ""),
-                          max_turns=int(env.get("BRIDGE_CLAUDE_MAX_TURNS", "0") or 0))
+                          max_turns=int(env.get("BRIDGE_CLAUDE_MAX_TURNS", "0") or 0),
+                          crew_model=env.get("BRIDGE_CLAUDE_CREW_MODEL", ""),
+                          crew_parallel=crew.max_parallel(env))
     runner = RuntimeRunner(reader.load, {RUNTIME_HERMES: client, RUNTIME_CLAUDE: claude})
     sender = PlatformMCP(env.get("PLATFORM_MCP_URL", "http://api:8080/mcp"), pf.mcp_token)
     store = DeliveryStore(os.path.join(data, ".platform", "deliveries.json"))
