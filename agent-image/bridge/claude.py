@@ -7,7 +7,9 @@ Two parts:
   stored in /data). The Platform MCP is passed with --mcp-config (this container's bearer
   token, the same as Hermes gets). Permissions: dontAsk mode with an allow list (file and
   shell work inside the sandbox, our MCP tools), so nothing ever waits for a prompt; risky
-  real-world actions go through the platform's request_approval tool.
+  real-world actions go through the platform's request_approval tool. The crew (crew.py) is
+  passed as sub-agents with --agents; the lead starts one with the Agent tool, and a
+  specialist cannot start another (code.claude.com/docs/en/sub-agents).
 
 - ClaudeAuth: sign-in, status and sign-out through the CLI's own commands
   (`claude auth login | status | logout`). The CLI keeps its credentials in its own config
@@ -42,6 +44,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
+from . import crew
 from .platform import PLATFORM_SERVER_NAME, PlatformFile, server_key
 
 log = logging.getLogger("bridge.claude")
@@ -204,9 +207,13 @@ class ClaudeRunner:
 
     def __init__(self, cmd: list[str], env: dict[str, str], data_dir: str,
                  load_platform: Callable[[], PlatformFile], auth: Optional["ClaudeAuth"] = None,
-                 model: str = "", max_turns: int = 0, allowed_tools: tuple[str, ...] = DEFAULT_ALLOWED_TOOLS):
+                 model: str = "", max_turns: int = 0, allowed_tools: tuple[str, ...] = DEFAULT_ALLOWED_TOOLS,
+                 crew_model: str = "", crew_parallel: int = crew.DEFAULT_MAX_PARALLEL):
         self.cmd = cmd
         self.env = child_env(env)
+        # Sub-agents: the crew only, one level deep, a cap on how many run at once.
+        self.env.update(crew.claude_env(crew_parallel))
+        self.crew_model = crew_model  # "" = a specialist uses the lead's model
         self.base_env = env
         self.data_dir = data_dir
         self.workdir = os.path.join(data_dir, "workspace")
@@ -232,7 +239,7 @@ class ClaudeRunner:
 
     def _args(self, pf: PlatformFile, instructions: str, session_id: str, resume: bool) -> list[str]:
         allowed = list(self.allowed_tools) + [f"mcp__{PLATFORM_SERVER_NAME}"] + \
-            [f"mcp__{server_key(s)}" for s in pf.mcp_servers if s.url]
+            [f"mcp__{server_key(s)}" for s in pf.mcp_servers if s.url] + [crew.CLAUDE_AGENT_TOOL]
         args = [*self.cmd, "-p", "--output-format", "stream-json", "--verbose",
                 "--mcp-config", self.mcp_path, "--strict-mcp-config",
                 "--permission-mode", "dontAsk", "--permission-prompts", "none",
@@ -240,7 +247,9 @@ class ClaudeRunner:
                 # The Bridge sends the final answer itself.
                 "--disallowedTools", f"mcp__{PLATFORM_SERVER_NAME}__send_message",
                 "--setting-sources", "user",
-                "--append-system-prompt", instructions]
+                # The crew as sub-agents of this (lead) session; each has its own tool list.
+                "--agents", json.dumps(crew.claude_agents(PLATFORM_SERVER_NAME, self.crew_model)),
+                "--append-system-prompt", f"{instructions}\n\n{crew.CLAUDE_HANDOFF}"]
         if self.model:
             args += ["--model", self.model]
         if self.max_turns > 0:
@@ -313,6 +322,7 @@ class ClaudeRunner:
         seen: Optional[str] = None
         final: Optional[dict] = None
         retry_error = ""
+        crew_events = CrewEvents(on_progress)
         try:
             for raw in proc.stdout:
                 try:
@@ -327,10 +337,15 @@ class ClaudeRunner:
                 elif typ == "system" and sub == "api_retry":
                     retry_error = str(ev.get("error") or "")
                     on_progress(f"Claude is retrying ({retry_error or 'error'})")
+                elif typ == "system" and sub in ("task_started", "task_notification"):
+                    crew_events.task(ev)
                 elif typ == "assistant":
-                    for block in (ev.get("message") or {}).get("content") or []:
-                        if isinstance(block, dict) and block.get("type") == "tool_use":
+                    for block in _blocks(ev, "tool_use"):
+                        if not crew_events.started(ev, block):
                             on_progress(f"using {_tool_label(block.get('name'))}")
+                elif typ == "user":
+                    for block in _blocks(ev, "tool_result"):
+                        crew_events.result(ev, block)
                 elif typ == "result":
                     final = ev
                     seen = ev.get("session_id") or seen
@@ -372,6 +387,63 @@ def _tool_label(name: Any) -> str:
     if name.startswith("mcp__"):
         return name.split("__")[-1]
     return name
+
+
+def _blocks(ev: dict, typ: str) -> list[dict]:
+    """The content blocks of one type in an `assistant` / `user` stream-json message."""
+    content = (ev.get("message") or {}).get("content")
+    if not isinstance(content, list):
+        return []
+    return [b for b in content if isinstance(b, dict) and b.get("type") == typ]
+
+
+class CrewEvents:
+    """Crew progress lines from the stream-json events about sub-agents.
+
+    The lead starts a specialist with an `Agent` tool call (input: subagent_type, description).
+    A specialist that runs in the foreground is finished when that call's tool_result arrives. One
+    that runs in the background answers the call at once (`tool_use_result.status` =
+    "async_launched") and is finished by a `system/task_notification` event. Messages from inside
+    a specialist carry `parent_tool_use_id`, so they are never taken for the lead's own calls.
+    (code.claude.com/docs/en/headless "Follow subagent messages"; agent-sdk/typescript AgentOutput,
+    SDKTaskStartedMessage, SDKTaskNotificationMessage.)
+    """
+
+    _OUTCOMES = {"completed": crew.DONE, "failed": crew.FAILED, "stopped": crew.STOPPED}
+
+    def __init__(self, on_progress: Callable[[str], None]):
+        self.progress = crew.Progress(on_progress)
+        self._tasks: dict[str, str] = {}  # background task id -> the Agent tool call that started it
+
+    def started(self, ev: dict, block: dict) -> bool:
+        """True when this tool_use block is the lead starting a specialist (a start line was sent)."""
+        if ev.get("parent_tool_use_id") or block.get("name") not in crew.CLAUDE_AGENT_TOOLS:
+            return False
+        args = block.get("input") if isinstance(block.get("input"), dict) else {}
+        member = crew.BY_ID.get(str(args.get("subagent_type") or ""))
+        if member is None or not block.get("id"):
+            return False
+        self.progress.start(block["id"], member, args.get("description"))
+        return True
+
+    def result(self, ev: dict, block: dict) -> None:
+        call_id = block.get("tool_use_id")
+        if ev.get("parent_tool_use_id") or not self.progress.is_open(call_id):
+            return
+        out = ev.get("tool_use_result")
+        launched = isinstance(out, dict) and out.get("status") in ("async_launched", "remote_launched")
+        if launched and not block.get("is_error"):
+            return  # still running in the background; task_notification says when it ends
+        self.progress.finish(call_id, crew.FAILED if block.get("is_error") else crew.DONE)
+
+    def task(self, ev: dict) -> None:
+        task_id, call_id = str(ev.get("task_id") or ""), ev.get("tool_use_id")
+        if ev.get("subtype") == "task_started":
+            if task_id and call_id:
+                self._tasks[task_id] = str(call_id)
+            return
+        self.progress.finish(call_id or self._tasks.get(task_id),
+                             self._OUTCOMES.get(str(ev.get("status") or ""), crew.FINISHED))
 
 
 def _killpg(proc: subprocess.Popen) -> None:
