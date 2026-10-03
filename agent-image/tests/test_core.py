@@ -4,7 +4,7 @@ import threading
 import time
 import unittest
 
-from bridge.core import (Bridge, DeliverRequest, DeliveryStore, build_input)
+from bridge.core import (Bridge, DeliverRequest, DeliveryStore, build_input, build_instructions)
 
 from tests.fakes import FakeRunner, FakeSender
 
@@ -159,6 +159,21 @@ class RequestTest(unittest.TestCase):
         r = DeliverRequest.from_json({"delivery_id": "x", "kind": "message", "text": "see file", "attachments": [
             {"id": "a1", "name": "cv.pdf", "mime_type": "application/pdf", "url": "http://api:8080/files/a1"}]})
         self.assertIn("cv.pdf (application/pdf) http://api:8080/files/a1", build_input(r))
+
+    def test_build_instructions(self):
+        text = build_instructions(req(channel="telegram"))
+        # The existing rules stay: the channel, who sends the answer, approvals, git.
+        for part in ("through telegram", "do not try to send it yourself", "call request_approval and end your turn",
+                     "commit on a new branch and push it", "open the pull request with the GitHub app action",
+                     "default branch is refused"):
+            self.assertIn(part, text)
+        # The crew: who does what, small jobs stay with the lead, the cap, Patch after Byte.
+        for part in ("You are Tex, the lead of a small crew", "research to Scout", "code changes to Byte",
+                     "the review of a pull request or of Byte's work to Patch", "Do small jobs yourself",
+                     "at most 3 specialists for one job",
+                     "After Byte opens a pull request you may have Patch review it"):
+            self.assertIn(part, text)
+        self.assertIn("through chat", build_instructions(req(channel="")))
 
 
 if __name__ == "__main__":

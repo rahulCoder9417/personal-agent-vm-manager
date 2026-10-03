@@ -16,6 +16,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator, Optional, Protocol
 
+from . import crew
+
 log = logging.getLogger("bridge.core")
 
 ACCEPTED, WORKING, TURN_DONE, ERROR = "accepted", "working", "turn_done", "error"
@@ -94,6 +96,8 @@ def build_input(req: DeliverRequest) -> str:
 
 
 def build_instructions(req: DeliverRequest) -> str:
+    """The lead's instructions for one turn. Each engine adds how it hands work to a specialist
+    (crew.CLAUDE_HANDOFF / crew.hermes_handoff)."""
     channel = req.channel or "chat"
     return (
         f"The user is talking to you through {channel}. Your final answer for this turn is delivered to "
@@ -103,7 +107,8 @@ def build_instructions(req: DeliverRequest) -> str:
         "When the user's GitHub is connected, git works for their repositories: clone "
         "https://github.com/<owner>/<repo> into your workspace, commit on a new branch and push it, "
         "then open the pull request with the GitHub app action. Pushing to a repository's default "
-        "branch is refused, so always work on a branch."
+        "branch is refused, so always work on a branch.\n\n"
+        + crew.lead_instructions()
     )
 
 
