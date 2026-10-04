@@ -174,7 +174,9 @@ class RequestTest(unittest.TestCase):
         for part in ("You are Tex, the lead of a small crew", "research to Scout", "code changes to Byte",
                      "the review of a pull request or of Byte's work to Patch", "Do small jobs yourself",
                      "at most 3 specialists for one job",
-                     "After Byte opens a pull request you may have Patch review it"):
+                     "After Byte opens a pull request you may have Patch review it",
+                     "when you hand a job to Scout, pass only what the research needs, never secrets, tokens or "
+                     "private data"):
             self.assertIn(part, text)
         self.assertIn("through chat", build_instructions(req(channel="")))
 

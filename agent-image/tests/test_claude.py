@@ -162,8 +162,10 @@ class ClaudeRunnerTest(unittest.TestCase):
         agents = json.loads(flag(argv, "--agents"))
         self.assertEqual(agents, crew.claude_agents("platform"))
         self.assertEqual(list(agents), ["byte", "patch", "scout"])
-        self.assertEqual(agents["scout"]["tools"],
-                         ["Read", "Glob", "Grep", "mcp__platform__web_search", "mcp__platform__read_page"])
+        # Scout: the two web tools only; the built-in file, edit and shell tools are denied as well.
+        self.assertEqual(agents["scout"]["tools"], ["mcp__platform__web_search", "mcp__platform__read_page"])
+        for t in ("Read", "Glob", "Grep", "Edit", "Write", "NotebookEdit", "Bash"):
+            self.assertIn(t, agents["scout"]["disallowedTools"])
         for a in agents.values():
             self.assertEqual(a["model"], "inherit")
             self.assertNotIn("Agent", a["tools"], "a specialist cannot start helpers")
