@@ -86,6 +86,22 @@ class BridgeCoreTest(unittest.TestCase):
         self.assertEqual(len(self.runner.calls), 1, "a duplicate delivery must not start a second run")
         self.assertEqual(len(self.sender.sent), 1)
 
+    def test_a_delivery_that_arrives_just_after_a_run_ended_is_a_new_attempt(self):
+        # The run thread sends the last event and only then drops the turn. A retry that arrives in
+        # between must not be handed the finished turn's events again.
+        from bridge.core import Turn, event
+        ended = Turn()
+        ended.publish(event("accepted"))
+        ended.publish(event("error", "could not deliver the reply", platform_fault=True))
+        self.bridge.store.put("evt-1", state="answered", output="Hi! How can I help?")
+        self.bridge._turns["evt-1"] = ended  # its thread has not dropped it yet
+        events = list(self.bridge.deliver(req()))
+        self.assertEqual(types(events), ["accepted", "turn_done"], "the saved answer is sent, nothing re-run")
+        self.assertEqual(self.sender.sent, [("Hi! How can I help?", "telegram:42")])
+        self.assertEqual(self.runner.calls, [])
+        # The finished turn's thread, dropping it late, must not drop a newer attempt's turn.
+        self.assertEqual(self.busy_after_the_turn(), 0)
+
     def test_dedupe_survives_restart(self):
         list(self.bridge.deliver(req()))
         again = Bridge(SECRET, FakeRunner(), FakeSender(), DeliveryStore(self.store_path))

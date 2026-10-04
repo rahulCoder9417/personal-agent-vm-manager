@@ -19,7 +19,7 @@ import time
 import unittest
 
 from bridge import browser, browser_check, browser_mcp, crew
-from bridge.core import Bridge, DeliverRequest, DeliveryStore, browser_fields
+from bridge.core import Bridge, DeliverRequest, DeliveryStore, Turn, browser_fields
 
 from tests.fakes import FakeRunner, FakeSender
 
@@ -742,11 +742,31 @@ class BrowserTimeWithTheTurnTest(unittest.TestCase):
         self.runner.block.set()
         a.join(5)
         b.join(5)
-        # The turn that ended first did not close the browser under the other; the last one did.
+        # The turn that ended first did not close the browser under the other; the last one did, also
+        # when both end at the same moment (they do here: both runs are released at once).
         self.assertEqual(sorted(meter.calls), [False, True])
         reports = sorted((r[-1]["browser_seconds"], r[-1]["browser_report_id"]) for r in results.values())
         self.assertEqual([r[0] for r in reports], [8, 12], "each second reported by one turn only")
         self.assertEqual(len({r[1] for r in reports}), 2)
+
+    def test_two_turns_that_end_at_the_same_moment(self):
+        # Both runs are over and neither turn has been dropped yet: the first to report leaves the browser
+        # to the other, the second closes it. Without this both would leave it open.
+        meter = FakeMeter(5, 7)
+        bridge = self.bridge(meter)
+        a, b = Turn(), Turn()
+        bridge._turns.update({"evt-a": a, "evt-b": b})
+        first = bridge._browser_report("evt-a", a)
+        second = bridge._browser_report("evt-b", b)
+        self.assertEqual(meter.calls, [False, True])
+        self.assertEqual((first["browser_seconds"], second["browser_seconds"]), (5, 7))
+        # A third turn that is still running keeps the browser open for both.
+        meter = FakeMeter(1, 1)
+        bridge = self.bridge(meter)
+        bridge._turns.update({"evt-a": a, "evt-b": b, "evt-c": Turn()})
+        bridge._browser_report("evt-a", a)
+        bridge._browser_report("evt-b", b)
+        self.assertEqual(meter.calls, [False, False])
 
     def test_a_broken_meter_does_not_break_the_turn(self):
         meter = FakeMeter()
