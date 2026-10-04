@@ -3,7 +3,9 @@
 State lives in $CLAUDE_CONFIG_DIR:
   .credentials.json   present = signed in (written by `auth login`, removed by `auth logout`)
   fake_mode           optional behaviour switch: limit | crash | hang | max_turns | login_hang | login_no_url |
-                      crew (the lead starts specialists in the foreground) | crew_background
+                      crew (the lead starts specialists in the foreground) | crew_background |
+                      crew_unreported (a background specialist whose end the stream never reports) |
+                      crew_hang (a specialist starts, then the CLI hangs)
   fake_calls.jsonl    one line per -p run: argv, prompt (stdin), cwd, selected env, the MCP config, --agents
   fake_sessions.json  known session ids -> number of turns
 """
@@ -142,8 +144,12 @@ def print_mode(args) -> int:
     if m == "max_turns":
         out({"type": "result", "subtype": "error_max_turns", "is_error": True, "session_id": sid})
         return 1
-    if m in ("crew", "crew_background"):
-        (crew_foreground if m == "crew" else crew_background)(sid)
+    if m == "crew_hang":
+        msg(sid, "assistant", [agent_call("h1", "byte", "a long job")])
+        time.sleep(60)
+        return 1
+    if m in CREW_MODES:
+        CREW_MODES[m](sid)
         out({"type": "result", "subtype": "success", "is_error": False, "result": "the crew is done",
              "session_id": sid})
         return 0
@@ -208,6 +214,22 @@ def crew_background(sid) -> None:
     out({"type": "system", "subtype": "task_notification", "task_id": "t9", "status": "completed",
          "output_file": "/data/tmp/x2.output", "summary": "review posted", "session_id": sid})
     msg(sid, "assistant", [{"type": "text", "text": "the crew is done"}])
+
+
+def crew_unreported(sid) -> None:
+    """Two background specialists. Scout's notification names it only by the id its launch answer gave
+    (no task_started, no tool_use_id); Byte's never comes: the run just ends."""
+    msg(sid, "assistant", [agent_call("u1", "scout", "reading 4 pages"), agent_call("u2", "byte", "fixing a typo")])
+    for call_id, agent_id in (("u1", "x7"), ("u2", "x8")):
+        msg(sid, "user", [{"type": "tool_result", "tool_use_id": call_id, "content": "Async agent launched"}],
+            tool_use_result={"status": "async_launched", "agentId": agent_id, "description": "d", "prompt": "the task",
+                             "outputFile": f"/data/tmp/{agent_id}.output"})
+    out({"type": "system", "subtype": "task_notification", "task_id": "x7", "status": "completed",
+         "output_file": "/data/tmp/x7.output", "summary": "", "session_id": sid})
+    msg(sid, "assistant", [{"type": "text", "text": "the crew is done"}])
+
+
+CREW_MODES = {"crew": crew_foreground, "crew_background": crew_background, "crew_unreported": crew_unreported}
 
 
 def main() -> int:

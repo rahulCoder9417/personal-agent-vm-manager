@@ -364,6 +364,7 @@ class ClaudeRunner:
                     f.close()
                 except OSError:
                     pass
+            crew_events.close(stopped=timed_out.is_set() or final is None)
         if timed_out.is_set():
             raise ClaudeError("claude code run timed out")
         if final is None:
@@ -402,11 +403,12 @@ class CrewEvents:
 
     The lead starts a specialist with an `Agent` tool call (input: subagent_type, description).
     A specialist that runs in the foreground is finished when that call's tool_result arrives. One
-    that runs in the background answers the call at once (`tool_use_result.status` =
-    "async_launched") and is finished by a `system/task_notification` event. Messages from inside
-    a specialist carry `parent_tool_use_id`, so they are never taken for the lead's own calls.
-    (code.claude.com/docs/en/headless "Follow subagent messages"; agent-sdk/typescript AgentOutput,
-    SDKTaskStartedMessage, SDKTaskNotificationMessage.)
+    that runs in the background (the default in `claude -p`) answers the call at once
+    (`tool_use_result.status` = "async_launched") and is finished by a `system/task_notification`
+    event; the CLI stays open until it is. Messages from inside a specialist carry
+    `parent_tool_use_id`, so they are never taken for the lead's own calls.
+    (code.claude.com/docs/en/headless "Follow subagent messages" and "Background tasks at exit";
+    agent-sdk/typescript AgentInput, AgentOutput, SDKTaskStartedMessage, SDKTaskNotificationMessage.)
     """
 
     _OUTCOMES = {"completed": crew.DONE, "failed": crew.FAILED, "stopped": crew.STOPPED}
@@ -433,7 +435,12 @@ class CrewEvents:
         out = ev.get("tool_use_result")
         launched = isinstance(out, dict) and out.get("status") in ("async_launched", "remote_launched")
         if launched and not block.get("is_error"):
-            return  # still running in the background; task_notification says when it ends
+            # Still running in the background; task_notification says when it ends. `tool_use_id` is
+            # optional on that event, so remember the ids this answer gives the run as well.
+            for key in ("agentId", "taskId"):
+                if out.get(key):
+                    self._tasks.setdefault(str(out[key]), str(call_id))
+            return
         self.progress.finish(call_id, crew.FAILED if block.get("is_error") else crew.DONE)
 
     def task(self, ev: dict) -> None:
@@ -444,6 +451,11 @@ class CrewEvents:
             return
         self.progress.finish(call_id or self._tasks.get(task_id),
                              self._OUTCOMES.get(str(ev.get("status") or ""), crew.FINISHED))
+
+    def close(self, stopped: bool = False) -> None:
+        """The run is over. A specialist whose end the stream did not report ended with it (the CLI
+        waits for background sub-agents before it exits), or was stopped with it (timeout, crash)."""
+        self.progress.finish_all(crew.STOPPED if stopped else crew.FINISHED)
 
 
 def _killpg(proc: subprocess.Popen) -> None:

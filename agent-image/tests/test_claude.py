@@ -213,6 +213,23 @@ class ClaudeRunnerTest(unittest.TestCase):
         # "done" comes with the task notification, not when the Agent call returns "launched".
         self.assertEqual(self.progress, ["Patch: reviewing pull request 12", "using Read", "Patch: done"])
 
+    def test_every_specialist_that_started_gets_a_finish_line(self):
+        self.e.sign_in()
+        self.e.mode("crew_unreported")
+        res = self.run_turn()
+        self.assertEqual(res.status, "completed")
+        # Scout's notification names it only by the id its launch answer gave. Byte's never comes:
+        # the CLI waits for background sub-agents before it exits, so Byte ended with the run.
+        self.assertEqual(self.progress, ["Scout: reading 4 pages", "Byte: fixing a typo", "Scout: done",
+                                         "Byte: finished"])
+
+    def test_a_specialist_is_stopped_with_a_run_that_times_out(self):
+        self.e.sign_in()
+        self.e.mode("crew_hang")
+        with self.assertRaises(ClaudeError):
+            self.run_turn(timeout=1)
+        self.assertEqual(self.progress, ["Byte: a long job", "Byte: stopped"])
+
     def test_per_session_resume(self):
         self.e.sign_in()
         self.run_turn("one", "telegram:42")
@@ -320,6 +337,22 @@ class CrewEventsTest(unittest.TestCase):
                            {"type": "tool_result", "tool_use_id": "a1", "is_error": True})
         self.events.task({"subtype": "task_notification", "tool_use_id": "a1", "status": "completed"})
         self.assertEqual(self.lines, ["Byte: job a1", "Byte: could not finish"])
+
+    def test_at_most_one_start_and_one_finish_line_per_run(self):
+        self.start("a1", "scout")
+        self.start("a1", "scout")  # the same call seen twice
+        self.events.result({"type": "user", "tool_use_result": {"status": "completed"}},
+                           {"type": "tool_result", "tool_use_id": "a1"})
+        self.events.task({"subtype": "task_notification", "tool_use_id": "a1", "status": "completed"})
+        self.events.close()
+        self.assertEqual(self.lines, ["Scout: job a1", "Scout: done"])
+
+    def test_close_finishes_what_is_still_open(self):
+        self.start("a1", "scout")
+        self.start("a2", "patch")
+        self.events.close()
+        self.events.close(stopped=True)
+        self.assertEqual(self.lines, ["Scout: job a1", "Patch: job a2", "Scout: finished", "Patch: finished"])
 
 
 def types(events):
