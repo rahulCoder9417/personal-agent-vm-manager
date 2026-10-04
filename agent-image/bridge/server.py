@@ -1,8 +1,10 @@
 """HTTP server for the vm-manager (sandbox network, port BRIDGE_PORT).
 
 GET  /healthz                no secret; 200 {"ok": true, "busy": n, "runtime": ..., "claude_connected": bool,
-                             "claude_login_pending": bool} when the current runtime answers, else 503
-POST /deliver                X-Bridge-Secret; JSON body; 200 NDJSON stream of events
+                             "claude_login_pending": bool, "browser": bool} when the current runtime answers,
+                             else 503 ("browser": Scout's browser is turned on in this container)
+POST /deliver                X-Bridge-Secret; JSON body; 200 NDJSON stream of events (the last one may carry
+                             "browser_seconds" and "browser_report_id": see core.py)
 POST /shutdown               X-Bridge-Secret; stops Hermes (saves to /data); 200 when done
 POST /claude/login/start     X-Bridge-Secret; starts `claude auth login`; 200 {"login_id","authorize_url","expires_at"}
 POST /claude/login/complete  X-Bridge-Secret; {"login_id","code"}; 200 {"connected","message"}; 409 unknown/expired

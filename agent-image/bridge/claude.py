@@ -11,7 +11,9 @@ Two parts:
   passed as sub-agents with --agents; the lead starts one with the Agent tool, and a
   specialist cannot start another (code.claude.com/docs/en/sub-agents). The lead has no web
   tool: the web is Scout's, and a hook passed with --settings refuses the lead's own calls
-  to Scout's web tools (render_settings, lead_gate.py).
+  to Scout's web tools, the browser's among them (render_settings, lead_gate.py). When the
+  browser is turned on for the user, its MCP server is in --mcp-config and its tools are
+  in Scout's list (browser.py).
 
 - ClaudeAuth: sign-in, status and sign-out through the CLI's own commands
   (`claude auth login | status | logout`). The CLI keeps its credentials in its own config
@@ -48,7 +50,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-from . import crew
+from . import browser, crew
 from .platform import PLATFORM_SERVER_NAME, PlatformFile, server_key
 
 log = logging.getLogger("bridge.claude")
@@ -189,8 +191,11 @@ def _write_private(path: str, content: str) -> None:
     os.replace(tmp, path)
 
 
-def render_mcp_config(pf: PlatformFile, env: dict[str, str]) -> dict[str, Any]:
-    """--mcp-config for Claude Code: the Platform MCP (container token) + the user's own servers."""
+def render_mcp_config(pf: PlatformFile, env: dict[str, str], data_dir: str = "/data",
+                      with_browser: bool = False) -> dict[str, Any]:
+    """--mcp-config for Claude Code: the Platform MCP (container token) + the user's own servers, and the
+    browser's server (stdio, started by the CLI for this run and ended with it) when the browser is turned
+    on for the user."""
     servers: dict[str, Any] = {
         PLATFORM_SERVER_NAME: {
             "type": "http",
@@ -205,20 +210,26 @@ def render_mcp_config(pf: PlatformFile, env: dict[str, str]) -> dict[str, Any]:
         if s.auth_header_name and s.auth_secret:
             entry["headers"] = {s.auth_header_name: s.auth_secret}
         servers[server_key(s)] = entry
+    if with_browser:
+        servers[browser.SERVER_NAME] = browser.claude_server(env, data_dir)
     return {"mcpServers": servers}
 
 
 def render_settings() -> dict[str, Any]:
-    """--settings for Claude Code: one `PreToolUse` hook that keeps the lead off Scout's web tools.
+    """--settings for Claude Code: one `PreToolUse` hook that keeps the lead off Scout's web tools (the
+    built-in search, the platform's `web_search` and `read_page`, and the browser tools). The hook is the
+    same whether or not the browser is turned on for the user.
 
     The session has to keep those tools, because a deny rule would take them from Scout too (crew.py). The
     hook runs lead_gate.py before every call to one of them, in the lead and in a sub-agent alike. It
     blocks the lead's call and lets a sub-agent's through (code.claude.com/docs/en/hooks: hooks from
     settings run inside sub-agents too, and `agent_id` in the hook's input tells the two apart).
 
-    The matcher is a list of exact tool names separated by `|`. The command runs lead_gate.py as a file
-    with this interpreter in isolated mode (-I): nothing from the working directory, the Bridge package
-    or PYTHON* variables is imported.
+    The matcher is a list of exact tool names separated by `|` (the docs: a matcher of only letters,
+    digits, `_`, `-`, spaces, `,` and `|` is such a list; with any other character it would be a regular
+    expression). The command has no `args`, so the CLI runs it with `sh -c`: lead_gate.py as a file, with
+    this interpreter in isolated mode (-I), so nothing from the working directory, the Bridge package or
+    PYTHON* variables is imported.
     """
     guarded = crew.claude_lead_gate(PLATFORM_SERVER_NAME)
     command = shlex.join([sys.executable or "python3", "-I", LEAD_GATE, *guarded])
@@ -234,12 +245,13 @@ class ClaudeRunner:
     def __init__(self, cmd: list[str], env: dict[str, str], data_dir: str,
                  load_platform: Callable[[], PlatformFile], auth: Optional["ClaudeAuth"] = None,
                  model: str = "", max_turns: int = 0, allowed_tools: tuple[str, ...] = DEFAULT_ALLOWED_TOOLS,
-                 crew_model: str = "", crew_parallel: int = crew.DEFAULT_MAX_PARALLEL):
+                 crew_model: str = "", crew_parallel: int = crew.DEFAULT_MAX_PARALLEL, with_browser: bool = False):
         self.cmd = cmd
         self.env = child_env(env)
         # Sub-agents: the crew only, one level deep, a cap on how many run at once.
         self.env.update(crew.claude_env(crew_parallel))
         self.crew_model = crew_model  # "" = a specialist uses the lead's model
+        self.with_browser = with_browser  # Scout's browser is turned on for this user (read at boot)
         self.base_env = env
         self.data_dir = data_dir
         self.workdir = os.path.join(data_dir, "workspace")
@@ -266,12 +278,14 @@ class ClaudeRunner:
 
     def _args(self, pf: PlatformFile, instructions: str, session_id: str, resume: bool) -> list[str]:
         # Permission rules are the session's: the lead's and every specialist's calls are checked against
-        # them. So the allow list also names what only Scout uses (its built-in web search), and the deny
-        # list only what nobody has: sending the answer (the Bridge does it) and fetching pages from the
-        # container. The lead is kept off Scout's web tools by the hook in --settings (render_settings).
+        # them. So the allow list also names what only Scout uses (its built-in web search and, when the
+        # browser is turned on for the user, the browser tools by name), and the deny list only what nobody
+        # has: sending the answer (the Bridge does it) and fetching pages from the container. The lead is
+        # kept off Scout's web tools by the hook in --settings (render_settings).
         # Each list is written the way the docs show it for that flag: commas for --allowedTools (headless
         # page), one argument per rule for --disallowedTools (CLI reference).
-        allowed = list(self.allowed_tools) + crew.claude_session_allowed() + [f"mcp__{PLATFORM_SERVER_NAME}"] + \
+        allowed = list(self.allowed_tools) + crew.claude_session_allowed(self.with_browser) + \
+            [f"mcp__{PLATFORM_SERVER_NAME}"] + \
             [f"mcp__{server_key(s)}" for s in pf.mcp_servers if s.url] + [crew.CLAUDE_AGENT_TOOL]
         args = [*self.cmd, "-p", "--output-format", "stream-json", "--verbose",
                 "--mcp-config", self.mcp_path, "--strict-mcp-config",
@@ -280,7 +294,7 @@ class ClaudeRunner:
                 "--disallowedTools", *crew.claude_session_denied(PLATFORM_SERVER_NAME),
                 "--setting-sources", "user", "--settings", self.settings_path,
                 # The crew as sub-agents of this (lead) session; each has its own tool list.
-                "--agents", json.dumps(crew.claude_agents(PLATFORM_SERVER_NAME, self.crew_model)),
+                "--agents", json.dumps(crew.claude_agents(PLATFORM_SERVER_NAME, self.crew_model, self.with_browser)),
                 "--append-system-prompt", f"{instructions}\n\n{crew.CLAUDE_HANDOFF}"]
         if self.model:
             args += ["--model", self.model]
@@ -296,7 +310,10 @@ class ClaudeRunner:
         pf = self.load_platform()
         os.makedirs(self.workdir, mode=0o700, exist_ok=True)
         os.makedirs(self.env["CLAUDE_CONFIG_DIR"], mode=0o700, exist_ok=True)
-        _write_private(self.mcp_path, json.dumps(render_mcp_config(pf, self.base_env)))
+        if self.with_browser:
+            browser.write_config(self.base_env, self.data_dir)
+        _write_private(self.mcp_path, json.dumps(render_mcp_config(pf, self.base_env, self.data_dir,
+                                                                   self.with_browser)))
         _write_private(self.settings_path, json.dumps(render_settings()))
         deadline = time.monotonic() + timeout
         with self._session_lock(session_key):

@@ -6,8 +6,8 @@ State lives in $CLAUDE_CONFIG_DIR:
                       crew (the lead starts specialists in the foreground) | crew_background |
                       crew_unreported (a background specialist whose end the stream never reports) |
                       crew_hang (a specialist starts, then the CLI hangs) |
-                      web (the lead calls the web tools itself, then Scout calls them; the PreToolUse hooks
-                      of --settings are run for each call)
+                      web (the lead calls the web and browser tools itself, then Scout calls them; the
+                      PreToolUse hooks of --settings are run for each call)
   fake_calls.jsonl    one line per -p run: argv, prompt (stdin), cwd, selected env, the MCP config, --agents,
                       the --settings file
   fake_sessions.json  known session ids -> number of turns
@@ -213,13 +213,19 @@ def pre_tool_use(settings, sid, call_id, name, tool_input, agent=None):
     return None
 
 
-WEB_TOOLS = ("WebSearch", "mcp__platform__web_search", "mcp__platform__read_page")
+# Scout's web tools: the built-in search, the platform's two web tools, and the tools of the MCP server
+# `scout_browser` (the browser inside the container).
+BROWSER_TOOLS = ("browser_navigate", "browser_navigate_back", "browser_snapshot", "browser_find", "browser_click",
+                 "browser_type", "browser_fill_form", "browser_select_option", "browser_press_key", "browser_hover",
+                 "browser_wait_for", "browser_handle_dialog", "browser_tabs", "browser_close")
+WEB_TOOLS = ("WebSearch", "mcp__platform__web_search", "mcp__platform__read_page",
+             *(f"mcp__scout_browser__{name}" for name in BROWSER_TOOLS))
 
 
 def the_web_tools(sid, settings) -> list:
-    """The lead calls each web tool itself and another platform tool, then starts Scout, which calls each
-    web tool. Every call goes through the PreToolUse hooks. Returns one line per call: who, the tool, and
-    "ok" or "refused: <reason>"."""
+    """The lead calls each web tool itself (the search, read_page, the browser tools) and another
+    platform tool, then starts Scout, which calls each web tool. Every call goes through the PreToolUse
+    hooks. Returns one line per call: who, the tool, and "ok" or "refused: <reason>"."""
     lines = []
 
     def call(who, call_id, name, parent=None):

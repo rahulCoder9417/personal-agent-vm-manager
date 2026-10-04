@@ -57,7 +57,9 @@ class RunResult:
 class HermesClient:
     """Minimal client for Hermes's local API server (no proxy: loopback only)."""
 
-    def __init__(self, base_url: str, api_key: str, approval_choice: str = "deny", poll_interval: float = 2.0):
+    def __init__(self, base_url: str, api_key: str, approval_choice: str = "deny", poll_interval: float = 2.0,
+                 with_browser: bool = False):
+        self.with_browser = with_browser  # Scout's browser is turned on for this user: the briefs say so
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.approval_choice = approval_choice
@@ -161,7 +163,7 @@ class HermesClient:
         wait for the specialists and run again in the same session; the last run's answer is the
         turn's answer.
         """
-        instructions = f"{instructions}\n\n{crew.hermes_handoff()}"
+        instructions = f"{instructions}\n\n{crew.hermes_handoff(self.with_browser)}"
         deadline = time.monotonic() + timeout
         progress = crew.Progress(on_progress)
         result, handed_over = self._run_once(text, instructions, session_key, idempotency_key, on_progress,

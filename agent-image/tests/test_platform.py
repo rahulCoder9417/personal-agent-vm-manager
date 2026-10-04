@@ -4,10 +4,12 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
 
+from bridge import browser, crew
 from bridge.platform import (git_gateway_url, load_platform_file, render_gitconfig, render_hermes_config,
                              write_gitconfig, write_hermes_config)
 
@@ -45,14 +47,78 @@ class PlatformTest(unittest.TestCase):
         # Only send_message is hidden. web_search and read_page stay: a Hermes child gets the lead's tools,
         # so hiding them from the lead would take them from Scout too. On Hermes the web rule is an instruction.
         self.assertEqual(platform["tools"]["exclude"], ["send_message"])
+        self.assertNotIn("include", platform["tools"])
+        # The browser is not turned on for this user: no browser server.
+        self.assertFalse(pf.browser_enabled)
+        self.assertEqual(sorted(cfg["mcp_servers"]), ["platform", "user_m2", "user_m_1"])
         self.assertEqual(cfg["mcp_servers"]["user_m_1"]["headers"], {"X-Api-Key": "k1"})
         self.assertNotIn("headers", cfg["mcp_servers"]["user_m2"])
         self.assertFalse(cfg["cron"]["enabled"])
         self.assertIn("cronjob", cfg["agent"]["disabled_toolsets"])
         self.assertIn("messaging", cfg["agent"]["disabled_toolsets"])
+        # Hermes's own built-in browser tools are off, for every user: the only browser is Scout's, behind
+        # the guard, and only when it is turned on for the user.
+        self.assertIn("browser", cfg["agent"]["disabled_toolsets"])
         self.assertEqual(cfg["gateway"]["api_server"]["host"], "127.0.0.1")
         self.assertEqual(cfg["terminal"]["cwd"], "/data/workspace")
         self.assertEqual(cfg["timezone"], "Europe/Berlin")
+
+    def test_browser_switch(self):
+        # platform.json "browser_enabled": true, written by the vm-manager for a user on the Max plan.
+        def load(value):
+            with open(self.path) as fh:
+                raw = json.load(fh)
+            raw["browser_enabled"] = value
+            with open(self.path, "w") as fh:
+                json.dump(raw, fh)
+            return load_platform_file(self.path)
+
+        self.assertTrue(load(True).browser_enabled)
+        # Only a real `true` turns it on.
+        for value in (False, None, 0, 1, "true", "yes", {}):
+            self.assertFalse(load(value).browser_enabled, value)
+
+    def test_render_with_the_browser(self):
+        # What the image has under /opt/browser.
+        root = os.path.join(self.tmp, "browser")
+        os.makedirs(os.path.join(root, "node_modules", "@playwright", "mcp"))
+        os.makedirs(os.path.join(root, "ms-playwright"))
+        cli = os.path.join(root, "node_modules", "@playwright", "mcp", "cli.js")
+        with open(cli, "w") as fh:
+            fh.write("// server\n")
+        env = {"BROWSER_ROOT": root, "BROWSER_NODE": "/usr/local/bin/node", "HOME": "/data/home", "TMPDIR": "/data/tmp",
+               "HTTPS_PROXY": "http://172.30.0.2:3128"}
+        with open(self.path) as fh:
+            raw = json.load(fh)
+        raw["browser_enabled"] = True
+        with open(self.path, "w") as fh:
+            json.dump(raw, fh)
+        pf = load_platform_file(self.path)
+        cfg = render_hermes_config(pf, env, "/data")
+        # Hermes starts the browser's server itself, over stdio: the guard, and behind it Playwright MCP.
+        self.assertEqual(cfg["mcp_servers"]["scout_browser"], {
+            "command": sys.executable,
+            "args": ["-I", browser.GUARD, "--allow", ",".join(crew.BROWSER_TOOLS),
+                     "--env", "PLAYWRIGHT_BROWSERS_PATH=" + os.path.join(root, "ms-playwright"),
+                     "--env", "HOME=/data/home", "--env", "TMPDIR=/data/tmp",
+                     "--", "/usr/local/bin/node", cli, "--config", "/data/.platform/browser-mcp.json"],
+            "timeout": 120, "connect_timeout": 60, "enabled": True})
+        self.assertEqual(sorted(cfg["mcp_servers"]), ["platform", "scout_browser", "user_m2", "user_m_1"])
+        # The server is not called "browser": that is the name of a built-in Hermes toolset.
+        self.assertNotIn("browser", cfg["mcp_servers"])
+        # The platform's server is as before, and Hermes's own browser tools stay off.
+        self.assertEqual(cfg["mcp_servers"]["platform"]["tools"], {"exclude": ["send_message"]})
+        self.assertIn("browser", cfg["agent"]["disabled_toolsets"])
+        json.dumps(cfg)
+        # Turned on for the user, but this image has no browser: no server (and nothing that would fail).
+        cfg = render_hermes_config(pf, {**env, "BROWSER_ROOT": os.path.join(self.tmp, "missing")}, "/data")
+        self.assertNotIn("scout_browser", cfg["mcp_servers"])
+        # In the image, but not turned on for the user: no server.
+        raw["browser_enabled"] = False
+        with open(self.path, "w") as fh:
+            json.dump(raw, fh)
+        cfg = render_hermes_config(load_platform_file(self.path), env, "/data")
+        self.assertNotIn("scout_browser", cfg["mcp_servers"])
 
     def test_render_delegation_for_the_crew(self):
         pf = load_platform_file(self.path)
@@ -62,8 +128,8 @@ class PlatformTest(unittest.TestCase):
                                              "orchestrator_enabled": False, "subagent_auto_approve": False})
         cfg = render_hermes_config(pf, {"BRIDGE_CREW_MAX_PARALLEL": "2"})
         self.assertEqual(cfg["delegation"]["max_concurrent_children"], 2)
-        # The lead keeps delegate_task: only scheduling and messaging are switched off.
-        self.assertEqual(cfg["agent"]["disabled_toolsets"], ["cronjob", "messaging"])
+        # The lead keeps delegate_task: only scheduling, messaging and Hermes's own browser tools are off.
+        self.assertEqual(cfg["agent"]["disabled_toolsets"], ["cronjob", "messaging", "browser"])
 
     def test_write_is_private_json(self):
         pf = load_platform_file(self.path)
