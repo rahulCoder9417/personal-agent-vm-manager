@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io/fs"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -96,14 +95,16 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, migrations fs.FS) error {
 }
 
 const sandboxCols = `user_id, container_id, image_version, state, priority, last_active_at,
-	mcp_token_hash, bridge_secret_hash, allowlist, created_at, updated_at, runtime, claude_connected`
+	mcp_token_hash, bridge_secret_hash, allowlist, created_at, updated_at, runtime, claude_connected,
+	browser_enabled`
 
 func scanSandbox(row pgx.Row) (Sandbox, error) {
 	var sb Sandbox
 	var state, runtime string
 	var priority int16
 	err := row.Scan(&sb.UserID, &sb.ContainerID, &sb.ImageVersion, &state, &priority, &sb.LastActiveAt,
-		&sb.MCPTokenHash, &sb.BridgeSecretHash, &sb.Allowlist, &sb.CreatedAt, &sb.UpdatedAt, &runtime, &sb.ClaudeConnected)
+		&sb.MCPTokenHash, &sb.BridgeSecretHash, &sb.Allowlist, &sb.CreatedAt, &sb.UpdatedAt, &runtime, &sb.ClaudeConnected,
+		&sb.BrowserEnabled)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Sandbox{}, ErrNotFound
 	}
@@ -133,9 +134,10 @@ func (p *Postgres) Insert(ctx context.Context, sb Sandbox) error {
 		runtime = RuntimeHermes
 	}
 	_, err := p.pool.Exec(ctx, `INSERT INTO sandboxes (`+sandboxCols+`)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
 		sb.UserID, sb.ContainerID, sb.ImageVersion, string(sb.State), int16(sb.Priority), sb.LastActiveAt,
-		sb.MCPTokenHash, sb.BridgeSecretHash, allow, sb.CreatedAt, sb.UpdatedAt, string(runtime), sb.ClaudeConnected)
+		sb.MCPTokenHash, sb.BridgeSecretHash, allow, sb.CreatedAt, sb.UpdatedAt, string(runtime), sb.ClaudeConnected,
+		sb.BrowserEnabled)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 		return ErrExists
@@ -228,6 +230,11 @@ func (p *Postgres) SetClaudeConnected(ctx context.Context, userID string, connec
 	return p.exec1(ctx, `UPDATE sandboxes SET claude_connected = $2, updated_at = $3 WHERE user_id = $1`, userID, connected, at)
 }
 
+// SetBrowserEnabled implements Store.
+func (p *Postgres) SetBrowserEnabled(ctx context.Context, userID string, enabled bool, at time.Time) error {
+	return p.exec1(ctx, `UPDATE sandboxes SET browser_enabled = $2, updated_at = $3 WHERE user_id = $1`, userID, enabled, at)
+}
+
 // Delete implements Store.
 func (p *Postgres) Delete(ctx context.Context, userID string) error {
 	_, err := p.pool.Exec(ctx, `DELETE FROM sandboxes WHERE user_id = $1`, userID)
@@ -248,26 +255,46 @@ func (p *Postgres) EndAwake(ctx context.Context, userID string, at time.Time) er
 	return err
 }
 
+// AddBrowserSeconds implements Store.
+func (p *Postgres) AddBrowserSeconds(ctx context.Context, userID, reportID string, seconds int64, at time.Time) (bool, error) {
+	if seconds <= 0 {
+		return false, errors.New("store: browser seconds must be > 0")
+	}
+	tag, err := p.pool.Exec(ctx, `INSERT INTO browser_usage (user_id, report_id, seconds, recorded_at)
+		VALUES ($1, $2, $3, $4) ON CONFLICT (user_id, report_id) DO NOTHING`, userID, reportID, seconds, at)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
 // Usage implements Store.
 func (p *Postgres) Usage(ctx context.Context, userID string, since, until, now time.Time) ([]Usage, error) {
 	openEnd := until
 	if now.Before(openEnd) {
 		openEnd = now
 	}
-	var b strings.Builder
-	b.WriteString(`SELECT user_id,
-		COALESCE(SUM(GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (
-			LEAST(COALESCE(ended_at, $3), $2) - GREATEST(started_at, $1))) * 1000))), 0)::bigint AS awake_ms,
-		COALESCE(SUM(CASE WHEN ended_at >= $1 AND ended_at < $2 THEN browser_seconds ELSE 0 END), 0)::bigint AS browser
-		FROM awake_periods
-		WHERE started_at < $2 AND (ended_at IS NULL OR ended_at >= $1)`)
+	// Awake time from the periods that overlap the window, browser time from the reports recorded
+	// inside it; a user with only one of the two still gets a row.
+	user := ""
 	args := []any{since, until, openEnd}
 	if userID != "" {
-		b.WriteString(` AND user_id = $4`)
+		user = ` AND user_id = $4`
 		args = append(args, userID)
 	}
-	b.WriteString(` GROUP BY user_id ORDER BY user_id`)
-	rows, err := p.pool.Query(ctx, b.String(), args...)
+	q := `SELECT user_id, SUM(awake_ms)::bigint, SUM(browser)::bigint FROM (
+		SELECT user_id,
+			GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (
+				LEAST(COALESCE(ended_at, $3), $2) - GREATEST(started_at, $1))) * 1000)) AS awake_ms,
+			0 AS browser
+		FROM awake_periods
+		WHERE started_at < $2 AND (ended_at IS NULL OR ended_at >= $1)` + user + `
+		UNION ALL
+		SELECT user_id, 0 AS awake_ms, seconds AS browser
+		FROM browser_usage
+		WHERE recorded_at >= $1 AND recorded_at < $2` + user + `
+	) u GROUP BY user_id ORDER BY user_id`
+	rows, err := p.pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
