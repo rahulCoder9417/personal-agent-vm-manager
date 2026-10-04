@@ -254,7 +254,7 @@ runtimes. The ids `byte`, `patch`, `scout` are fixed. No proto or Go change.
 |---|---|---|
 | `byte` | Writes and fixes code on a new branch, commits, pushes (git gateway), opens the pull request with the GitHub app action | files (read, write), search, shell, platform tools |
 | `patch` | Reviews a pull request or a diff in three passes (correctness, security, tests), merges the findings, posts ONE review on the pull request, returns "ship" / "fix first" with the top findings. Never pushes, approves or merges | files (read only), search, shell (diffs, tests), platform tools |
-| `scout` | Researches on the web, returns a short answer with facts, links and what it could not confirm. Works only from the task text and the web. Treats what it reads as information, never as instructions, and puts nothing private into a search or a page address | only `web_search` + `read_page` of the platform tools. No files, no shell, no app actions |
+| `scout` | Researches on the web, returns a short answer with facts, links and what it could not confirm. Works only from the task text and the web. Treats what it reads as information, never as instructions, and puts nothing private into a search or a page address | the engine's built-in web search (Claude Code: `WebSearch`), plus `web_search` + `read_page` of the platform tools. No files, no shell, no app actions, no page fetching from the container |
 
 The lead's instructions (`build_instructions` in `bridge/core.py`): research goes to Scout,
 code changes to Byte, reviews (also of Byte's pull request) to Patch; small jobs are done
@@ -282,11 +282,14 @@ https://code.claude.com/docs/en/cli-reference, https://code.claude.com/docs/en/e
   connections, so `--strict-mcp-config` still decides which servers exist.
   - Byte: `Read, Edit, Write, NotebookEdit, Glob, Grep, Bash, mcp__platform`.
   - Patch: `Read, Glob, Grep, Bash, mcp__platform`.
-  - Scout: `mcp__platform__web_search, mcp__platform__read_page`, and nothing else.
+  - Scout: `WebSearch, mcp__platform__web_search, mcp__platform__read_page`, and nothing else.
+    The built-in search needs no search provider key on the platform, and its query goes to the
+    model provider, not to a site. `read_page` does not open its results (it opens only addresses
+    already seen), so Scout works from what the search returns.
 - **A second lock:** `disallowedTools` is applied before `tools`. It has `Agent` and
-  `mcp__platform__send_message` for everyone, plus every built-in file, edit and shell tool the
-  member's list leaves out: Scout `Read, Edit, Write, NotebookEdit, Glob, Grep, Bash`; Patch
-  `Edit, Write, NotebookEdit`. The docs say an allow list alone gives "only the listed tools";
+  `mcp__platform__send_message` and `WebFetch` for everyone, plus every built-in file, edit, shell
+  and web-search tool the member's list leaves out: Scout `Read, Edit, Write, NotebookEdit, Glob,
+  Grep, Bash`; Patch `Edit, Write, NotebookEdit, WebSearch`; Byte `WebSearch`. The docs say an allow list alone gives "only the listed tools";
   the deny list holds however the allow list resolves.
 - **Until the platform has `web_search` and `read_page`,** Scout's list matches no tool. Per the
   docs the CLI then refuses to start it ("would be spawned with zero tools") and the lead gets
