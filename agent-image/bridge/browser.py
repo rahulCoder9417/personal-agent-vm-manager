@@ -190,12 +190,12 @@ def list_processes() -> list[tuple[int, list[str]]]:
     return out
 
 
-def browser_process(argv: list[str], prefix: str) -> tuple[bool, bool]:
+def browser_process(argv: list[str], prefix: "str | tuple[str, ...]") -> tuple[bool, bool]:
     """(is a process of a browser from `prefix`, is a browser's main process).
 
     Chromium rewrites its command line in /proc as one string with spaces, so the words are taken from the
     whole line, whichever way it is split. A helper process carries `--type=…`; the crash handler is not a
-    browser."""
+    browser. `prefix` is the browser directory with a trailing slash, or several spellings of it."""
     words = " ".join(argv).split()
     if not words or not words[0].startswith(prefix):
         return False, False
@@ -215,7 +215,9 @@ class BrowserMeter:
                  processes: Callable[[], list[tuple[int, list[str]]]] = list_processes,
                  kill: Callable[[int, int], None] = os.kill, clock: Callable[[], float] = time.monotonic,
                  busy: Optional[Callable[[], bool]] = None):
-        self.prefix = browsers.rstrip("/") + "/"
+        # The directory as given and with links resolved: the path a process shows in /proc may be either
+        # (seen under gVisor: the resolved one).
+        self.prefix = tuple(dict.fromkeys(path.rstrip("/") + "/" for path in (browsers, os.path.realpath(browsers))))
         self.poll = poll
         self.idle_close = idle_close  # a browser left open while no turn runs is closed after this long
         self._processes = processes

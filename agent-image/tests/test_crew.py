@@ -113,6 +113,8 @@ class CrewDefinitionTest(unittest.TestCase):
                 # How to work with it without file tools.
                 "browser_navigate opens an address (http or https only)",
                 "call browser_snapshot to see the page as text, with a ref for each element",
+                "A snapshot of a long page is long: when you look for one thing, search the page with browser_find "
+                "instead",
                 "When a tool names a file it saved, ignore that: you cannot read files",
                 # No sign-ins in this version, and no secrets typed, ever.
                 "Never type a password, a one-time code, a card number or any other secret into a page, and never "

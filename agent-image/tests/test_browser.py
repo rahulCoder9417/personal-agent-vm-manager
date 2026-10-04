@@ -600,6 +600,26 @@ class MeterTest(unittest.TestCase):
         self.assertIsNotNone(meter._open_since, "the watcher saw the browser open")
         meter.stop()
 
+    def test_the_browser_directory_may_be_reached_through_a_link(self):
+        # A process shows its path in /proc as it was started or with links resolved (gVisor shows the
+        # resolved one): the meter knows both spellings of the directory.
+        tmp = tempfile.mkdtemp()
+        real = os.path.join(tmp, "real")
+        os.makedirs(real)
+        link = os.path.join(tmp, "link")
+        os.symlink(real, link)
+        machine = Machine()
+        meter = browser.BrowserMeter(link, processes=machine.processes, kill=machine.kill, clock=lambda: machine.now)
+        self.assertEqual(meter.prefix, (link + "/", real + "/"))
+        machine.procs[200] = [f"{real}/chromium-1247/chrome-linux64/chrome --headless"]
+        self.assertTrue(meter.is_open())
+        machine.procs[200] = [f"{link}/chromium-1247/chrome-linux64/chrome", "--headless"]
+        self.assertTrue(meter.is_open())
+        del machine.procs[200]
+        self.assertFalse(meter.is_open())
+        # No link: one spelling.
+        self.assertEqual(browser.BrowserMeter(real).prefix, (real + "/",))
+
     def test_real_processes(self):
         # list_processes reads this machine's /proc: this test's own process is in it, with its arguments.
         mine = dict(browser.list_processes()).get(os.getpid())
