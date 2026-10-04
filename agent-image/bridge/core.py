@@ -250,6 +250,7 @@ class Bridge:
         self.retry_delay = retry_delay
         self.browser = browser  # None: this container has no browser (it is not turned on for the user)
         self._turns: dict[str, Turn] = {}
+        self._ending: set[Turn] = set()  # turns whose run is over and which are reporting browser time
         self._lock = threading.Lock()
         self.closing = False
 
@@ -272,6 +273,10 @@ class Bridge:
             else:
                 duplicate = False
                 turn = self._turns.get(req.delivery_id)
+                if turn is not None and turn.done:
+                    # That run has sent its last event; its thread is about to drop it. A delivery that
+                    # arrives in this moment is a new attempt, not a listener on the finished one.
+                    turn = None
                 if turn is None:
                     if self.closing:
                         turn = None
@@ -329,24 +334,29 @@ class Bridge:
             self._end(req, turn, event(ERROR, f"agent error: {type(exc).__name__}", platform_fault=True))
         finally:
             with self._lock:
-                self._turns.pop(req.delivery_id, None)
+                self._ending.discard(turn)
+                if self._turns.get(req.delivery_id) is turn:  # not a newer attempt's turn
+                    self._turns.pop(req.delivery_id, None)
 
     def _end(self, req: DeliverRequest, turn: Turn, ev: dict) -> None:
         """Publish a turn's last event, with the browser time to charge (when the browser was open)."""
         try:
-            ev.update(self._browser_report(req.delivery_id))
+            ev.update(self._browser_report(req.delivery_id, turn))
         except Exception:  # noqa: BLE001 - the turn must end whatever the meter does
             log.exception("browser report for %s failed", req.delivery_id)
         turn.publish(ev)
 
-    def _browser_report(self, delivery_id: str) -> dict:
+    def _browser_report(self, delivery_id: str, turn: Turn) -> dict:
         """Close the browser (unless another turn is still running) and return what to report: the
         seconds it was open since the last report, under an id of its own. {} when it never started.
         The report is saved with the delivery, so a repeat of the delivery sends it again."""
         if self.browser is None:
             return {}
         with self._lock:
-            last = len(self._turns) <= 1  # this turn is still in the table
+            # This turn's run is over. It is the last one when every other turn in the table is at this
+            # point too: of turns that end at the same moment, the later one closes the browser.
+            self._ending.add(turn)
+            last = all(other in self._ending for other in self._turns.values())
         seconds = self.browser.end_turn(last)
         if seconds <= 0:
             return {}
