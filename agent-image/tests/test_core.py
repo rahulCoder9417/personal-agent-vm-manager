@@ -52,6 +52,8 @@ class BridgeCoreTest(unittest.TestCase):
         self.assertEqual(call["idempotency_key"], "evt-1#1")
         self.assertIn("hello", call["text"])
         self.assertIn("telegram", call["instructions"])
+        # Whichever engine runs the turn, the lead is told the web is Scout's.
+        self.assertIn("Anything that needs the web, even a single lookup, goes to Scout", call["instructions"])
         self.assertEqual(self.busy_after_the_turn(), 0)
 
     def test_duplicate_after_done_is_not_rerun(self):
@@ -170,9 +172,14 @@ class RequestTest(unittest.TestCase):
                      "commit on a new branch and push it", "open the pull request with the GitHub app action",
                      "default branch is refused"):
             self.assertIn(part, text)
-        # The crew: who does what, small jobs stay with the lead, the cap, Patch after Byte.
+        # The crew: who does what, the web is Scout's alone, small jobs without the web stay with the lead,
+        # the cap, Patch after Byte.
         for part in ("You are Tex, the lead of a small crew", "research to Scout", "code changes to Byte",
-                     "the review of a pull request or of Byte's work to Patch", "Do small jobs yourself",
+                     "the review of a pull request or of Byte's work to Patch",
+                     "You have no access to the web yourself, and neither have Byte and Patch",
+                     "Anything that needs the web, even a single lookup, goes to Scout",
+                     "Never use a web search or page-reading tool yourself",
+                     "Do small jobs that need no web yourself",
                      "at most 3 specialists for one job",
                      "After Byte opens a pull request you may have Patch review it",
                      "when you hand a job to Scout, pass only what the research needs, never secrets, tokens or "
