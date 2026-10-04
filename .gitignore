@@ -25,3 +25,6 @@ __pycache__/
 # embedded-postgres test cache
 .embedded-postgres/
 .worktrees
+
+# npm (agent-image/browser: only package.json and the lockfile are kept)
+node_modules/
