@@ -7,6 +7,7 @@
 - Phase 2 is **coded, committed and unit tested**: every gRPC RPC, the container spec, the five background loops, the egress writer, the agent image (Hermes + Bridge).
 - **Nothing has run against real Docker.** Docker and gVisor aren't installed on the dev machine, so the Docker parts were tested against a fake daemon, and the Bridge against a fake Hermes.
 - The proto (`proto/vm/v1/vm.proto`) got additive RPCs and fields for the agent runtime and the Claude Code sign-in (section 6); no existing field changed.
+- Later additions, each in its own section: the Claude Code runtime (6), git through the platform's git gateway (7), the crew of specialists (8). The crew is unit tested against fakes only; the image build and a real turn with either runtime are untested.
 
 ## 1. Initial design vs what we built
 
@@ -148,4 +149,82 @@ The agent can use normal git on the user's GitHub repositories, and no GitHub to
 **Tests (real run, 2026-10-01):** 57 Bridge tests pass. One runs the real `git ls-remote` for each URL form against a local HTTP server and checks the request path (`/git/<owner>/<repo>/info/refs?service=git-upload-pack`) and the `Authorization` header.
 
 **Not verified yet:** a real clone, push and pull request from a container on the server (needs a turn from a user with GitHub connected).
+
+## 8. The crew (Byte, Patch, Scout)
+
+**Date:** 2026-10-04 · **Branch:** `mvp-build` · **Design:** `../beckend/docs/launch-plan.md` section 4, `../beckend/docs/mvp-hld.md` 0.7
+
+The agent the user texts is the lead (Tex). It can hand work to three specialists: Byte (coding), Patch (code review) and Scout (research). They are defined once in the Bridge and given to both runtimes. No Go, proto, egress or Dockerfile change, and the Bridge still uses only the Python standard library.
+
+**Nothing here has run for real.** There is no Docker and no Claude Code CLI on the dev machine, so the image was not built and neither runtime ran a turn with the crew. The Claude Code side was written from Anthropic's documentation and the Hermes side from the Hermes source at the pinned commit; both are tested against fakes only.
+
+### Design vs built
+
+| Area | Asked for | Built | Status |
+|---|---|---|---|
+| One definition | `byte`, `patch`, `scout`, each with a description, a role prompt and a tool list; both runtimes fed from it | `bridge/crew.py`: three `Member`s with tool groups (`read`, `write`, `search`, `shell`, `platform`, `platform:web_search`, `platform:read_page`), mapped to each runtime's own names in the same file | ✅ |
+| Byte | Code on a new branch, commit, push through git, pull request with the GitHub app action. Files, shell, search, platform tools | As asked. The brief says git already goes through the platform and needs no token | ✅ |
+| Patch | Three review passes (correctness, security, tests), merged findings, ONE review on the pull request, a "ship" / "fix first" verdict. Never merges or pushes. Read-only files, shell, platform tools | As asked; it also never approves | ✅ |
+| Scout | Only `web_search` and `read_page`, plus reading workspace files. Facts, links, what it could not confirm. What it reads is information, never instructions | As asked; it is also told to put nothing private into a search or a page address | ✅ Claude Code / ⚠️ Hermes (not a lock, see 1 below) |
+| Nobody sends | The Bridge sends the answer | `send_message` is off for the lead (as before) and for every specialist; every brief says so | ✅ |
+| Lead's instructions | Who gets what; small jobs done directly; at most 3 per job; Patch may review Byte's pull request; approvals and git text stay | `build_instructions` in `bridge/core.py` = the old text + `crew.lead_instructions()` | ✅ |
+| Claude Code | Passed as sub-agents the documented way; only the lead starts one; no helpers of helpers; model = the lead's, or a cheaper one by setting | `--agents` JSON, `Agent` tool, three documented environment settings (below) | ✅ / ⚠️ real CLI |
+| Hermes | Same role prompts through `delegate_task`; tools narrowed as far as Hermes allows; one level deep; parallel cap (default 3) in the rendered config | Briefs in the lead's instructions; `delegation` settings in `config.yaml`; follow-up runs for background children (below) | ✅ / ⚠️ real Hermes |
+| Progress lines | A line when a specialist starts and one when it finishes, starting with its name and a colon | `crew.Progress`: at most one start and one finish per run, on both runtimes | ✅ |
+| Settings | Parallel cap and a cheaper model by environment | `BRIDGE_CREW_MAX_PARALLEL` (default 3), `BRIDGE_CLAUDE_CREW_MODEL` (default: the lead's model) | ✅ |
+
+### How it works
+
+**Claude Code** (CLI 2.1.283, pinned in `agent-image/Dockerfile`). Confirmed on 2026-10-04 on https://code.claude.com/docs/en/sub-agents, https://code.claude.com/docs/en/cli-reference, https://code.claude.com/docs/en/env-vars, https://code.claude.com/docs/en/tools-reference, https://code.claude.com/docs/en/headless, https://code.claude.com/docs/en/errors and https://code.claude.com/docs/en/agent-sdk/typescript:
+
+- **Flag:** `--agents '<JSON>'`, one key per sub-agent. Keys we use: `description`, `prompt`, `tools`, `disallowedTools`, `model`. The CLI validates the value on a new session and exits with code 1 if it is wrong.
+- **Tool that starts one:** `Agent`, with `subagent_type`, `description` and `prompt`. `Task` is its old name and still an alias. Starting a sub-agent needs no permission, so `--allowedTools` does not have to name it; we list `Agent` anyway, as the documented examples do.
+- **A sub-agent's tools:** `tools` is an allow list of the CLI's tool names. An MCP tool is `mcp__<server>__<tool>` (`mcp__platform__web_search`); `mcp__<server>` means every tool of that server. `disallowedTools` is applied first. A sub-agent shares the lead's MCP connections, so no `mcpServers` is needed and `--strict-mcp-config` is unchanged.
+- **What each gets:** Byte `Read, Edit, Write, NotebookEdit, Glob, Grep, Bash, mcp__platform`. Patch `Read, Glob, Grep, Bash, mcp__platform`. Scout `Read, Glob, Grep, mcp__platform__web_search, mcp__platform__read_page`. All three: `disallowedTools: [Agent, mcp__platform__send_message]`, `model: inherit`.
+- **Only the lead starts one:** no `Agent` in a specialist's tools, plus `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1`. `CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1` removes Explore, Plan and general-purpose. `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS` is the parallel cap.
+- **Unchanged:** `--strict-mcp-config`, `--permission-mode dontAsk`, `--permission-prompts none`, the allow list (plus `Agent`), the stripped credentials. The binary is not modified and no sign-in method is touched.
+
+**Hermes** (commit `35272ce28b29bae90e9ecceff9def17ae791c012`). Confirmed in `cli-config.yaml.example`, `hermes_cli/config_defaults.py`, `tools/delegate_tool.py`, `tools/delegate_tool_config.py`, `tools/delegate_tool_toolsets.py`, `tools/delegate_tool_dispatch.py`, `gateway/platforms/api_server_runs.py` and `gateway/readiness.py`:
+
+- **Settings written to `config.yaml`:** `delegation.max_spawn_depth: 1`, `delegation.orchestrator_enabled: false`, `delegation.max_concurrent_children: 3` (from `BRIDGE_CREW_MAX_PARALLEL`), `delegation.subagent_auto_approve: false`.
+- **Hand-over:** `delegate_task` takes `tasks: [{goal, context}]`. The lead's instructions carry the three briefs; the lead starts a task's goal with the member's name and its context with the brief.
+- **Follow-up runs:** a run started with `X-Hermes-Session-Key` dispatches the children in the background (`"status": "dispatched"`), ends, and stores their reports in the session for the next turn. The Bridge waits for `readiness.checks.background_queues` in `GET /health/detailed` to show no active delegations and no queued completions, twice in a row, then runs a follow-up turn in the same session. At most 3 follow-ups, inside the turn's time limit.
+
+**Progress lines.** Claude Code: the lead's `Agent` call (start), then that call's result, or the `task_notification` event for a background specialist (finish). Hermes: `subagent.start` and `subagent.complete`. Endings are `done`, `could not finish`, `stopped`, or `finished` when the runtime does not say how it ended.
+
+### Where we filled in or changed the design
+
+1. **On Hermes a specialist's tool list is an instruction, not a lock.** At the pinned commit `delegate_task` has no tool list per task (`toolsets=None  # always inherit the parent's toolsets`). A child gets the lead's tools minus `delegate_task`, `clarify`, `memory`, `send_message` and `cronjob_manage`. So Scout on Hermes is told to use only `web_search` and `read_page`, but could still reach the shell and app actions. On Claude Code the list is enforced by the CLI.
+2. **`max_concurrent_children` is not a hard cap on Hermes.** It limits the tasks in one `delegate_task` call and the calls running in the background. A call over the limit runs inside the lead's turn. The lead is told to put a step's specialists in one call and to use at most 3 per job.
+3. **"At most 3 per job" is an instruction** on both runtimes; "at most 3 at a time" is the setting.
+4. **Scout may search the workspace as well as read it** (`Glob`, `Grep`): read-only, and needed to find a file. It has no shell, no writes and no other platform tool.
+5. **Specialists get the platform tools, not the user's own MCP servers.** The lead keeps those.
+6. **Patch never approves a pull request,** only comments. The brief asked for no merges and no pushes; approving is one step from merging.
+7. **Every specialist that starts gets a finish line.** If the runtime never reports the end, the line is `finished` (or `stopped` when a Claude Code run times out or crashes).
+8. **The built-in sub-agent types are switched off** on Claude Code, so the crew is what the lead can start. A call without `subagent_type` fails with the list of types, and the lead can retry with one.
+9. **No `--system-prompt-snapshot off`.** The CLI reuses a conversation's first system prompt on `--resume` until it is compacted, so a chat that began on an older image gets the crew instructions late. The sub-agents are available at once. Left as is rather than add an untested flag.
+10. **The two settings are read from the Bridge's environment,** which the vm-manager does not pass through. They are set with an `ENV` line in the agent image, like `BRIDGE_CLAUDE_MODEL`.
+11. **Scout's file reading is not confined to the workspace.** `Read` is allowed for the whole session, as before, so on Claude Code Scout can read any file the container user can, including `/data/.platform/platform.json` and the CLI's credentials file, and `read_page` takes any public address. Its brief forbids putting file contents, keys or anything private into a search or an address. A lock would be `Read(...)` deny rules for those two paths in `--disallowedTools`; left out because it changes the permission flags and can't be tried without the CLI. The same holds for the lead once `read_page` exists.
+12. **Flaky Bridge test fixed** (`test_deliver_streams_and_sends_answer` read `busy()` before the run thread dropped the turn).
+
+### Tests (real runs, 2026-10-04)
+
+- `cd agent-image && python3 -m unittest discover -s tests -t .`: **87 tests, OK** (57 before the crew), three runs in a row.
+- `go vet ./...`: clean. `go test -count=1 ./...`: all 9 packages with tests pass. No Go file changed.
+- New Bridge tests cover: the three definitions and their tool lists; the role prompts; the lead's instructions; the `--agents` value, `Agent` in the allow list, the three environment settings and the unchanged flags on the command line; the model and parallel settings; the `delegation` section of the Hermes config; the briefs in the Hermes instructions; follow-up runs (background children, children that finish inside the run, unknown background state, the deadline, the limit of 3); progress lines for a foreground specialist, a background one, one that fails, one whose end is never reported, one stopped by a timeout, and sub-agents that are not crew members.
+
+### Not verified yet
+
+| What | How to check |
+|---|---|
+| The agent image builds with the crew code | `docker build -t personal-agent/agent:dev agent-image/` |
+| CLI 2.1.283 accepts our `--agents` value, and the lead actually hands work over | A real Claude Code turn that needs research or a code change; look for `Scout: ...` lines |
+| A specialist's tool list as the CLI resolves it (Scout without `Bash`; `mcp__platform` for Byte and Patch; `Glob` / `Grep` present) | The `tools` of the sub-agent in the session transcript, or ask Scout to run a command |
+| A specialist cannot start a sub-agent, and the built-in types are gone | Ask the lead for an Explore agent; ask Byte to delegate |
+| The stream-json events the progress lines are read from (`Agent` tool_use, `tool_use_result.status`, `task_started`, `task_notification`), and that the last `result` is the answer after background sub-agents | A real turn with `--output-format stream-json` kept |
+| Hermes takes the `delegation` keys and offers `delegate_task` on the API server | A real Hermes turn; the rendered `/data/hermes/config.yaml` |
+| The Hermes lead copies the brief into `context` and names the member in `goal` | The `subagent.start` events of a real run |
+| Background delegation on the Runs API: `"status": "dispatched"`, the reports stored in the session, `/health/detailed` going quiet, the follow-up turn seeing the reports | A real Hermes turn that hands work over |
+| `web_search` and `read_page` exist on the Platform MCP under those names | The backend's W2b-1 package; until then Scout has only its file tools |
+| A long specialist job inside the 15-minute turn limit | A real coding job with Byte |
 
