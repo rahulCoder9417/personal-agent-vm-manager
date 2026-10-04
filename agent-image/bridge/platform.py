@@ -13,7 +13,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import crew
+from . import browser, crew
 
 HERMES_API_HOST = "127.0.0.1"
 HERMES_API_PORT = 8642
@@ -39,6 +39,10 @@ class PlatformFile:
     mcp_servers: list[MCPServer] = field(default_factory=list)
     # Which agent answers: "hermes" (default) or "claude_code". Read again on every delivery.
     runtime: str = "hermes"
+    # Scout's browser is turned on for this user (a Max-plan feature). The vm-manager writes it when it
+    # wakes the container, with the container's memory limit and network rule, so the Bridge reads it once,
+    # when it boots.
+    browser_enabled: bool = False
 
 
 def load_platform_file(path: str) -> PlatformFile:
@@ -65,6 +69,7 @@ def load_platform_file(path: str) -> PlatformFile:
         timezone=raw.get("timezone") or "",
         mcp_servers=servers,
         runtime=str(raw.get("runtime") or "hermes"),
+        browser_enabled=raw.get("browser_enabled") is True,
     )
 
 
@@ -78,8 +83,11 @@ def render_hermes_config(pf: PlatformFile, env: dict[str, str], data_dir: str = 
 
     - model: LiteLLM (OpenAI-compatible) with this user's key; reached through the egress proxy
     - MCP: the Platform MCP (with this container's token; `send_message` hidden because the
-      Bridge sends the final answer itself) + the user's own MCP servers
-    - Hermes's own chat connectors and cron off (only the local API server runs)
+      Bridge sends the final answer itself) + the user's own MCP servers + the browser's server when
+      the browser is turned on for the user (bridge/browser.py; a stdio server Hermes starts itself)
+    - Hermes's own chat connectors and cron off (only the local API server runs), and Hermes's own
+      built-in browser tools off: the only browser is Scout's, behind the guard, and only when it is
+      turned on for the user
     - delegation (the crew): children cannot delegate, BRIDGE_CREW_MAX_PARALLEL at a time (default 3)
     - memory, skills and sessions under HERMES_HOME (= /data/hermes)
     """
@@ -103,6 +111,8 @@ def render_hermes_config(pf: PlatformFile, env: dict[str, str], data_dir: str = 
         if s.auth_header_name and s.auth_secret:
             entry["headers"] = {s.auth_header_name: s.auth_secret}
         servers[server_key(s)] = entry
+    if browser.enabled(pf, env):
+        servers[browser.SERVER_NAME] = browser.hermes_server(env, data_dir)
 
     cfg: dict[str, Any] = {
         "model": {
@@ -114,7 +124,8 @@ def render_hermes_config(pf: PlatformFile, env: dict[str, str], data_dir: str = 
         "mcp_servers": servers,
         # No Hermes-side scheduling or outbound messaging: the platform owns both.
         "cron": {"enabled": False},
-        "agent": {"disabled_toolsets": ["cronjob", "messaging"]},
+        # Nor Hermes's built-in browser toolset (toolsets.py "browser": its own browser_* tools).
+        "agent": {"disabled_toolsets": ["cronjob", "messaging", "browser"]},
         # The crew: the lead hands work over with delegate_task, one level deep, a few at a time.
         "delegation": crew.hermes_delegation(crew.max_parallel(env)),
         "terminal": {"backend": "local", "cwd": os.path.join(data_dir, "workspace"), "timeout": 180},

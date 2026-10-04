@@ -52,8 +52,9 @@ class BridgeCoreTest(unittest.TestCase):
         self.assertEqual(call["idempotency_key"], "evt-1#1")
         self.assertIn("hello", call["text"])
         self.assertIn("telegram", call["instructions"])
-        # Whichever engine runs the turn, the lead is told the web is Scout's.
+        # Whichever engine runs the turn, the lead is told the web and the browser are Scout's.
         self.assertIn("Anything that needs the web, even a single lookup, goes to Scout", call["instructions"])
+        self.assertIn("The browser is Scout's too", call["instructions"])
         self.assertEqual(self.busy_after_the_turn(), 0)
 
     def test_duplicate_after_done_is_not_rerun(self):
@@ -182,8 +183,14 @@ class RequestTest(unittest.TestCase):
                      "Do small jobs that need no web yourself",
                      "at most 3 specialists for one job",
                      "After Byte opens a pull request you may have Patch review it",
-                     "when you hand a job to Scout, pass only what the research needs, never secrets, tokens or "
-                     "private data"):
+                     "when you hand a job to Scout, pass only what the job needs, never secrets, tokens or "
+                     "passwords"):
+            self.assertIn(part, text)
+        # The browser is Scout's too; it is a Max feature that costs credits; no sign-ins in this version.
+        for part in ("a job that needs a website to be opened, clicked through, filled in or scraped goes to Scout",
+                     "Never use a browser tool yourself, even when one is available to you",
+                     "part of the Max plan and costs the user credits for every minute it is open",
+                     "signing in to a site is not available yet, so when a job needs a sign-in, tell the user that"):
             self.assertIn(part, text)
         self.assertIn("through chat", build_instructions(req(channel="")))
 

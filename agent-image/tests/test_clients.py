@@ -218,7 +218,42 @@ class HermesClientTest(unittest.TestCase):
                      "one), even when one is available to you",
                      "Use the platform tool web_search only when you have no built-in search"):
             self.assertIn(part, sent)
-        self.assertEqual(sent.count("You have no web search and no page reading"), 2, "Byte's and Patch's briefs")
+        self.assertEqual(sent.count("You have no web search, no page reading and no browser"), 2,
+                         "Byte's and Patch's briefs")
+
+    def test_the_hermes_lead_is_told_the_browser_is_scouts(self):
+        # The same for the browser: on Hermes the browser tools are in everyone's list, so the lead's
+        # instructions and the three briefs are all that says who drives it and how.
+        instructions = build_instructions(DeliverRequest.from_json(
+            {"delivery_id": "d1", "kind": "message", "channel": "telegram", "text": "hello"}))
+        lead = ("The browser is Scout's too: a job that needs a website to be opened, clicked through, filled in "
+                "or scraped goes to Scout",
+                "Never use a browser tool yourself, even when one is available to you",
+                "signing in to a site is not available yet")
+        FakeHermes.runs = [DEFAULT_RUN, DEFAULT_RUN]
+        # The browser is turned on for this user: Scout's brief says how to use it, and to close it.
+        c = HermesClient(self.url, "local-key", with_browser=True)
+        c.run("hello", instructions, "telegram:42", "evt-1#1", self.progress.append, timeout=10)
+        sent = self.run_posts()[0][1]["instructions"]
+        for part in (*lead,
+                     # Scout's brief.
+                     "Use the cheapest tool that does the job, in this order: search, then read_page for a plain "
+                     "page, then the browser",
+                     "call browser_close as soon as you are done, also when the job failed",
+                     "Never type a password, a one-time code, a card number or any other secret into a page",
+                     "Never enter anything private about the user into a page, unless the task explicitly gives "
+                     "it to you for that purpose",
+                     # Byte's and Patch's briefs.
+                     "do not use web_search, read_page, a browser tool or any other web tool"):
+            self.assertIn(part, sent)
+        self.assertNotIn("You have no browser here", sent)
+        # Not turned on (the default): the lead is told the same, and Scout that it has no browser.
+        c = HermesClient(self.url, "local-key")
+        c.run("hello", instructions, "telegram:42", "evt-2#1", self.progress.append, timeout=10)
+        sent = self.run_posts()[1][1]["instructions"]
+        for part in (*lead, "You have no browser here: it is part of the Max plan and is not turned on for this user"):
+            self.assertIn(part, sent)
+        self.assertNotIn("browser_close", sent)
 
     def test_crew_in_the_background_gets_a_follow_up_turn(self):
         # Hermes runs the lead's specialists in the background: the first run ends with a status, the

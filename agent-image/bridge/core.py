@@ -3,6 +3,11 @@ final answer through the Platform MCP, and report NDJSON events.
 
 Events (one JSON object per line):
     {"type": "accepted" | "working" | "turn_done" | "error", "message": str, "platform_fault": bool}
+
+The last event of a turn (turn_done or error) also carries the browser time to charge, when Scout's
+browser was open: "browser_seconds" (whole seconds since the Bridge's last report) and
+"browser_report_id" (so the vm-manager stores a repeated report once). Both are left out when the
+browser never started.
 """
 
 from __future__ import annotations
@@ -25,8 +30,21 @@ KINDS = {"message", "approval_answer", "automation", "app_event"}
 MAX_TEXT = 100_000
 
 
-def event(typ: str, message: str = "", platform_fault: bool = False) -> dict:
-    return {"type": typ, "message": message, "platform_fault": platform_fault}
+def event(typ: str, message: str = "", platform_fault: bool = False, **extra: Any) -> dict:
+    ev = {"type": typ, "message": message, "platform_fault": platform_fault}
+    ev.update(extra)
+    return ev
+
+
+def browser_fields(rec: Optional[dict]) -> dict:
+    """The browser report saved with a delivery, as the fields of its last event ({} when there is none)."""
+    report = (rec or {}).get("browser")
+    if not isinstance(report, dict):
+        return {}
+    seconds, report_id = report.get("browser_seconds"), report.get("browser_report_id")
+    if not isinstance(seconds, int) or isinstance(seconds, bool) or seconds <= 0 or not isinstance(report_id, str):
+        return {}
+    return {"browser_seconds": seconds, "browser_report_id": report_id}
 
 
 @dataclass
@@ -133,6 +151,12 @@ class Sender(Protocol):
     def send_message(self, text: str, session_key: str) -> Any: ...
 
 
+class BrowserUsage(Protocol):
+    """What the Bridge needs from the browser meter (browser.BrowserMeter)."""
+
+    def end_turn(self, last: bool) -> int: ...
+
+
 class DeliveryStore:
     """Finished deliveries, persisted in /data so a retry after a restart is not re-run.
 
@@ -213,7 +237,8 @@ class Turn:
 
 class Bridge:
     def __init__(self, secret: str, runner: Runner, sender: Sender, store: DeliveryStore,
-                 turn_timeout: float = 900, send_retries: int = 3, retry_delay: float = 1.0):
+                 turn_timeout: float = 900, send_retries: int = 3, retry_delay: float = 1.0,
+                 browser: Optional[BrowserUsage] = None):
         if not secret:
             raise ValueError("bridge secret is required")
         self._secret = secret.encode()
@@ -223,6 +248,7 @@ class Bridge:
         self.turn_timeout = turn_timeout
         self.send_retries = send_retries
         self.retry_delay = retry_delay
+        self.browser = browser  # None: this container has no browser (it is not turned on for the user)
         self._turns: dict[str, Turn] = {}
         self._lock = threading.Lock()
         self.closing = False
@@ -256,7 +282,9 @@ class Bridge:
                                          name=f"turn-{req.delivery_id[:16]}").start()
         if duplicate:
             yield event(ACCEPTED)
-            yield event(TURN_DONE, "duplicate delivery; already handled")
+            # The browser report of the finished turn goes out again: if the first one was lost on the
+            # way, this one is stored; if not, the vm-manager knows its id and drops it.
+            yield event(TURN_DONE, "duplicate delivery; already handled", **browser_fields(rec))
             return
         if turn is None:
             yield event(ERROR, "the agent is shutting down", platform_fault=True)
@@ -286,22 +314,46 @@ class Bridge:
                         fault = not reason.startswith("max_iterations")
                     message = getattr(result, "message", "") or f"the agent could not finish ({result.status})"
                     self.store.put(req.delivery_id, state="failed")
-                    turn.publish(event(ERROR, message, platform_fault=fault))
+                    self._end(req, turn, event(ERROR, message, platform_fault=fault))
                     return
                 output = result.output or ""
                 self.store.put(req.delivery_id, state="answered", output=output)
             if output.strip():
                 if not self._send(output, req.session_key):
-                    turn.publish(event(ERROR, "could not deliver the reply", platform_fault=True))
+                    self._end(req, turn, event(ERROR, "could not deliver the reply", platform_fault=True))
                     return
             self.store.put(req.delivery_id, state="done", output=None)
-            turn.publish(event(TURN_DONE))
+            self._end(req, turn, event(TURN_DONE))
         except Exception as exc:  # noqa: BLE001 - every failure must end the stream
             log.exception("turn %s failed", req.delivery_id)
-            turn.publish(event(ERROR, f"agent error: {type(exc).__name__}", platform_fault=True))
+            self._end(req, turn, event(ERROR, f"agent error: {type(exc).__name__}", platform_fault=True))
         finally:
             with self._lock:
                 self._turns.pop(req.delivery_id, None)
+
+    def _end(self, req: DeliverRequest, turn: Turn, ev: dict) -> None:
+        """Publish a turn's last event, with the browser time to charge (when the browser was open)."""
+        try:
+            ev.update(self._browser_report(req.delivery_id))
+        except Exception:  # noqa: BLE001 - the turn must end whatever the meter does
+            log.exception("browser report for %s failed", req.delivery_id)
+        turn.publish(ev)
+
+    def _browser_report(self, delivery_id: str) -> dict:
+        """Close the browser (unless another turn is still running) and return what to report: the
+        seconds it was open since the last report, under an id of its own. {} when it never started.
+        The report is saved with the delivery, so a repeat of the delivery sends it again."""
+        if self.browser is None:
+            return {}
+        with self._lock:
+            last = len(self._turns) <= 1  # this turn is still in the table
+        seconds = self.browser.end_turn(last)
+        if seconds <= 0:
+            return {}
+        number = int((self.store.get(delivery_id) or {}).get("browser_reports", 0)) + 1
+        report = {"browser_seconds": seconds, "browser_report_id": f"{delivery_id}#{number}"}
+        self.store.put(delivery_id, browser_reports=number, browser=report)
+        return report
 
     def _send(self, text: str, session_key: str) -> bool:
         for attempt in range(1, self.send_retries + 1):

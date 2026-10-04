@@ -4,6 +4,7 @@ import io
 import json
 import logging
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -14,11 +15,11 @@ import unittest
 import urllib.error
 import urllib.request
 
-from bridge import crew
+from bridge import browser, crew
 from bridge.claude import (LEAD_GATE, MSG_NOT_SIGNED_IN, ClaudeAuth, ClaudeError, ClaudeRunner, CrewEvents,
                            LoginNotFound, find_authorize_url, render_settings)
 from bridge.core import Bridge, DeliverRequest, DeliveryStore
-from bridge.lead_gate import REFUSAL
+from bridge.lead_gate import BLOCK, PASS, REFUSAL
 from bridge.platform import load_platform_file
 from bridge.runtime import PlatformReader, RuntimeRunner
 from bridge.server import BridgeHTTPServer
@@ -28,6 +29,16 @@ from tests.fakes import FakeRunner, FakeSender
 HERE = os.path.dirname(os.path.abspath(__file__))
 SECRET = "s3cret-bridge"
 GOOD = "good-code-123"
+# Scout's web tools as Claude Code names them: the built-in search, the platform's two web tools, and the
+# tools of the MCP server `scout_browser` (the browser inside the container). Written out here on purpose: the
+# tests pin the names.
+WEB_TOOLS = ["WebSearch", "mcp__platform__web_search", "mcp__platform__read_page",
+             "mcp__scout_browser__browser_navigate", "mcp__scout_browser__browser_navigate_back",
+             "mcp__scout_browser__browser_snapshot", "mcp__scout_browser__browser_find", "mcp__scout_browser__browser_click",
+             "mcp__scout_browser__browser_type", "mcp__scout_browser__browser_fill_form", "mcp__scout_browser__browser_select_option",
+             "mcp__scout_browser__browser_press_key", "mcp__scout_browser__browser_hover", "mcp__scout_browser__browser_wait_for",
+             "mcp__scout_browser__browser_handle_dialog", "mcp__scout_browser__browser_tabs", "mcp__scout_browser__browser_close"]
+BROWSER_TOOLS = WEB_TOOLS[3:]
 
 
 def make_fake_cli(bin_dir: str) -> str:
@@ -75,18 +86,28 @@ class Env:
         os.makedirs(self.cfg)
         self.platform_path = os.path.join(self.data, ".platform", "platform.json")
         self.write_platform(runtime)
+        # What the image has under /opt/browser: the browser's MCP server and the browser itself.
+        self.browser_root = os.path.join(self.root, "browser")
+        os.makedirs(os.path.join(self.browser_root, "node_modules", "@playwright", "mcp"))
+        os.makedirs(os.path.join(self.browser_root, "ms-playwright"))
+        with open(os.path.join(self.browser_root, "node_modules", "@playwright", "mcp", "cli.js"), "w") as fh:
+            fh.write("// the browser's MCP server\n")
         self.env = {"PATH": self.bin + os.pathsep + os.environ.get("PATH", ""), "DATA_DIR": self.data,
                     "HOME": os.path.join(self.data, "home"), "CLAUDE_CONFIG_DIR": self.cfg,
                     "PLATFORM_MCP_URL": "http://api:8080/mcp", "HTTPS_PROXY": "http://proxy:3128",
-                    "ANTHROPIC_API_KEY": "sk-platform-must-not-leak"}
+                    "ANTHROPIC_API_KEY": "sk-platform-must-not-leak", "BROWSER_ROOT": self.browser_root,
+                    "BROWSER_NODE": "/usr/local/bin/node", "TMPDIR": os.path.join(self.data, "tmp")}
         os.makedirs(self.env["HOME"])
 
-    def write_platform(self, runtime):
+    def write_platform(self, runtime, browser_enabled=False):
+        body = {"version": 1, "user_id": "u1", "mcp_token": "tok-123", "bridge_secret": SECRET,
+                "litellm_key": "sk-1", "runtime": runtime,
+                "mcp_servers": [{"id": "Notes", "name": "notes", "url": "https://notes.example.org/mcp",
+                                 "auth_header_name": "X-Api-Key", "auth_secret": "k1"}]}
+        if browser_enabled:
+            body["browser_enabled"] = True
         with open(self.platform_path, "w") as fh:
-            json.dump({"version": 1, "user_id": "u1", "mcp_token": "tok-123", "bridge_secret": SECRET,
-                       "litellm_key": "sk-1", "runtime": runtime,
-                       "mcp_servers": [{"id": "Notes", "name": "notes", "url": "https://notes.example.org/mcp",
-                                        "auth_header_name": "X-Api-Key", "auth_secret": "k1"}]}, fh)
+            json.dump(body, fh)
 
     def mode(self, m):
         with open(os.path.join(self.cfg, "fake_mode"), "w") as fh:
@@ -173,6 +194,63 @@ class ClaudeRunnerTest(unittest.TestCase):
         self.assertEqual(servers["user_notes"]["headers"], {"X-Api-Key": "k1"})
         self.assertEqual(call["mcp_mode"], oct(0o600))
         self.assertTrue(self.auth.connected())
+        # The browser is not turned on for this user: no browser server, no browser tool allowed, no
+        # settings file for it.
+        self.assertEqual(sorted(servers), ["platform", "user_notes"])
+        self.assertNotIn("browser", flag(argv, "--allowedTools"))
+        self.assertFalse(os.path.exists(os.path.join(self.e.data, ".platform", "browser-mcp.json")))
+
+    def test_the_browser_when_it_is_turned_on_for_the_user(self):
+        self.e.sign_in()
+        runner = ClaudeRunner([self.e.cli], self.e.env, self.e.data, self.e.reader().load, with_browser=True)
+        res = runner.run(text="book it", instructions="i", session_key="s", idempotency_key="k",
+                         on_progress=self.progress.append, timeout=20)
+        self.assertEqual(res.status, "completed")
+        call = self.e.calls()[0]
+        argv = call["argv"]
+        # The MCP config has a third server, `scout_browser`: a stdio server the CLI starts for this run. It is
+        # the guard (browser_mcp.py as a file, isolated mode) with Scout's browser tools, and behind it the
+        # Playwright MCP server with its settings file.
+        servers = call["mcp"]["mcpServers"]
+        self.assertEqual(sorted(servers), ["platform", "scout_browser", "user_notes"])
+        config_path = os.path.join(self.e.data, ".platform", "browser-mcp.json")
+        self.assertEqual(servers["scout_browser"], {
+            "type": "stdio", "command": sys.executable,
+            "args": ["-I", browser.GUARD, "--allow", ",".join(crew.BROWSER_TOOLS),
+                     "--env", "PLAYWRIGHT_BROWSERS_PATH=" + os.path.join(self.e.browser_root, "ms-playwright"),
+                     "--env", "HOME=" + self.e.env["HOME"], "--env", "TMPDIR=" + self.e.env["TMPDIR"],
+                     "--", "/usr/local/bin/node",
+                     os.path.join(self.e.browser_root, "node_modules", "@playwright", "mcp", "cli.js"),
+                     "--config", config_path]})
+        self.assertEqual(servers["scout_browser"], browser.claude_server(self.e.env, self.e.data))
+        # No secret of the container is on that command line.
+        for secret in ("tok-123", SECRET, "sk-1", "sk-platform-must-not-leak"):
+            self.assertNotIn(secret, json.dumps(servers["scout_browser"]))
+        # Its settings file was written before the run, private, with the settings the browser needs here.
+        with open(config_path) as fh:
+            config = json.load(fh)
+        self.assertEqual(config, browser.render_config(self.e.env, self.e.data))
+        self.assertEqual(oct(os.stat(config_path).st_mode & 0o777), oct(0o600))
+        # The session allows Scout's browser tools one by one (never the whole server), next to what it
+        # allowed before; nothing more is denied, because a session deny would take a tool from Scout too.
+        self.assertEqual(flag(argv, "--allowedTools"),
+                         "Bash,Read,Edit,Write,Glob,Grep,NotebookEdit,TodoWrite,WebSearch,"
+                         + ",".join(BROWSER_TOOLS) + ",mcp__platform,mcp__user_notes,Agent")
+        self.assertNotIn("mcp__scout_browser", flag(argv, "--allowedTools").split(","))
+        self.assertEqual(flags(argv, "--disallowedTools"), ["mcp__platform__send_message", "WebFetch"])
+        # Scout has the browser tools, and its brief says how to use them; Byte and Patch have them denied.
+        agents = json.loads(flag(argv, "--agents"))
+        self.assertEqual(agents, crew.claude_agents("platform", browser=True))
+        self.assertEqual(agents["scout"]["tools"], WEB_TOOLS)
+        self.assertIn("call browser_close as soon as you are done", agents["scout"]["prompt"])
+        for member in ("byte", "patch"):
+            self.assertEqual([t for t in agents[member]["tools"] if "browser" in t], [])
+            for tool in BROWSER_TOOLS:
+                self.assertIn(tool, agents[member]["disallowedTools"])
+        # The lead's gate is the same hook as without the browser, and it guards the browser tools.
+        self.assertEqual(call["settings"], render_settings())
+        self.assertEqual(call["settings"]["hooks"]["PreToolUse"][0]["matcher"], "|".join(WEB_TOOLS))
+        self.assertIn("--strict-mcp-config", argv)
 
     def test_crew_is_passed_as_sub_agents(self):
         self.e.sign_in()
@@ -182,10 +260,11 @@ class ClaudeRunnerTest(unittest.TestCase):
         agents = json.loads(flag(argv, "--agents"))
         self.assertEqual(agents, crew.claude_agents("platform"))
         self.assertEqual(list(agents), ["byte", "patch", "scout"])
-        # Scout: the built-in search and the two platform web tools; the built-in file, edit and shell tools
-        # and page fetching are denied as well.
-        self.assertEqual(agents["scout"]["tools"],
-                         ["WebSearch", "mcp__platform__web_search", "mcp__platform__read_page"])
+        # Scout: the built-in search and the two platform web tools (the browser is not turned on for this
+        # user, so its tools are not in the list); the built-in file, edit and shell tools and page
+        # fetching are denied as well.
+        self.assertEqual(agents["scout"]["tools"], WEB_TOOLS[:3])
+        self.assertIn("You have no browser here", agents["scout"]["prompt"])
         for t in ("Read", "Glob", "Grep", "Edit", "Write", "NotebookEdit", "Bash", "WebFetch"):
             self.assertIn(t, agents["scout"]["disallowedTools"])
         for a in agents.values():
@@ -216,18 +295,14 @@ class ClaudeRunnerTest(unittest.TestCase):
         self.e.mode("web")
         res = self.run_turn()
         self.assertEqual(res.status, "completed")
-        refused = f"refused: {REFUSAL}"
         self.assertEqual(res.output.splitlines(), [
-            # The lead's own calls to a web tool are refused; its other tools work.
-            f"lead WebSearch: {refused}",
-            f"lead mcp__platform__web_search: {refused}",
-            f"lead mcp__platform__read_page: {refused}",
+            # The lead's own calls to a web tool or a browser tool are refused; its other tools work.
+            *[f"lead {tool}: refused: {REFUSAL}" for tool in WEB_TOOLS],
             "lead mcp__platform__get_profile: ok",
             # The same calls from inside Scout go through.
-            "scout WebSearch: ok",
-            "scout mcp__platform__web_search: ok",
-            "scout mcp__platform__read_page: ok",
+            *[f"scout {tool}: ok" for tool in WEB_TOOLS],
         ])
+        self.assertEqual(len(res.output.splitlines()), 17 + 1 + 17)
         # Page fetching from the container is nobody's: denied for the whole session, lead and specialists.
         argv = self.e.calls()[0]["argv"]
         self.assertIn("WebFetch", flags(argv, "--disallowedTools"))
@@ -355,19 +430,74 @@ class ClaudeRunnerTest(unittest.TestCase):
             r.run(text="x", instructions="", session_key="s", idempotency_key="k", on_progress=print, timeout=5)
 
 
-class LeadGateTest(unittest.TestCase):
-    """bridge/lead_gate.py, the PreToolUse hook, run the way the settings file runs it."""
+def hook_input(tool, tool_input=None, sub_agent=None):
+    """The JSON Claude Code gives a `PreToolUse` command hook on stdin, as the hooks page documents it
+    (code.claude.com/docs/en/hooks, "Common input fields" and "PreToolUse input"; read 2026-10-04).
 
-    GUARDED = ["WebSearch", "mcp__platform__web_search", "mcp__platform__read_page"]
+    The common fields, then `tool_name`, `tool_input` and `tool_use_id`; `mcp_server` for an MCP tool.
+    `agent_id` and `agent_type` are there only for a call from inside a sub-agent, so the lead's call
+    (`sub_agent=None`) has neither key.
+    """
+    event = {"session_id": "abc123", "prompt_id": "550e8400-e29b-41d4-a716-446655440000",
+             "transcript_path": "/data/claude/projects/-data-workspace/abc123.jsonl", "cwd": "/data/workspace",
+             "permission_mode": "dontAsk", "effort": {"level": "high"}, "hook_event_name": "PreToolUse",
+             "tool_name": tool, "tool_input": {"query": "flights to Goa"} if tool_input is None else tool_input,
+             "tool_use_id": "toolu_01ABC123"}
+    if tool.startswith("mcp__"):
+        event["mcp_server"] = {"name": tool.split("__")[1], "source": "user"}  # the gate does not read it
+    if sub_agent:
+        event.update(agent_id="agent-abc123", agent_type=sub_agent)
+    return event
+
+
+def matcher_names(matcher):
+    """The tool names a hook matcher stands for, by the hooks page ("Matcher patterns"): a matcher made only
+    of letters, digits, `_`, `-`, spaces, `,` and `|` is a list of exact names separated by `|` or `,`.
+    Anything else would be a regular expression, which the Bridge never writes: None."""
+    if not re.fullmatch(r"[A-Za-z0-9_\- ,|]+", matcher):
+        return None
+    return [name.strip() for name in re.split(r"[|,]", matcher)]
+
+
+class LeadGateTest(unittest.TestCase):
+    """bridge/lead_gate.py, the PreToolUse hook, run the way Claude Code runs it.
+
+    From the hooks page (code.claude.com/docs/en/hooks, read 2026-10-04): a hook group runs for a tool call
+    when its matcher names the tool; a command hook without `args` is passed to `sh -c`, with the hook input
+    as JSON on stdin; exit code 2 "blocks the tool call" and "Claude sees the stderr message as the denial
+    reason", whatever is on stdout; exit code 0 with nothing on stdout decides nothing, and the normal
+    permission flow applies. These tests check the gate against that contract. They cannot show that the
+    real CLI keeps to it: that needs a live turn.
+    """
+
+    GUARDED = WEB_TOOLS
+    # Tools the lead keeps, and names that only look like a guarded one.
+    OTHERS = ("Bash", "Read", "Agent", "TodoWrite", "mcp__platform__get_profile", "mcp__platform__run_app_action",
+              "mcp__platform__request_approval", "mcp__user_notes__browser_navigate", "mcp__scout_browser",
+              "mcp__browser__browser_navigate",
+              "mcp__platform__browser_navigate", "mcp__scout_browser__browser_navigate_forward", "browser_navigate",
+              "WebSearchPlus")
 
     def gate(self, stdin, guarded=None):
+        """The gate run directly, as (exit code, stdout, stderr)."""
         done = subprocess.run([sys.executable, "-I", LEAD_GATE, *(self.GUARDED if guarded is None else guarded)],
                               input=stdin, capture_output=True, text=True, timeout=20)
-        return done.returncode, done.stderr.strip()
+        return done.returncode, done.stdout, done.stderr
 
-    def event(self, tool, **extra):
-        return json.dumps({"session_id": "s", "hook_event_name": "PreToolUse", "permission_mode": "dontAsk",
-                           "tool_name": tool, "tool_input": {}, "tool_use_id": "t", **extra})
+    def hooks(self, event):
+        """What the CLI does before one tool call: every `PreToolUse` hook of the settings file whose matcher
+        names the tool is run through `sh -c` with the event on stdin. One (exit code, stdout, stderr) per
+        hook that ran."""
+        ran = []
+        for group in render_settings()["hooks"]["PreToolUse"]:
+            if event["tool_name"] not in matcher_names(group["matcher"]):
+                continue
+            for hook in group["hooks"]:
+                self.assertEqual((hook["type"], "args" in hook), ("command", False), "shell form")
+                done = subprocess.run(["sh", "-c", hook["command"]], input=json.dumps(event), capture_output=True,
+                                      text=True, timeout=hook["timeout"])
+                ran.append((done.returncode, done.stdout, done.stderr))
+        return ran
 
     def test_the_settings_run_the_gate_for_scouts_web_tools_only(self):
         self.assertEqual(crew.claude_lead_gate("platform"), self.GUARDED)
@@ -375,37 +505,93 @@ class LeadGateTest(unittest.TestCase):
         self.assertEqual(crew.claude_session_denied("platform"), ["mcp__platform__send_message", "WebFetch"])
         (group,) = render_settings()["hooks"]["PreToolUse"]
         # Only letters, digits, "_" and "|": Claude Code reads such a matcher as a list of exact tool names.
-        self.assertEqual(group["matcher"], "WebSearch|mcp__platform__web_search|mcp__platform__read_page")
+        self.assertEqual(group["matcher"],
+                         "WebSearch|mcp__platform__web_search|mcp__platform__read_page|"
+                         "mcp__scout_browser__browser_navigate|mcp__scout_browser__browser_navigate_back|"
+                         "mcp__scout_browser__browser_snapshot|mcp__scout_browser__browser_find|mcp__scout_browser__browser_click|"
+                         "mcp__scout_browser__browser_type|mcp__scout_browser__browser_fill_form|"
+                         "mcp__scout_browser__browser_select_option|mcp__scout_browser__browser_press_key|"
+                         "mcp__scout_browser__browser_hover|mcp__scout_browser__browser_wait_for|"
+                         "mcp__scout_browser__browser_handle_dialog|mcp__scout_browser__browser_tabs|"
+                         "mcp__scout_browser__browser_close")
         self.assertRegex(group["matcher"], r"^[A-Za-z0-9_|]+$")
+        self.assertEqual(matcher_names(group["matcher"]), self.GUARDED)
         (hook,) = group["hooks"]
+        self.assertEqual(set(hook), {"type", "command", "timeout"})
         self.assertEqual(hook["type"], "command")
         self.assertEqual(hook["timeout"], 10)
         # One shell command: this interpreter in isolated mode, the gate as a file, the tools it guards.
         self.assertTrue(os.path.isfile(LEAD_GATE))
         self.assertEqual(shlex.split(hook["command"]), [sys.executable, "-I", LEAD_GATE, *self.GUARDED])
 
-    def test_the_leads_call_is_refused(self):
-        for tool in self.GUARDED:
-            self.assertEqual(self.gate(self.event(tool)), (2, REFUSAL), tool)
-        self.assertIn("Scout", REFUSAL)
+    def test_the_gate_guards_what_scout_has_and_nothing_else(self):
+        # The matcher, the names the gate is given and Scout's own tool list (with the browser turned on)
+        # are the same seventeen names, so the lead is refused exactly the tools Scout is given.
+        (group,) = render_settings()["hooks"]["PreToolUse"]
+        command = shlex.split(group["hooks"][0]["command"])
+        scout = crew.claude_agents("platform", browser=True)["scout"]["tools"]
+        self.assertEqual(matcher_names(group["matcher"]), scout)
+        self.assertEqual(command[3:], scout)
+        self.assertEqual(len(scout), 17)
+        self.assertEqual(scout[3:], BROWSER_TOOLS)
+        self.assertEqual(scout[3:], [f"mcp__scout_browser__{name}" for name in crew.BROWSER_TOOLS])
+        # Without the browser Scout has fewer tools; the gate still guards all of them.
+        self.assertEqual(crew.claude_agents("platform")["scout"]["tools"], scout[:3])
 
-    def test_a_sub_agents_call_passes(self):
+    def test_the_leads_call_to_each_of_scouts_web_tools_is_refused(self):
+        # The lead's call has no agent_id. Exit code 2 blocks the call; stderr is the reason the lead is
+        # shown; stdout stays empty, so no JSON output competes with it.
+        self.assertEqual((BLOCK, PASS), (2, 0))
         for tool in self.GUARDED:
-            self.assertEqual(self.gate(self.event(tool, agent_id="agent-1", agent_type="scout")), (0, ""), tool)
-        # Either field marks a sub-agent: the Bridge never starts the session with --agent.
-        self.assertEqual(self.gate(self.event("WebSearch", agent_id="agent-1")), (0, ""))
-        self.assertEqual(self.gate(self.event("WebSearch", agent_type="scout")), (0, ""))
-        self.assertEqual(self.gate(self.event("WebSearch", agent_id="", agent_type=""))[0], 2, "empty is the lead")
+            event = hook_input(tool)
+            self.assertNotIn("agent_id", event)
+            self.assertNotIn("agent_type", event)
+            self.assertEqual(self.hooks(event), [(2, "", REFUSAL + "\n")], tool)
+        for word in ("Scout", "subagent_type scout", "the web or the browser"):
+            self.assertIn(word, REFUSAL)
+
+    def test_a_sub_agents_call_to_each_of_scouts_web_tools_passes(self):
+        # Inside a sub-agent the input carries agent_id and agent_type. Exit code 0 and no output: the gate
+        # decides nothing, and the session's permission rules and the sub-agent's own tool list apply.
+        for tool in self.GUARDED:
+            event = hook_input(tool, sub_agent="scout")
+            self.assertEqual((event["agent_id"], event["agent_type"]), ("agent-abc123", "scout"))
+            self.assertEqual(self.hooks(event), [(0, "", "")], tool)
+
+    def test_the_gate_does_not_decide_which_sub_agent(self):
+        # The gate only tells the lead from a sub-agent. Byte and Patch are kept off these tools by their
+        # own `disallowedTools`, not by the hook.
+        self.assertEqual(self.hooks(hook_input("mcp__scout_browser__browser_navigate", sub_agent="byte")), [(0, "", "")])
+        for member in ("byte", "patch"):
+            denied = crew.claude_agents("platform")[member]["disallowedTools"]
+            for tool in self.GUARDED:
+                self.assertIn(tool, denied, member)
+
+    def test_either_field_marks_a_sub_agent(self):
+        # The Bridge never starts the session with --agent, so agent_type alone is a sub-agent too.
+        for tool in ("WebSearch", "mcp__scout_browser__browser_close"):
+            event = hook_input(tool)
+            self.assertEqual(self.hooks({**event, "agent_id": "agent-1"}), [(0, "", "")])
+            self.assertEqual(self.hooks({**event, "agent_type": "scout"}), [(0, "", "")])
+            for empty in ("", None):
+                (done,) = self.hooks({**event, "agent_id": empty, "agent_type": empty})
+                self.assertEqual(done, (2, "", REFUSAL + "\n"), "an empty field is the lead")
 
     def test_other_tools_pass(self):
-        for tool in ("Bash", "Read", "mcp__platform__get_profile", "mcp__platform__run_app_action", "Agent"):
-            self.assertEqual(self.gate(self.event(tool)), (0, ""), tool)
+        for tool in self.OTHERS:
+            # The matcher does not name the tool, so the CLI does not run the gate at all,
+            self.assertEqual(self.hooks(hook_input(tool)), [], tool)
+            self.assertEqual(self.hooks(hook_input(tool, sub_agent="byte")), [], tool)
+            # and the gate itself lets it pass if it were run: the lead's call and a sub-agent's.
+            self.assertEqual(self.gate(json.dumps(hook_input(tool))), (0, "", ""), tool)
+            self.assertEqual(self.gate(json.dumps(hook_input(tool, sub_agent="byte"))), (0, "", ""), tool)
 
     def test_what_it_cannot_read_passes(self):
         # A broken hook must never take the web from Scout: nothing is decided, the session's rules apply.
-        for stdin in ("", "not json", "[1, 2]", '"WebSearch"', "{}"):
-            self.assertEqual(self.gate(stdin), (0, ""), stdin)
-        self.assertEqual(self.gate(self.event("WebSearch"), guarded=[]), (0, ""))
+        for stdin in ("", "not json", "[1, 2]", '"WebSearch"', "{}", '{"tool_name": 7}',
+                      '{"tool_name": ["mcp__scout_browser__browser_navigate"]}'):
+            self.assertEqual(self.gate(stdin), (0, "", ""), stdin)
+        self.assertEqual(self.gate(json.dumps(hook_input("WebSearch")), guarded=[]), (0, "", ""))
 
     def test_it_runs_on_its_own(self):
         # Run as a file in isolated mode: only the standard library, nothing from the Bridge package.
@@ -413,6 +599,8 @@ class LeadGateTest(unittest.TestCase):
             source = fh.read()
         self.assertNotIn("from .", source)
         self.assertNotIn("import bridge", source)
+        imports = [line.split()[1] for line in source.splitlines() if line.startswith(("import ", "from "))]
+        self.assertEqual(imports, ["json", "sys"])
 
 
 class CrewEventsTest(unittest.TestCase):
