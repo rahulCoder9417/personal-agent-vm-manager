@@ -30,6 +30,13 @@ class BridgeCoreTest(unittest.TestCase):
         self.sender = FakeSender()
         self.bridge = Bridge(SECRET, self.runner, self.sender, DeliveryStore(self.store_path), retry_delay=0)
 
+    def busy_after_the_turn(self):
+        """busy() once the run thread has dropped the turn (in its `finally`, just after the last event)."""
+        deadline = time.monotonic() + 2
+        while self.bridge.busy() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        return self.bridge.busy()
+
     def test_secret_check(self):
         self.assertTrue(self.bridge.check_secret(SECRET))
         self.assertFalse(self.bridge.check_secret("wrong"))
@@ -45,7 +52,7 @@ class BridgeCoreTest(unittest.TestCase):
         self.assertEqual(call["idempotency_key"], "evt-1#1")
         self.assertIn("hello", call["text"])
         self.assertIn("telegram", call["instructions"])
-        self.assertEqual(self.bridge.busy(), 0)
+        self.assertEqual(self.busy_after_the_turn(), 0)
 
     def test_duplicate_after_done_is_not_rerun(self):
         list(self.bridge.deliver(req()))
@@ -116,11 +123,7 @@ class BridgeCoreTest(unittest.TestCase):
         events = list(self.bridge.deliver(req()))
         self.assertEqual(types(events)[-1], "error")
         self.assertTrue(events[-1]["platform_fault"])
-        # The turn is dropped in the run thread's `finally`, just after the last event.
-        deadline = time.monotonic() + 2
-        while self.bridge.busy() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        self.assertEqual(self.bridge.busy(), 0)
+        self.assertEqual(self.busy_after_the_turn(), 0)
 
     def test_empty_answer_is_not_sent(self):
         self.runner.output = "   "
