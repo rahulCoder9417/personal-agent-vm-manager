@@ -23,12 +23,14 @@ DEFAULT_MAX_PARALLEL = 3  # specialists running at the same time (BRIDGE_CREW_MA
 
 # Tool groups a member may use; each engine maps them to its own tool names.
 READ, WRITE, SEARCH, SHELL = "read", "write", "search", "shell"
+WEB = "web"  # the engine's own web search (Claude Code: WebSearch; Hermes has none set up)
 PLATFORM = "platform"  # every Platform MCP tool except send_message
 WEB_SEARCH, READ_PAGE = "platform:web_search", "platform:read_page"  # single Platform MCP tools
 
 _TOOL_WORDS = {
     READ: "reading files", WRITE: "writing and editing files", SEARCH: "searching files", SHELL: "the shell",
     PLATFORM: "the platform tools", WEB_SEARCH: "web_search", READ_PAGE: "read_page",
+    WEB: "your built-in web search (when you have one)",
 }
 
 
@@ -117,8 +119,12 @@ SCOUT = Member(
         "and report back.\n"
         "\n"
         "How you work:\n"
-        "- Search with web_search and read the promising results with read_page. These two platform tools are the "
-        "only tools you have, and your only way to the web.\n"
+        "- Search with your built-in web search when you have one, and with the platform tool web_search when you "
+        "do not. Open a page with the platform tool read_page. These are the only tools you have, and your only way "
+        "to the web.\n"
+        "- read_page opens only an address that came from web_search, from the user's own messages, or from a page "
+        "you already read with it. It refuses every other address, results of your built-in search included. When "
+        "it refuses, do not try again and do not change the address: work from what the search itself returned.\n"
         "- You have no access to files, the shell or the user's apps. You work only from the task Tex gave you and "
         "from the web. If the task leaves out something you need, say so in your report instead of guessing.\n"
         "- Prefer primary and recent sources, and check an important fact in a second source when you can.\n"
@@ -132,7 +138,8 @@ SCOUT = Member(
         "confirm."
     ),
     # No file tools: a page Scout reads must not be able to make it read something and send it out.
-    tools=(WEB_SEARCH, READ_PAGE),
+    # The built-in search sends the query to the model provider, not to a site, so it is not a way out.
+    tools=(WEB, WEB_SEARCH, READ_PAGE),
 )
 
 CREW: tuple[Member, ...] = (BYTE, PATCH, SCOUT)
@@ -187,7 +194,10 @@ CLAUDE_HANDOFF = ("To hand work to a specialist, use the Agent tool with subagen
                   "what it is doing in a few words in the description.")
 
 _CLAUDE_TOOLS = {READ: ("Read",), WRITE: ("Edit", "Write", "NotebookEdit"), SEARCH: ("Glob", "Grep"),
-                 SHELL: ("Bash",)}
+                 SHELL: ("Bash",), WEB: ("WebSearch",)}
+# Fetching a page from inside the container is never a specialist's tool: pages are read through the
+# platform (read_page), which only opens addresses already seen.
+_CLAUDE_NEVER = ("WebFetch",)
 
 
 def claude_tools(member: Member, platform_server: str = "platform") -> list[str]:
@@ -205,13 +215,14 @@ def claude_tools(member: Member, platform_server: str = "platform") -> list[str]
 
 
 def claude_denied(member: Member, platform_server: str = "platform") -> list[str]:
-    """The member's `disallowedTools`: starting sub-agents, sending the answer, and every built-in file,
-    edit and shell tool its tool list leaves out (for Scout: all of them).
+    """The member's `disallowedTools`: starting sub-agents, sending the answer, fetching pages from the
+    container, and every built-in file, edit, shell and web-search tool its tool list leaves out (for Scout:
+    every file, edit and shell tool).
 
     The docs say a `tools` allow list alone gives "only the listed tools". The deny list is a second lock
     that does not depend on how the allow list resolves, e.g. when none of its entries matches a tool.
     """
-    out = [CLAUDE_AGENT_TOOL, f"mcp__{platform_server}__send_message"]
+    out = [CLAUDE_AGENT_TOOL, f"mcp__{platform_server}__send_message", *_CLAUDE_NEVER]
     for group, names in _CLAUDE_TOOLS.items():
         if group not in member.tools:
             out.extend(names)
