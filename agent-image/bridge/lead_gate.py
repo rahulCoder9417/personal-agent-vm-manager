@@ -6,8 +6,10 @@ hook refuses them when the lead itself calls one.
 
 How Claude Code runs it (code.claude.com/docs/en/hooks): before a tool call whose name matches the hook's
 matcher, with the call as JSON on stdin. `agent_id` is in that JSON "only when the hook fires inside a
-subagent call", so a call without it is the lead's. Exit code 2 blocks the call and shows stderr to the
-model. Exit code 0 decides nothing: the session's permission rules apply as usual.
+subagent call", so a call without it is the lead's. `agent_type` (the sub-agent's name) comes with it; it
+would also be there in a session started with `--agent`, which the Bridge never does, so either field
+marks a sub-agent here. Exit code 2 blocks the call and shows stderr to the model. Exit code 0 decides
+nothing: the session's permission rules apply as usual.
 
 Usage: python -I lead_gate.py <tool name>...   (the tools it guards; a call to any other tool passes)
 
@@ -27,7 +29,7 @@ def refuses(event: object, guarded: list[str]) -> bool:
     """True when this is the lead itself calling a guarded tool."""
     if not isinstance(event, dict) or event.get("tool_name") not in guarded:
         return False
-    return not event.get("agent_id")  # there only inside a sub-agent
+    return not (event.get("agent_id") or event.get("agent_type"))  # there only inside a sub-agent
 
 
 def main(argv: list[str]) -> int:

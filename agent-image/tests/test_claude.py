@@ -392,6 +392,10 @@ class LeadGateTest(unittest.TestCase):
     def test_a_sub_agents_call_passes(self):
         for tool in self.GUARDED:
             self.assertEqual(self.gate(self.event(tool, agent_id="agent-1", agent_type="scout")), (0, ""), tool)
+        # Either field marks a sub-agent: the Bridge never starts the session with --agent.
+        self.assertEqual(self.gate(self.event("WebSearch", agent_id="agent-1")), (0, ""))
+        self.assertEqual(self.gate(self.event("WebSearch", agent_type="scout")), (0, ""))
+        self.assertEqual(self.gate(self.event("WebSearch", agent_id="", agent_type=""))[0], 2, "empty is the lead")
 
     def test_other_tools_pass(self):
         for tool in ("Bash", "Read", "mcp__platform__get_profile", "mcp__platform__run_app_action", "Agent"):

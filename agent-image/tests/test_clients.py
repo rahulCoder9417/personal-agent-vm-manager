@@ -6,6 +6,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from bridge import crew
+from bridge.core import DeliverRequest, build_instructions
 from bridge.hermes import CREW_FOLLOW_UP, MAX_CREW_ROUNDS, HermesClient, HermesError
 from bridge.mcp_client import MCPError, PlatformMCP
 
@@ -202,6 +203,22 @@ class HermesClientTest(unittest.TestCase):
         self.assertEqual(FakeHermes.posted[1][0], "/v1/runs/run_1/approval")
         self.assertEqual(FakeHermes.posted[1][2], {"choice": "deny", "all": True})
         self.assertEqual(len(self.run_posts()), 1, "no follow-up turn without a hand-over")
+
+    def test_the_hermes_lead_is_told_the_web_is_scouts(self):
+        # Hermes cannot narrow tools per agent, so there the web rule is carried by the instructions only:
+        # the lead's own part, and the briefs it copies into each task.
+        c = HermesClient(self.url, "local-key")
+        c.run("hello", build_instructions(DeliverRequest.from_json(
+            {"delivery_id": "d1", "kind": "message", "channel": "telegram", "text": "hello"})),
+            "telegram:42", "evt-1#1", self.progress.append, timeout=10)
+        sent = self.run_posts()[0][1]["instructions"]
+        for part in ("You have no access to the web yourself, and neither have Byte and Patch",
+                     "Anything that needs the web, even a single lookup, goes to Scout",
+                     "Never use a web search or page-reading tool yourself (web_search, read_page or a built-in "
+                     "one), even when one is available to you",
+                     "Use the platform tool web_search only when you have no built-in search"):
+            self.assertIn(part, sent)
+        self.assertEqual(sent.count("You have no web search and no page reading"), 2, "Byte's and Patch's briefs")
 
     def test_crew_in_the_background_gets_a_follow_up_turn(self):
         # Hermes runs the lead's specialists in the background: the first run ends with a status, the
