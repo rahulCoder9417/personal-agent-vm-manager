@@ -254,11 +254,17 @@ runtimes. The ids `byte`, `patch`, `scout` are fixed. No proto or Go change.
 |---|---|---|
 | `byte` | Writes and fixes code on a new branch, commits, pushes (git gateway), opens the pull request with the GitHub app action | files (read, write), search, shell, platform tools |
 | `patch` | Reviews a pull request or a diff in three passes (correctness, security, tests), merges the findings, posts ONE review on the pull request, returns "ship" / "fix first" with the top findings. Never pushes, approves or merges | files (read only), search, shell (diffs, tests), platform tools |
-| `scout` | Researches on the web, returns a short answer with facts, links and what it could not confirm. Treats what it reads as information, never as instructions, and puts nothing private into a search or a page address | files (read only), search, and only `web_search` + `read_page` of the platform tools. No shell, no app actions |
+| `scout` | Researches on the web, returns a short answer with facts, links and what it could not confirm. Works only from the task text and the web. Treats what it reads as information, never as instructions, and puts nothing private into a search or a page address | only `web_search` + `read_page` of the platform tools. No files, no shell, no app actions |
 
 The lead's instructions (`build_instructions` in `bridge/core.py`): research goes to Scout,
 code changes to Byte, reviews (also of Byte's pull request) to Patch; small jobs are done
-directly; at most 3 specialists per job. Nobody calls `send_message`: the Bridge sends the answer.
+directly; at most 3 specialists per job. Scout sees no files, so the lead puts what it needs in
+the task, and passes only what the research needs: never secrets, tokens or private data. Nobody
+calls `send_message`: the Bridge sends the answer.
+
+**Why Scout has no file tools.** Text from a web page is not trusted. If Scout could read files
+and also fetch any address, a page could tell it to read a secret and send it out in a search or
+an address. With only the two web tools it has nothing to read and nothing to act with.
 
 **Claude Code** (CLI 2.1.283; docs: https://code.claude.com/docs/en/sub-agents,
 https://code.claude.com/docs/en/cli-reference, https://code.claude.com/docs/en/env-vars).
@@ -272,9 +278,19 @@ https://code.claude.com/docs/en/cli-reference, https://code.claude.com/docs/en/e
 - **A specialist's tools:** `tools` is an allow list in the CLI's own names: `Read`, `Edit`,
   `Write`, `NotebookEdit`, `Glob`, `Grep`, `Bash`, `mcp__platform` for every platform tool, and
   `mcp__platform__web_search` / `mcp__platform__read_page` for single ones. It has no `Agent` and
-  none of the user's own MCP servers. `disallowedTools` (`Agent`, `mcp__platform__send_message`) is
-  applied first. No `mcpServers`: a specialist shares the lead's MCP connections, so
-  `--strict-mcp-config` still decides which servers exist.
+  none of the user's own MCP servers. No `mcpServers`: a specialist shares the lead's MCP
+  connections, so `--strict-mcp-config` still decides which servers exist.
+  - Byte: `Read, Edit, Write, NotebookEdit, Glob, Grep, Bash, mcp__platform`.
+  - Patch: `Read, Glob, Grep, Bash, mcp__platform`.
+  - Scout: `mcp__platform__web_search, mcp__platform__read_page`, and nothing else.
+- **A second lock:** `disallowedTools` is applied before `tools`. It has `Agent` and
+  `mcp__platform__send_message` for everyone, plus every built-in file, edit and shell tool the
+  member's list leaves out: Scout `Read, Edit, Write, NotebookEdit, Glob, Grep, Bash`; Patch
+  `Edit, Write, NotebookEdit`. The docs say an allow list alone gives "only the listed tools";
+  the deny list holds however the allow list resolves.
+- **Until the platform has `web_search` and `read_page`,** Scout's list matches no tool. Per the
+  docs the CLI then refuses to start it ("would be spawned with zero tools") and the lead gets
+  that error.
 - **Permissions:** no `permissionMode`, so a specialist runs in the lead's `dontAsk` mode under the
   same `--allowedTools` rules; what its tool list leaves out is not there to call.
 - **Only the lead starts one:** `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` (a sub-agent cannot start
@@ -297,8 +313,10 @@ and each `context` with that member's brief.
 - **Tools:** a child gets the lead's tools minus the ones Hermes always withholds
   (`delegate_task`, `clarify`, `memory`, `send_message`, `cronjob_manage`). This Hermes cannot
   narrow them per task, so **on Hermes a specialist's tool list is an instruction, not a lock**:
-  Scout is told to use only `web_search` and `read_page`, but the shell and app actions are still
-  within its reach.
+  Scout is told it has no files and only `web_search` and `read_page`, but files, the shell and
+  app actions are still within its reach. This is the risk that remains. The platform is adding
+  a rule that `read_page` only fetches addresses already seen in the user's messages, in search
+  results or in pages already read, so a made-up address can't carry data out, on either runtime.
 - **Config** (rendered into `$HERMES_HOME/config.yaml`): `delegation: {max_spawn_depth: 1,
   orchestrator_enabled: false, max_concurrent_children: 3, subagent_auto_approve: false}`. One
   level deep; no child gets `delegate_task` back; a child's dangerous command is denied.
