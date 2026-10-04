@@ -291,9 +291,9 @@ https://code.claude.com/docs/en/cli-reference, https://code.claude.com/docs/en/e
   and web-search tool the member's list leaves out: Scout `Read, Edit, Write, NotebookEdit, Glob,
   Grep, Bash`; Patch `Edit, Write, NotebookEdit, WebSearch`; Byte `WebSearch`. The docs say an allow list alone gives "only the listed tools";
   the deny list holds however the allow list resolves.
-- **Until the platform has `web_search` and `read_page`,** Scout's list matches no tool. Per the
-  docs the CLI then refuses to start it ("would be spawned with zero tools") and the lead gets
-  that error.
+- **The platform's `web_search` and `read_page`** exist since the backend's crew package. Deploy
+  both repos together: an agent image with an older backend leaves Scout with the built-in search
+  only.
 - **Permissions:** no `permissionMode`, so a specialist runs in the lead's `dontAsk` mode under the
   same `--allowedTools` rules; what its tool list leaves out is not there to call.
 - **Only the lead starts one:** `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` (a sub-agent cannot start
