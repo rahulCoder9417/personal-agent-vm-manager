@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"sort"
 	"sync"
@@ -9,10 +10,16 @@ import (
 )
 
 type period struct {
-	userID         string
-	startedAt      time.Time
-	endedAt        *time.Time
-	browserSeconds int64
+	userID    string
+	startedAt time.Time
+	endedAt   *time.Time
+}
+
+type browserReport struct {
+	userID     string
+	reportID   string
+	seconds    int64
+	recordedAt time.Time
 }
 
 // Memory is an in-memory Store for unit tests. Same semantics as Postgres.
@@ -20,6 +27,7 @@ type Memory struct {
 	mu        sync.Mutex
 	sandboxes map[string]Sandbox
 	periods   []*period
+	browser   []browserReport
 }
 
 // NewMemory returns an empty in-memory store.
@@ -135,6 +143,11 @@ func (m *Memory) SetClaudeConnected(_ context.Context, userID string, connected 
 	return m.update(userID, func(sb *Sandbox) { sb.ClaudeConnected = connected; sb.UpdatedAt = at })
 }
 
+// SetBrowserEnabled implements Store.
+func (m *Memory) SetBrowserEnabled(_ context.Context, userID string, enabled bool, at time.Time) error {
+	return m.update(userID, func(sb *Sandbox) { sb.BrowserEnabled = enabled; sb.UpdatedAt = at })
+}
+
 // Delete implements Store.
 func (m *Memory) Delete(_ context.Context, userID string) error {
 	m.mu.Lock()
@@ -172,16 +185,20 @@ func (m *Memory) EndAwake(_ context.Context, userID string, at time.Time) error 
 	return nil
 }
 
-// AddBrowserSeconds is a test helper (nothing records browser time yet in the MVP).
-func (m *Memory) AddBrowserSeconds(userID string, seconds int64) {
+// AddBrowserSeconds implements Store.
+func (m *Memory) AddBrowserSeconds(_ context.Context, userID, reportID string, seconds int64, at time.Time) (bool, error) {
+	if seconds <= 0 {
+		return false, errors.New("store: browser seconds must be > 0")
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for i := len(m.periods) - 1; i >= 0; i-- {
-		if m.periods[i].userID == userID {
-			m.periods[i].browserSeconds += seconds
-			return
+	for _, r := range m.browser {
+		if r.userID == userID && r.reportID == reportID {
+			return false, nil
 		}
 	}
+	m.browser = append(m.browser, browserReport{userID: userID, reportID: reportID, seconds: seconds, recordedAt: at})
+	return true, nil
 }
 
 // Usage implements Store.
@@ -190,6 +207,14 @@ func (m *Memory) Usage(_ context.Context, userID string, since, until, now time.
 	defer m.mu.Unlock()
 	type acc struct{ ms, browser int64 }
 	byUser := map[string]*acc{}
+	get := func(uid string) *acc {
+		a := byUser[uid]
+		if a == nil {
+			a = &acc{}
+			byUser[uid] = a
+		}
+		return a
+	}
 	openEnd := until
 	if now.Before(openEnd) {
 		openEnd = now
@@ -208,15 +233,16 @@ func (m *Memory) Usage(_ context.Context, userID string, since, until, now time.
 		if p.endedAt != nil {
 			end = *p.endedAt
 		}
-		a := byUser[p.userID]
-		if a == nil {
-			a = &acc{}
-			byUser[p.userID] = a
+		get(p.userID).ms += clipMillis(p.startedAt, end, since, until)
+	}
+	for _, r := range m.browser {
+		if userID != "" && r.userID != userID {
+			continue
 		}
-		a.ms += clipMillis(p.startedAt, end, since, until)
-		if p.endedAt != nil && !p.endedAt.Before(since) && p.endedAt.Before(until) {
-			a.browser += p.browserSeconds
+		if r.recordedAt.Before(since) || !r.recordedAt.Before(until) {
+			continue
 		}
+		get(r.userID).browser += r.seconds
 	}
 	out := []Usage{}
 	for uid, a := range byUser {

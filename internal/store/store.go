@@ -66,11 +66,14 @@ type Sandbox struct {
 	Allowlist        []string
 	Runtime          Runtime // "" is stored as hermes
 	ClaudeConnected  bool    // last status seen from the Bridge
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
+	// BrowserEnabled is the switch for Scout's browser (a Max-plan feature). A running container
+	// gets it on its next wake.
+	BrowserEnabled bool
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
-// Usage is awake time for one user in a window.
+// Usage is awake time and browser time for one user in a window.
 type Usage struct {
 	UserID         string
 	AwakeSeconds   int64
@@ -100,6 +103,8 @@ type Store interface {
 	SetRuntime(ctx context.Context, userID string, runtime Runtime, at time.Time) error
 	// SetClaudeConnected records the last seen Claude Code sign-in status.
 	SetClaudeConnected(ctx context.Context, userID string, connected bool, at time.Time) error
+	// SetBrowserEnabled turns the browser switch on or off.
+	SetBrowserEnabled(ctx context.Context, userID string, enabled bool, at time.Time) error
 	// Delete removes the sandbox row (awake periods are kept for billing). No error if missing.
 	Delete(ctx context.Context, userID string) error
 
@@ -107,9 +112,14 @@ type Store interface {
 	StartAwake(ctx context.Context, userID string, at time.Time) error
 	// EndAwake closes the open awake period (if any) at `at`.
 	EndAwake(ctx context.Context, userID string, at time.Time) error
+	// AddBrowserSeconds records one browser report from the user's container: seconds the browser
+	// was open, recorded at `at`. reportID is the container's id for the report; a report already
+	// stored for the user is not stored again (false, nil). seconds must be > 0.
+	AddBrowserSeconds(ctx context.Context, userID, reportID string, seconds int64, at time.Time) (bool, error)
 	// Usage sums awake seconds per user clipped to [since, until); open periods count up to
-	// min(until, now). Browser seconds are counted for periods that ended in [since, until).
-	// userID "" means all users. Users with no overlapping period are omitted.
+	// min(until, now). Browser seconds are the reports recorded in [since, until), so back-to-back
+	// windows count each report exactly once. userID "" means all users. Users with neither an
+	// overlapping period nor a report in the window are omitted.
 	Usage(ctx context.Context, userID string, since, until, now time.Time) ([]Usage, error)
 
 	Close()
