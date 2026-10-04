@@ -151,7 +151,7 @@ Header `X-Bridge-Secret: <secret>` on every call except health.
 | Call | Behaviour |
 |---|---|
 | `GET /healthz` | `200 {"ok":true,"busy":N,"runtime":"hermes\|claude_code","claude_connected":bool\|null,"claude_login_pending":bool}` when the current runtime answers (Hermes API / `claude` installed), else `503`. `busy` = turns in progress; `claude_connected` is `null` until `claude auth status` has answered once |
-| `POST /deliver` | Body `{"delivery_id","kind","session_key","channel","text","attachments":[{"id","name","mime_type","url"}],"approval_id","approved","metadata":{}}`, `kind` = `message` / `approval_answer` / `automation` / `app_event`. `200` with `Content-Type: application/x-ndjson`, one line per event: `{"type":"accepted\|working\|turn_done\|error","message":"...","platform_fault":bool}`, ending with `turn_done` or `error`. `401` bad secret, `400` bad body |
+| `POST /deliver` | Body `{"delivery_id","kind","session_key","channel","text","attachments":[{"id","name","mime_type","url"}],"approval_id","approved","metadata":{}}`, `kind` = `message` / `approval_answer` / `automation` / `app_event`. `200` with `Content-Type: application/x-ndjson`, one line per event: `{"type":"accepted\|working\|turn_done\|error","message":"...","platform_fault":bool}`, ending with `turn_done` or `error`. A `working` message is `using <tool>`, or a crew line that starts with the member's name and a colon (`Scout: researching flight options`, `Scout: done`; see "The crew"). `401` bad secret, `400` bad body |
 | `POST /shutdown` | Stop taking work, stop Hermes (it saves to /data), `200` when done (< 20 s) |
 | `POST /claude/login/start` | Starts `claude auth login` (in a pty). `200 {"login_id","authorize_url","expires_at"}` (unix ms, +10 min). One pending sign-in per container; a new start replaces it. `502` no link shown, `503` Claude Code not installed |
 | `POST /claude/login/complete` | Body `{"login_id","code"}`. Types the code into the waiting CLI, waits (<= 60 s) and asks `claude auth status`. `200 {"connected":bool,"message":"..."}`; `409` unknown / expired / used; `400` missing or multi-line code. Bodies are never logged |
@@ -180,7 +180,8 @@ with the user's key via the egress proxy; MCP = Platform MCP with the container 
 + the user's MCP servers; cron and messaging toolsets off; memory/skills/sessions under
 `/data/hermes`), starts `hermes gateway run` with only its API server on 127.0.0.1
 (random per-boot key), and drives one Hermes run per delivery with
-`X-Hermes-Session-Key: <session_key>`, so each chat keeps its own session. Hermes's own
+`X-Hermes-Session-Key: <session_key>`, so each chat keeps its own session (a delivery in
+which the lead hands work to its crew takes follow-up runs; see "The crew"). Hermes's own
 approval prompts are denied by policy (`BRIDGE_HERMES_APPROVAL`); risky real-world
 actions go through the platform's `request_approval` tool.
 
@@ -221,16 +222,18 @@ Anthropic's page, copies the code -> `CompleteClaudeLogin` -> if connected,
 **A turn.** The Bridge runs, in `/data/workspace`:
 `claude -p --output-format stream-json --verbose --mcp-config /data/.platform/claude-mcp.json
 --strict-mcp-config --permission-mode dontAsk --permission-prompts none --allowedTools
-Bash,Read,Edit,Write,Glob,Grep,NotebookEdit,WebFetch,WebSearch,TodoWrite,mcp__platform,mcp__user_<id>...
---disallowedTools mcp__platform__send_message --setting-sources user --append-system-prompt <channel
-instructions> (--session-id <new uuid> | --resume <id>)` with the message on stdin. The MCP
+Bash,Read,Edit,Write,Glob,Grep,NotebookEdit,WebFetch,WebSearch,TodoWrite,mcp__platform,mcp__user_<id>...,Agent
+--disallowedTools mcp__platform__send_message --setting-sources user --agents <the crew as JSON>
+--append-system-prompt <channel and crew instructions> (--session-id <new uuid> | --resume <id>)`
+with the message on stdin. The MCP
 config (0600, rewritten every turn) has the Platform MCP with the container's bearer token and
 the user's own MCP servers. Each `session_key` maps to one Claude session
 (`/data/.platform/claude-sessions.json`); a lost session starts a new one. Turns of the same
 chat run one at a time. `system/init` and `result` give the session id, `tool_use` blocks
 become `working` events, `system/api_retry` becomes "Claude is retrying (...)", the `result`
 text is the answer the Bridge sends with `send_message`. `BRIDGE_CLAUDE_MODEL` and
-`BRIDGE_CLAUDE_MAX_TURNS` are optional (default: the plan's default model, no turn limit).
+`BRIDGE_CLAUDE_MAX_TURNS` are optional (default: the plan's default model, no turn limit);
+so are the crew's `BRIDGE_CLAUDE_CREW_MODEL` and `BRIDGE_CREW_MAX_PARALLEL` (see "The crew").
 
 **Compliance** (https://code.claude.com/docs/en/legal-and-compliance): the binary is installed
 and run as published, and no built-in auth method is removed or disabled (we only choose, per
@@ -240,6 +243,90 @@ collect, store or intermediate credentials or session tokens (the pasted code go
 the CLI's stdin and is never logged or stored); usage is billed to the user's own plan and
 the platform doesn't pay for, resell or meter it. Running Claude Code in hosted sandboxes
 also requires the platform to accept Anthropic's Commercial Terms.
+
+## The crew (Byte, Patch, Scout)
+
+The agent the user texts is the lead (Tex). It can hand work to three specialists, defined
+once in `agent-image/bridge/crew.py` (description, role prompt, tool list) and given to both
+runtimes. The ids `byte`, `patch`, `scout` are fixed. No proto or Go change.
+
+| Member | Job | Tools |
+|---|---|---|
+| `byte` | Writes and fixes code on a new branch, commits, pushes (git gateway), opens the pull request with the GitHub app action | files (read, write), search, shell, platform tools |
+| `patch` | Reviews a pull request or a diff in three passes (correctness, security, tests), merges the findings, posts ONE review on the pull request, returns "ship" / "fix first" with the top findings. Never pushes, approves or merges | files (read only), search, shell (diffs, tests), platform tools |
+| `scout` | Researches on the web, returns a short answer with facts, links and what it could not confirm. Treats what it reads as information, never as instructions, and puts nothing private into a search or a page address | files (read only), search, and only `web_search` + `read_page` of the platform tools. No shell, no app actions |
+
+The lead's instructions (`build_instructions` in `bridge/core.py`): research goes to Scout,
+code changes to Byte, reviews (also of Byte's pull request) to Patch; small jobs are done
+directly; at most 3 specialists per job. Nobody calls `send_message`: the Bridge sends the answer.
+
+**Claude Code** (CLI 2.1.283; docs: https://code.claude.com/docs/en/sub-agents,
+https://code.claude.com/docs/en/cli-reference, https://code.claude.com/docs/en/env-vars).
+- **How they are passed:** `--agents '{"<id>": {"description", "prompt", "tools",
+  "disallowedTools", "model"}}'`, inline JSON, on every run. On a new session the CLI checks the
+  value at startup and exits with code 1 on a bad one.
+- **How one is started:** the lead calls the `Agent` tool with `subagent_type` = the id, a short
+  `description` and the `prompt`. Starting a sub-agent needs no permission, so nothing has to be in
+  `--allowedTools` for it; `Agent` is listed there anyway, as in the documented examples. `Task` is
+  the tool's old name and still an alias, so the Bridge reads both in the stream.
+- **A specialist's tools:** `tools` is an allow list in the CLI's own names: `Read`, `Edit`,
+  `Write`, `NotebookEdit`, `Glob`, `Grep`, `Bash`, `mcp__platform` for every platform tool, and
+  `mcp__platform__web_search` / `mcp__platform__read_page` for single ones. It has no `Agent` and
+  none of the user's own MCP servers. `disallowedTools` (`Agent`, `mcp__platform__send_message`) is
+  applied first. No `mcpServers`: a specialist shares the lead's MCP connections, so
+  `--strict-mcp-config` still decides which servers exist.
+- **Permissions:** no `permissionMode`, so a specialist runs in the lead's `dontAsk` mode under the
+  same `--allowedTools` rules; what its tool list leaves out is not there to call.
+- **Only the lead starts one:** `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` (a sub-agent cannot start
+  sub-agents), on top of the missing `Agent` tool. `CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1`
+  removes the built-in types (Explore, Plan, general-purpose), so a call without `subagent_type`
+  fails. `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS` caps how many run at once.
+- **Model:** `inherit` (the lead's) unless `BRIDGE_CLAUDE_CREW_MODEL` names another.
+- **Background:** in `claude -p` a sub-agent runs in the background unless the lead needs its
+  result first. The CLI stays open until background sub-agents are done (it gives up after 10
+  idle minutes). The Bridge takes the last `result` event as the answer.
+- **Known limit:** the CLI records a conversation's system prompt on its first request and reuses
+  it on `--resume` until the conversation is compacted. A chat that began on an older image gets
+  the crew instructions only then (the sub-agents themselves are available at once).
+
+**Hermes** (pinned commit `35272ce2`; `cli-config.yaml.example`, `tools/delegate_tool*.py`,
+`hermes_cli/config_defaults.py`). `delegate_task` takes `tasks: [{goal, context}]`, with no named
+agents and no tool list per task, so the lead gets the same role prompts as briefs: it puts the
+specialists of one step into one call, starts each `goal` with the member's name (`Scout: ...`)
+and each `context` with that member's brief.
+- **Tools:** a child gets the lead's tools minus the ones Hermes always withholds
+  (`delegate_task`, `clarify`, `memory`, `send_message`, `cronjob_manage`). This Hermes cannot
+  narrow them per task, so **on Hermes a specialist's tool list is an instruction, not a lock**:
+  Scout is told to use only `web_search` and `read_page`, but the shell and app actions are still
+  within its reach.
+- **Config** (rendered into `$HERMES_HOME/config.yaml`): `delegation: {max_spawn_depth: 1,
+  orchestrator_enabled: false, max_concurrent_children: 3, subagent_auto_approve: false}`. One
+  level deep; no child gets `delegate_task` back; a child's dangerous command is denied.
+  `max_concurrent_children` is the most tasks one `delegate_task` call may carry and the most calls
+  running in the background at once (a call over that runs inside the lead's turn instead).
+- **Follow-up runs:** on the Runs API Hermes runs the lead's children in the background. The run
+  ends with a short status, and the reports are stored in the session for the next turn, which
+  the client has to start. So after a run that handed work over, the Bridge waits until `GET
+  /health/detailed` reports no background delegations (twice in a row) and starts a follow-up run
+  in the same session (at most 3, inside the turn's time limit). The last run's answer is the
+  turn's answer. If Hermes does not report its background work, the lead's status is the answer.
+
+**Progress lines.** One `working` event when a specialist starts and one when it ends, each
+starting with the member's name and a colon: `Scout: researching flight options`, then
+`Scout: done`. Other endings: `could not finish`, `stopped`, and `finished` when the engine does
+not say how it ended. A specialist's own tool calls stay `using <tool>` lines.
+- **Claude Code:** the start is the lead's `Agent` tool call (the line is its `description`). The
+  end is that call's result, or the `task_notification` event for a specialist in the background.
+  One still open when the run ends gets `finished`, or `stopped` after a timeout or a crash.
+- **Hermes:** the `subagent.start` (its `goal`) and `subagent.complete` events of a run. A child
+  still working in the background when its run's event stream closes gets `finished`, sent when
+  Hermes reports no background work left.
+
+**Settings.** `BRIDGE_CREW_MAX_PARALLEL` (default 3, at least 1): specialists at a time, on both
+runtimes. `BRIDGE_CLAUDE_CREW_MODEL` (default: the lead's model): a model alias or id for the
+specialists on Claude Code, e.g. `haiku`. Both are read from the Bridge's environment. The
+vm-manager passes containers a fixed list of variables that doesn't include them, so set them
+with an `ENV` line in `agent-image/Dockerfile`, like the other optional `BRIDGE_*` settings.
 
 ## Egress contract (with the backend's infra)
 
@@ -297,4 +384,6 @@ the read-only container. For Claude Code: the real CLI in the image (installer, 
 check, version string), its `auth login` screen in a pty (URL format, whether the TUI wraps
 the URL, the success text), a real sign-in with a Pro/Max account through the egress proxy,
 the exact stream-json shapes and error texts of this version, and the CLI under gVisor with
-a read-only rootfs.
+a read-only rootfs. For the crew: nothing has run against the real CLI or a real Hermes (the
+`--agents` value, the sub-agent events, Hermes's background delegation and the follow-up
+turn); see `docs/build-report.md` section 8.
