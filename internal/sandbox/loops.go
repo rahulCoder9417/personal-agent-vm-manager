@@ -175,16 +175,17 @@ func (m *Manager) restartLocked(ctx context.Context, sb store.Sandbox) error {
 	if err := m.eng.StopContainer(ctx, sb.ContainerID, 5*time.Second); err != nil && !errors.Is(err, docker.ErrNotFound) {
 		return err
 	}
-	ip, err := m.startContainer(ctx, sb)
+	c, err := m.startContainer(ctx, sb)
 	if err != nil {
 		return err
 	}
+	ip := c.IPs[m.cfg.SandboxNetwork]
 	h, err := m.waitHealthy(ctx, ip)
 	if err != nil {
 		return err
 	}
 	m.noteClaudeStatus(ctx, sb, h)
-	if err := m.eg.Write(sb.UserID, ip, m.egressDomains(sb)); err != nil {
+	if err := m.eg.Write(sb.UserID, ip, m.egressRule(sb, c)); err != nil {
 		m.log.Error("egress allowlist write failed", "user_id", sb.UserID, "err", err, "alert", true)
 	}
 	return nil
@@ -311,7 +312,7 @@ func (m *Manager) reconcileOne(ctx context.Context, sb store.Sandbox, byID map[s
 	}
 	_ = m.store.StartAwake(ctx, sb.UserID, m.clk.Now()) // no-op when already open
 	if ip := c.IPs[m.cfg.SandboxNetwork]; ip != "" {
-		if err := m.eg.Write(sb.UserID, ip, m.egressDomains(sb)); err != nil {
+		if err := m.eg.Write(sb.UserID, ip, m.egressRule(sb, c)); err != nil {
 			m.log.Error("reconcile: egress write failed", "user_id", sb.UserID, "err", err)
 		}
 	}

@@ -19,6 +19,7 @@ import (
 	"github.com/personal-agent/vm-manager/internal/clock"
 	"github.com/personal-agent/vm-manager/internal/config"
 	"github.com/personal-agent/vm-manager/internal/docker"
+	"github.com/personal-agent/vm-manager/internal/egress"
 	"github.com/personal-agent/vm-manager/internal/ids"
 	"github.com/personal-agent/vm-manager/internal/platformfile"
 	"github.com/personal-agent/vm-manager/internal/store"
@@ -54,6 +55,9 @@ const (
 	LabelManaged      = "pa.managed"
 	LabelUserID       = "pa.user_id"
 	LabelImageVersion = "pa.image_version"
+	// LabelBrowser is "true" on a container created with Scout's browser turned on (more memory,
+	// more processes). A container without the label has no browser.
+	LabelBrowser = "pa.browser"
 )
 
 // BridgeAPI is what the manager needs from the Bridge client (faked in tests).
@@ -68,7 +72,7 @@ type BridgeAPI interface {
 
 // Egress is what the manager needs from the allowlist writer.
 type Egress interface {
-	Write(userID, ip string, domains []string) error
+	Write(userID, ip string, rule egress.Rule) error
 	Remove(userID string) error
 	Users() ([]string, error)
 }
@@ -200,10 +204,22 @@ func validateMCPServers(servers []MCPServer) error {
 
 // spec builds the container spec for a user. The container gets only its own,
 // non-secret settings in env; its secrets are in /data/.platform/platform.json.
-func (m *Manager) spec(userID string) docker.ContainerSpec {
+// browser: the container is created for Scout's browser, with the browser's memory and
+// process limits and the LabelBrowser label (the limits can't change on a running container).
+func (m *Manager) spec(userID string, browser bool) docker.ContainerSpec {
 	c := m.cfg
 	proxy := c.EgressProxyURL
 	noProxy := "localhost,127.0.0.1,::1"
+	labels := map[string]string{
+		LabelManaged:      "true",
+		LabelUserID:       userID,
+		LabelImageVersion: c.AgentImageVersion,
+	}
+	memory, pids := c.MemoryBytes, c.PidsLimit
+	if browser {
+		labels[LabelBrowser] = "true"
+		memory, pids = c.BrowserMemoryBytes, c.BrowserPidsLimit
+	}
 	return docker.ContainerSpec{
 		Name:  ids.ContainerName(userID),
 		Image: c.AgentImage,
@@ -221,15 +237,11 @@ func (m *Manager) spec(userID string) docker.ContainerSpec {
 			"NO_PROXY=" + noProxy, "no_proxy=" + noProxy,
 			"PYTHONUNBUFFERED=1",
 		},
-		Labels: map[string]string{
-			LabelManaged:      "true",
-			LabelUserID:       userID,
-			LabelImageVersion: c.AgentImageVersion,
-		},
+		Labels:         labels,
 		Runtime:        c.Runtime,
-		MemoryBytes:    c.MemoryBytes,
+		MemoryBytes:    memory,
 		NanoCPUs:       c.NanoCPUs,
-		PidsLimit:      c.PidsLimit,
+		PidsLimit:      pids,
 		Network:        c.SandboxNetwork,
 		VolumeName:     ids.VolumeName(userID),
 		VolumeTarget:   platformfile.DataDir,

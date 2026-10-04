@@ -41,6 +41,7 @@ type Manager interface {
 	StartClaudeLogin(ctx context.Context, userID string) (bridge.ClaudeLogin, error)
 	CompleteClaudeLogin(ctx context.Context, userID, loginID, code string) (bridge.ClaudeLoginResult, error)
 	ClaudeLogout(ctx context.Context, userID string) error
+	SetBrowser(ctx context.Context, userID string, enabled bool) (store.Sandbox, error)
 }
 
 // Server implements vmv1.VmManagerServer.
@@ -218,6 +219,7 @@ func toProto(sb store.Sandbox, memory int64) *vmv1.Sandbox {
 		Allowlist:          allow,
 		Runtime:            rt,
 		ClaudeConnected:    sb.ClaudeConnected,
+		BrowserEnabled:     sb.BrowserEnabled,
 	}
 }
 
@@ -255,7 +257,7 @@ func (s *Server) CreateSandbox(ctx context.Context, req *vmv1.CreateSandboxReque
 	sb, hash, err := s.m.Create(ctx, sandbox.CreateRequest{
 		UserID: req.GetUserId(), LiteLLMKey: req.GetLitellmKey(), Priority: int32(req.GetPriority()),
 		Allowlist: req.GetAllowlist(), MCPServers: mcpServers(req.GetMcpServers()), Timezone: req.GetTimezone(),
-		Runtime: rt,
+		Runtime: rt, BrowserEnabled: req.GetBrowserEnabled(),
 	})
 	if err != nil {
 		return nil, s.toStatus(err)
@@ -433,4 +435,14 @@ func (s *Server) ClaudeLogout(ctx context.Context, req *vmv1.ClaudeLogoutRequest
 		return nil, s.toStatus(err)
 	}
 	return &vmv1.ClaudeLogoutResponse{}, nil
+}
+
+// SetBrowser implements vmv1.VmManagerServer. The switch is stored; the container gets it on
+// its next wake.
+func (s *Server) SetBrowser(ctx context.Context, req *vmv1.SetBrowserRequest) (*vmv1.SetBrowserResponse, error) {
+	sb, err := s.m.SetBrowser(ctx, req.GetUserId(), req.GetEnabled())
+	if err != nil {
+		return nil, s.toStatus(err)
+	}
+	return &vmv1.SetBrowserResponse{Sandbox: toProto(sb, 0)}, nil
 }

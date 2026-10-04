@@ -84,8 +84,9 @@ func (m *Manager) needsClaudeEgress(sb store.Sandbox) bool {
 	return m.claudeOps[sb.UserID] > 0
 }
 
-// egressDomains is what goes into the user's Squid file: their own allowlist, plus the
-// Claude Code hosts when needed. The stored (and reported) allowlist stays the user's own.
+// egressDomains are the domains that go into the user's Squid file: their own allowlist, plus
+// the Claude Code hosts when needed. The stored (and reported) allowlist stays the user's own.
+// egressRule (browser.go) adds the open web for a container with Scout's browser.
 func (m *Manager) egressDomains(sb store.Sandbox) []string {
 	if !m.needsClaudeEgress(sb) || len(m.cfg.ClaudeEgressDomains) == 0 {
 		return sb.Allowlist
@@ -109,7 +110,7 @@ func (m *Manager) refreshEgress(ctx context.Context, userID string) {
 	if err != nil || !c.Running || c.IPs[m.cfg.SandboxNetwork] == "" {
 		return
 	}
-	if err := m.eg.Write(userID, c.IPs[m.cfg.SandboxNetwork], m.egressDomains(sb)); err != nil {
+	if err := m.eg.Write(userID, c.IPs[m.cfg.SandboxNetwork], m.egressRule(sb, c)); err != nil {
 		m.log.Error("egress allowlist write failed", "user_id", userID, "err", err, "alert", true)
 	}
 }
@@ -197,7 +198,7 @@ func (m *Manager) SetAgentRuntime(ctx context.Context, userID string, rt store.R
 	sb.Runtime = rt
 	if sb.State.Running() {
 		if c, err := m.eng.InspectContainer(ctx, sb.ContainerID); err == nil && c.Running && c.IPs[m.cfg.SandboxNetwork] != "" {
-			if err := m.eg.Write(userID, c.IPs[m.cfg.SandboxNetwork], m.egressDomains(sb)); err != nil {
+			if err := m.eg.Write(userID, c.IPs[m.cfg.SandboxNetwork], m.egressRule(sb, c)); err != nil {
 				return store.Sandbox{}, err
 			}
 		}

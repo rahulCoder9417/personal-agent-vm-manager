@@ -66,6 +66,11 @@ type Event struct {
 	Type          string `json:"type"`
 	Message       string `json:"message"`
 	PlatformFault bool   `json:"platform_fault"`
+	// BrowserSeconds, on the last event of a turn (turn_done or error): how long Scout's browser
+	// was open since the Bridge's previous report, in whole seconds. 0 or missing when the
+	// browser never started. BrowserReportID names the report, so the same one is counted once.
+	BrowserSeconds  int64  `json:"browser_seconds,omitempty"`
+	BrowserReportID string `json:"browser_report_id,omitempty"`
 }
 
 // Health is the /healthz answer.

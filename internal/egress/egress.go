@@ -4,7 +4,8 @@
 // Contract with the backend's infra: the base squid.conf contains
 // `include /etc/squid/allowlists/*.conf` (EGRESS_ALLOWLIST_DIR is mounted there)
 // and already lets the whole sandbox subnet reach LiteLLM and the api /mcp.
-// Each <user_id>.conf only adds that user's own domains for that container's IP.
+// Each <user_id>.conf only adds that user's own domains for that container's IP,
+// and, for a user with Scout's browser, the public web on ports 80 and 443.
 package egress
 
 import (
@@ -124,9 +125,47 @@ func validHost(d string) error {
 	return nil
 }
 
-// Render builds the Squid snippet for one user's container.
-// domains must already be normalised.
-func Render(userID, ip string, domains []string) (string, error) {
+// Rule is what one user's container may reach, on top of what every container may
+// (LiteLLM and the api's /mcp and /git/ paths, allowed in the base squid.conf before the include).
+type Rule struct {
+	// Domains are the user's own allowed domains, already normalised (NormalizeDomains / MergeDomains).
+	Domains []string
+	// OpenWeb lets the container reach any public web address on ports 80 and 443 (Scout's
+	// browser, a Max-plan feature). Internal names and addresses stay refused.
+	OpenWeb bool
+}
+
+// InternalNets are the destination addresses a container with the open web must never reach
+// through the proxy: "this network", private, shared (CGNAT), loopback, link-local (the cloud
+// metadata address 169.254.169.254 is in it), protocol assignments, benchmarking, multicast,
+// reserved and broadcast, Azure's host address, and the IPv6 unspecified, loopback, NAT64,
+// unique-local, link-local and multicast ranges. Squid resolves the request's host first and
+// refuses when any of its addresses is in one of these, so a public name that points at an
+// internal address is refused too.
+var InternalNets = []string{
+	"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12",
+	"192.0.0.0/24", "192.168.0.0/16", "198.18.0.0/15", "224.0.0.0/4", "240.0.0.0/4", "168.63.129.16/32",
+	"::/128", "::1/128", "64:ff9b::/96", "fc00::/7", "fe80::/10", "ff00::/8",
+}
+
+// InternalNames are regular expressions for host names that are never a public web address:
+// a name without a dot (the platform's service names such as api, litellm and postgres, and
+// localhost) and names under the private-use endings.
+var InternalNames = []string{
+	`^[^.]+$`,
+	`(^|\.)(internal|local|localhost|lan|home\.arpa)$`,
+}
+
+// WebPorts are the ports the open web is reachable on.
+var WebPorts = []string{"80", "443"}
+
+// Render builds the Squid snippet for one user's container. rule.Domains must already be normalised.
+//
+// Squid takes the first http_access line that matches, and the base config has already refused
+// unsafe ports and allowed the paths every container has. So with the open web the order is:
+// refuse internal names, refuse internal addresses, allow the user's own domains, allow any other
+// destination on ports 80 and 443. Without it the file is the user's own domains only.
+func Render(userID, ip string, rule Rule) (string, error) {
 	addr := net.ParseIP(ip)
 	if addr == nil {
 		return "", fmt.Errorf("invalid container ip %q", ip)
@@ -139,9 +178,20 @@ func Render(userID, ip string, domains []string) (string, error) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# managed by vm-manager for user %s; do not edit\n", userID)
 	fmt.Fprintf(&b, "acl %s_src src %s%s\n", safe, addr.String(), mask)
-	if len(domains) > 0 {
-		fmt.Fprintf(&b, "acl %s_dst dstdomain %s\n", safe, strings.Join(domains, " "))
+	if rule.OpenWeb {
+		// -n: match the name as written, no reverse lookup for an address (the dst line covers addresses).
+		fmt.Fprintf(&b, "acl %s_int_name dstdom_regex -n -i %s\n", safe, strings.Join(InternalNames, " "))
+		fmt.Fprintf(&b, "acl %s_int_ip dst %s\n", safe, strings.Join(InternalNets, " "))
+		fmt.Fprintf(&b, "http_access deny %s_src %s_int_name\n", safe, safe)
+		fmt.Fprintf(&b, "http_access deny %s_src %s_int_ip\n", safe, safe)
+	}
+	if len(rule.Domains) > 0 {
+		fmt.Fprintf(&b, "acl %s_dst dstdomain %s\n", safe, strings.Join(rule.Domains, " "))
 		fmt.Fprintf(&b, "http_access allow %s_src %s_dst\n", safe, safe)
+	}
+	if rule.OpenWeb {
+		fmt.Fprintf(&b, "acl %s_web port %s\n", safe, strings.Join(WebPorts, " "))
+		fmt.Fprintf(&b, "http_access allow %s_src %s_web\n", safe, safe)
 	}
 	return b.String(), nil
 }
@@ -181,11 +231,11 @@ func (w *Writer) path(userID string) string { return filepath.Join(w.dir, userID
 
 // Write writes the user's file (atomically, only when the content changed) and
 // requests a proxy reload when it did.
-func (w *Writer) Write(userID, ip string, domains []string) error {
+func (w *Writer) Write(userID, ip string, rule Rule) error {
 	if !ids.ValidUserID(userID) {
 		return fmt.Errorf("invalid user id")
 	}
-	content, err := Render(userID, ip, domains)
+	content, err := Render(userID, ip, rule)
 	if err != nil {
 		return err
 	}

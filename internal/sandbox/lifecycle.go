@@ -24,6 +24,8 @@ type CreateRequest struct {
 	MCPServers []MCPServer
 	Timezone   string
 	Runtime    store.Runtime // "" = hermes
+	// BrowserEnabled turns Scout's browser on from the start (see SetBrowser).
+	BrowserEnabled bool
 }
 
 // Create makes the container, its /data volume and its secrets, and leaves it
@@ -73,7 +75,7 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (store.Sandbox,
 	if err != nil {
 		return store.Sandbox{}, "", err
 	}
-	spec := m.spec(req.UserID)
+	spec := m.spec(req.UserID, req.BrowserEnabled)
 	if err := m.eng.EnsureVolume(ctx, spec.VolumeName, m.cfg.VolumeDriver, m.cfg.VolumeOpts,
 		map[string]string{LabelManaged: "true", LabelUserID: req.UserID}); err != nil {
 		return store.Sandbox{}, "", err
@@ -89,6 +91,7 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (store.Sandbox,
 	pf := platformfile.File{
 		UserID: req.UserID, MCPToken: token, BridgeSecret: secret, LiteLLMKey: req.LiteLLMKey,
 		Timezone: req.Timezone, MCPServers: req.MCPServers, Runtime: string(req.Runtime),
+		BrowserEnabled: req.BrowserEnabled,
 	}
 	if err := platformfile.Write(ctx, m.eng, containerID, m.cfg.AgentUID, pf); err != nil {
 		_ = m.eng.RemoveContainer(ctx, containerID)
@@ -99,7 +102,7 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (store.Sandbox,
 		UserID: req.UserID, ContainerID: containerID, ImageVersion: m.cfg.AgentImageVersion,
 		State: store.StateStopped, Priority: normPriority(req.Priority), LastActiveAt: now,
 		MCPTokenHash: ids.Hash(token), BridgeSecretHash: ids.Hash(secret), Allowlist: allow,
-		Runtime: req.Runtime, CreatedAt: now, UpdatedAt: now,
+		Runtime: req.Runtime, BrowserEnabled: req.BrowserEnabled, CreatedAt: now, UpdatedAt: now,
 	}
 	if err := m.store.Insert(ctx, sb); err != nil {
 		_ = m.eng.RemoveContainer(ctx, containerID)
@@ -109,7 +112,7 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (store.Sandbox,
 	m.secrets[req.UserID] = secret
 	m.mu.Unlock()
 	m.log.Info("sandbox created", "user_id", req.UserID, "container_id", containerID, "image_version", sb.ImageVersion,
-		"runtime", string(sb.Runtime))
+		"runtime", string(sb.Runtime), "browser", sb.BrowserEnabled)
 	return sb, sb.MCPTokenHash, nil
 }
 
@@ -252,14 +255,19 @@ func (m *Manager) pickVictim(active []store.Sandbox, self string) (store.Sandbox
 }
 
 // ensureContainerLocked makes sure the sandbox has a container running the
-// current image, re-creating it (keeping /data) when missing or outdated.
-// The container must not be running when the image differs.
+// current image with the limits it should have, re-creating it (keeping /data)
+// when it is missing, outdated, or was created with or without Scout's browser
+// and the switch has changed since (memory and process limits are fixed at creation).
+// The container must not be running when it has to be re-created.
 func (m *Manager) ensureContainerLocked(ctx context.Context, sb *store.Sandbox) error {
 	if sb.ContainerID != "" {
-		_, err := m.eng.InspectContainer(ctx, sb.ContainerID)
+		c, err := m.eng.InspectContainer(ctx, sb.ContainerID)
 		switch {
-		case err == nil && sb.ImageVersion == m.cfg.AgentImageVersion:
+		case err == nil && sb.ImageVersion == m.cfg.AgentImageVersion && hasBrowser(c) == sb.BrowserEnabled:
 			return nil
+		case err == nil && sb.ImageVersion == m.cfg.AgentImageVersion:
+			m.log.Info("browser switch changed: re-creating container with its new limits", "user_id", sb.UserID,
+				"browser", sb.BrowserEnabled)
 		case err == nil:
 			m.log.Info("image rollout: re-creating container", "user_id", sb.UserID,
 				"from", sb.ImageVersion, "to", m.cfg.AgentImageVersion)
@@ -275,7 +283,7 @@ func (m *Manager) ensureContainerLocked(ctx context.Context, sb *store.Sandbox) 
 // recreateLocked replaces the container with a fresh one from the current image.
 // The /data volume (and so memory, sessions and the secrets file) is kept.
 func (m *Manager) recreateLocked(ctx context.Context, sb *store.Sandbox) error {
-	spec := m.spec(sb.UserID)
+	spec := m.spec(sb.UserID, sb.BrowserEnabled)
 	if sb.ContainerID != "" {
 		_ = m.eng.StopContainer(ctx, sb.ContainerID, 10*time.Second)
 		if err := m.eng.RemoveContainer(ctx, sb.ContainerID); err != nil {
@@ -341,7 +349,9 @@ func (m *Manager) startLocked(ctx context.Context, sb *store.Sandbox) error {
 	if err := m.ensureContainerLocked(ctx, sb); err != nil {
 		return err
 	}
-	if _, err := m.bridgeSecret(ctx, *sb); err != nil {
+	// The Bridge reads platform.json when it boots: the browser switch in it must match the
+	// container that is about to start (its limits and, below, its egress rule).
+	if err := m.syncPlatformFileLocked(ctx, *sb); err != nil {
 		return err
 	}
 	var lastErr error
@@ -352,11 +362,12 @@ func (m *Manager) startLocked(ctx context.Context, sb *store.Sandbox) error {
 				return err
 			}
 		}
-		ip, err := m.startContainer(ctx, *sb)
+		c, err := m.startContainer(ctx, *sb)
 		if err != nil {
 			lastErr = err
 			continue
 		}
+		ip := c.IPs[m.cfg.SandboxNetwork]
 		h, err := m.waitHealthy(ctx, ip)
 		if err != nil {
 			lastErr = err
@@ -365,7 +376,7 @@ func (m *Manager) startLocked(ctx context.Context, sb *store.Sandbox) error {
 			continue
 		}
 		m.noteClaudeStatus(ctx, *sb, h)
-		if err := m.eg.Write(sb.UserID, ip, m.egressDomains(*sb)); err != nil {
+		if err := m.eg.Write(sb.UserID, ip, m.egressRule(*sb, c)); err != nil {
 			m.log.Error("egress allowlist write failed", "user_id", sb.UserID, "err", err, "alert", true)
 		}
 		now := m.clk.Now()
@@ -376,36 +387,36 @@ func (m *Manager) startLocked(ctx context.Context, sb *store.Sandbox) error {
 			return err
 		}
 		m.resetHealth(sb.UserID)
-		m.log.Info("sandbox awake", "user_id", sb.UserID, "container_id", sb.ContainerID, "ip", ip)
+		m.log.Info("sandbox awake", "user_id", sb.UserID, "container_id", sb.ContainerID, "ip", ip, "browser", hasBrowser(c))
 		return nil
 	}
 	return lastErr
 }
 
-// startContainer starts the container (one retry), opens the awake period and returns its IP.
-func (m *Manager) startContainer(ctx context.Context, sb store.Sandbox) (string, error) {
+// startContainer starts the container (one retry), opens the awake period and returns the
+// running container (with its IP on the sandbox network).
+func (m *Manager) startContainer(ctx context.Context, sb store.Sandbox) (docker.Container, error) {
 	err := m.eng.StartContainer(ctx, sb.ContainerID)
 	if err != nil {
 		m.log.Warn("container start failed; retrying", "user_id", sb.UserID, "err", err)
 		err = m.eng.StartContainer(ctx, sb.ContainerID)
 	}
 	if err != nil {
-		return "", err
+		return docker.Container{}, err
 	}
 	if err := m.store.StartAwake(ctx, sb.UserID, m.clk.Now()); err != nil {
-		return "", err
+		return docker.Container{}, err
 	}
 	c, err := m.eng.InspectContainer(ctx, sb.ContainerID)
 	if err != nil {
-		return "", err
+		return docker.Container{}, err
 	}
-	ip := c.IPs[m.cfg.SandboxNetwork]
-	if ip == "" {
+	if c.IPs[m.cfg.SandboxNetwork] == "" {
 		_ = m.eng.StopContainer(ctx, sb.ContainerID, 0)
 		_ = m.store.EndAwake(ctx, sb.UserID, m.clk.Now())
-		return "", fmt.Errorf("container has no IP on network %s", m.cfg.SandboxNetwork)
+		return docker.Container{}, fmt.Errorf("container has no IP on network %s", m.cfg.SandboxNetwork)
 	}
-	return ip, nil
+	return c, nil
 }
 
 // waitHealthy polls GET /healthz until it answers 200 or WakeTimeout passes.

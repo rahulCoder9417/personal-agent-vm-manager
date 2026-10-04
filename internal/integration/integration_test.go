@@ -202,7 +202,7 @@ func TestEgressOnlyThroughAllowlist(t *testing.T) {
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	eg := egress.NewWriter(e.cfg.EgressAllowlistDir, e.cfg.EgressProxyContainer, e.eng, 0, log)
-	if err := eg.Write("it-probe", ip, []string{"example.com"}); err != nil {
+	if err := eg.Write("it-probe", ip, egress.Rule{Domains: []string{"example.com"}}); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = eg.Remove("it-probe"); _ = eg.ReloadNow(context.Background()) })
