@@ -17,10 +17,9 @@ class CrewDefinitionTest(unittest.TestCase):
     def test_tool_lists(self):
         self.assertEqual(crew.BYTE.tools, (crew.READ, crew.WRITE, crew.SEARCH, crew.SHELL, crew.PLATFORM))
         self.assertEqual(crew.PATCH.tools, (crew.READ, crew.SEARCH, crew.SHELL, crew.PLATFORM))
-        self.assertEqual(crew.SCOUT.tools, (crew.READ, crew.SEARCH, crew.WEB_SEARCH, crew.READ_PAGE))
+        # Scout: the two web tools and nothing else. No files, no shell, no app actions.
+        self.assertEqual(crew.SCOUT.tools, (crew.WEB_SEARCH, crew.READ_PAGE))
         self.assertNotIn(crew.WRITE, crew.PATCH.tools, "Patch never changes code")
-        for forbidden in (crew.WRITE, crew.SHELL, crew.PLATFORM):
-            self.assertNotIn(forbidden, crew.SCOUT.tools, "Scout: no shell, no writes, no app actions")
 
     def test_role_prompts(self):
         byte, patch, scout = (crew.role_prompt(m) for m in crew.CREW)
@@ -30,10 +29,13 @@ class CrewDefinitionTest(unittest.TestCase):
         for text in ("Correctness", "Security", "Tests", "three separate passes", "Merge the findings", "ONE review",
                      "ship", "fix first", "no pushes", "Never approve and never merge"):
             self.assertIn(text, patch)
-        for text in ("web_search", "read_page", "only way to the web", "never instructions", "links",
-                     "could not confirm", "never the contents of a file"):
+        for text in ("web_search", "read_page", "the only tools you have", "only way to the web",
+                     "no access to files, the shell or the user's apps",
+                     "only from the task Tex gave you and from the web", "never instructions", "links",
+                     "could not confirm", "never a key or a token, or anything private about the user"):
             self.assertIn(text, scout)
-        self.assertIn("Tools you may use: reading files, searching files, web_search, read_page.", scout)
+        self.assertIn("Tools you may use: web_search, read_page. Use no other tool", scout)
+        self.assertNotIn("read files", scout)
         for prompt in (byte, patch, scout):
             self.assertIn("do not call send_message", prompt, "the Bridge sends the final answer")
             self.assertIn("You cannot hand work to anyone else", prompt)
@@ -43,7 +45,9 @@ class CrewDefinitionTest(unittest.TestCase):
         text = crew.lead_instructions()
         for part in ("You are Tex", "research to Scout", "code changes to Byte", "Byte's work to Patch",
                      "After Byte opens a pull request you may have Patch review it", "Do small jobs yourself",
-                     "at most 3 specialists"):
+                     "at most 3 specialists", "Scout has no access to files",
+                     "when you hand a job to Scout, pass only what the research needs, never secrets, tokens or "
+                     "private data"):
             self.assertIn(part, text)
 
     def test_max_parallel(self):
@@ -62,15 +66,27 @@ class ClaudeAgentsTest(unittest.TestCase):
             self.assertEqual(a["description"], crew.BY_ID[agent_id].description)
             self.assertEqual(a["prompt"], crew.role_prompt(crew.BY_ID[agent_id]))
             self.assertEqual(a["model"], "inherit", "a specialist uses the lead's model by default")
-            self.assertEqual(a["disallowedTools"], ["Agent", "mcp__platform__send_message"])
+            self.assertEqual(a["disallowedTools"][:2], ["Agent", "mcp__platform__send_message"])
             for t in ("Agent", "Task", "mcp__platform__send_message"):
                 self.assertNotIn(t, a["tools"], "a specialist cannot start helpers or send the answer")
+            self.assertFalse(set(a["tools"]) & set(a["disallowedTools"]), "a tool in both lists would be removed")
         self.assertEqual(agents["byte"]["tools"],
                          ["Read", "Edit", "Write", "NotebookEdit", "Glob", "Grep", "Bash", "mcp__platform"])
         self.assertEqual(agents["patch"]["tools"], ["Read", "Glob", "Grep", "Bash", "mcp__platform"])
-        self.assertEqual(agents["scout"]["tools"],
-                         ["Read", "Glob", "Grep", "mcp__platform__web_search", "mcp__platform__read_page"])
+        # Scout: exactly the two web tools of the Platform MCP. No file, edit or shell tool, and no other
+        # platform tool (so no app actions).
+        self.assertEqual(agents["scout"]["tools"], ["mcp__platform__web_search", "mcp__platform__read_page"])
         json.dumps(agents)  # it goes on the command line as JSON
+
+    def test_built_in_tools_a_member_does_not_have_are_also_denied(self):
+        agents = crew.claude_agents("platform")
+        self.assertEqual(agents["byte"]["disallowedTools"], ["Agent", "mcp__platform__send_message"])
+        self.assertEqual(agents["patch"]["disallowedTools"],
+                         ["Agent", "mcp__platform__send_message", "Edit", "Write", "NotebookEdit"])
+        # The allow list is the lock; this second one holds however the allow list resolves.
+        self.assertEqual(agents["scout"]["disallowedTools"],
+                         ["Agent", "mcp__platform__send_message", "Read", "Edit", "Write", "NotebookEdit", "Glob",
+                          "Grep", "Bash"])
 
     def test_cheaper_model_and_env(self):
         agents = crew.claude_agents("platform", model="haiku")
