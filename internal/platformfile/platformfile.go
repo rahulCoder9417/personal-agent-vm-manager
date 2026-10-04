@@ -48,6 +48,10 @@ type File struct {
 	// Runtime is the agent that answers: "hermes" (also when empty) or "claude_code".
 	// The Bridge reads it on every delivery, so a change needs no restart.
 	Runtime string `json:"runtime,omitempty"`
+	// BrowserEnabled turns Scout's browser on in this container (a Max-plan feature). The
+	// vm-manager writes it when it wakes the container, together with the container's limits and
+	// its egress rule, so the three always agree.
+	BrowserEnabled bool `json:"browser_enabled,omitempty"`
 }
 
 // Validate checks the required fields.

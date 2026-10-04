@@ -43,6 +43,12 @@ type Config struct {
 	AgentUID       int               // SANDBOX_AGENT_UID (default 10001): owner of files written into /data
 	BridgePort     int               // BRIDGE_PORT (default 8765)
 
+	// Scout's browser (a Max-plan feature): a container with the browser turned on gets these
+	// limits instead of MemoryBytes and PidsLimit. A headless Chromium needs far more memory and
+	// far more processes and threads than the agent alone.
+	BrowserMemoryBytes int64 // SANDBOX_BROWSER_MEMORY_MB (default 2048)
+	BrowserPidsLimit   int64 // SANDBOX_BROWSER_PIDS_LIMIT (default 1024)
+
 	// Where the container talks to (all through the egress proxy)
 	LiteLLMBaseURL string // LITELLM_BASE_URL (default "http://litellm:4000")
 	LiteLLMModel   string // LITELLM_MODEL (default "agent-default"): model name Hermes asks LiteLLM for
@@ -96,6 +102,9 @@ func Load(getenv func(string) string) (*Config, error) {
 		VolumeOpts:     p.kv("SANDBOX_VOLUME_OPTS"),
 		AgentUID:       p.int("SANDBOX_AGENT_UID", 10001),
 		BridgePort:     p.int("BRIDGE_PORT", 8765),
+
+		BrowserMemoryBytes: int64(p.int("SANDBOX_BROWSER_MEMORY_MB", 2048)) * 1024 * 1024,
+		BrowserPidsLimit:   int64(p.int("SANDBOX_BROWSER_PIDS_LIMIT", 1024)),
 
 		LiteLLMBaseURL: p.str("LITELLM_BASE_URL", "http://litellm:4000"),
 		LiteLLMModel:   p.str("LITELLM_MODEL", "agent-default"),
@@ -163,6 +172,12 @@ func Load(getenv func(string) string) (*Config, error) {
 	}
 	if c.PidsLimit < 32 {
 		p.fail("SANDBOX_PIDS_LIMIT", "must be >= 32")
+	}
+	if c.BrowserMemoryBytes < c.MemoryBytes {
+		p.fail("SANDBOX_BROWSER_MEMORY_MB", "must not be below SANDBOX_MEMORY_MB")
+	}
+	if c.BrowserPidsLimit < c.PidsLimit {
+		p.fail("SANDBOX_BROWSER_PIDS_LIMIT", "must not be below SANDBOX_PIDS_LIMIT")
 	}
 	if c.AgentUID <= 0 {
 		p.fail("SANDBOX_AGENT_UID", "must be a non-root uid (> 0)")

@@ -34,6 +34,9 @@ func TestLoadDefaults(t *testing.T) {
 	if c.MemoryBytes != 600*1024*1024 || c.NanoCPUs != 1e9 || c.PidsLimit != 256 {
 		t.Errorf("unexpected limits: mem=%d cpu=%d pids=%d", c.MemoryBytes, c.NanoCPUs, c.PidsLimit)
 	}
+	if c.BrowserMemoryBytes != 2048*1024*1024 || c.BrowserPidsLimit != 1024 {
+		t.Errorf("unexpected browser limits: mem=%d pids=%d", c.BrowserMemoryBytes, c.BrowserPidsLimit)
+	}
 	if c.IdleTimeout != 3*time.Minute || c.DeliverTimeout != 15*time.Minute || c.ShutdownGrace != 20*time.Second {
 		t.Errorf("unexpected durations: %+v", c)
 	}
@@ -54,9 +57,14 @@ func TestLoadOverrides(t *testing.T) {
 	e["SANDBOX_VOLUME_OPTS"] = "type=xfs, o=size=2g"
 	e["AGENT_IMAGE_VERSION"] = "v42"
 	e["CLAUDE_EGRESS_DOMAINS"] = " api.anthropic.com, *.claude.ai "
+	e["SANDBOX_BROWSER_MEMORY_MB"] = "3072"
+	e["SANDBOX_BROWSER_PIDS_LIMIT"] = "2048"
 	c, err := Load(env(e))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
+	}
+	if c.BrowserMemoryBytes != 3072*1024*1024 || c.BrowserPidsLimit != 2048 || c.MemoryBytes != 600*1024*1024 || c.PidsLimit != 256 {
+		t.Errorf("browser limits: mem=%d pids=%d (others %d, %d)", c.BrowserMemoryBytes, c.BrowserPidsLimit, c.MemoryBytes, c.PidsLimit)
 	}
 	if c.AwakeCap != 7 || c.NanoCPUs != 5e8 || c.IdleTimeout != 90*time.Second || c.AgentImageVersion != "v42" {
 		t.Errorf("overrides not applied: %+v", c)
@@ -82,6 +90,11 @@ func TestLoadRejectsBadValues(t *testing.T) {
 		"bad opts":     {"SANDBOX_VOLUME_OPTS": "novalue"},
 		"bad domains":  {"CLAUDE_EGRESS_DOMAINS": "api.anthropic.com,10.0.0.1"},
 		"zero ttl":     {"CLAUDE_LOGIN_TTL": "0s"},
+		// A container with the browser never gets less than one without.
+		"small browser memory": {"SANDBOX_BROWSER_MEMORY_MB": "512"},
+		"browser memory below": {"SANDBOX_MEMORY_MB": "4096"},
+		"small browser pids":   {"SANDBOX_BROWSER_PIDS_LIMIT": "100"},
+		"bad browser memory":   {"SANDBOX_BROWSER_MEMORY_MB": "lots"},
 	}
 	for name, override := range cases {
 		t.Run(name, func(t *testing.T) {
