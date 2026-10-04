@@ -9,7 +9,9 @@ Two parts:
   shell work inside the sandbox, our MCP tools), so nothing ever waits for a prompt; risky
   real-world actions go through the platform's request_approval tool. The crew (crew.py) is
   passed as sub-agents with --agents; the lead starts one with the Agent tool, and a
-  specialist cannot start another (code.claude.com/docs/en/sub-agents).
+  specialist cannot start another (code.claude.com/docs/en/sub-agents). The lead has no web
+  tool: the web is Scout's, and a hook passed with --settings refuses the lead's own calls
+  to Scout's web tools (render_settings, lead_gate.py).
 
 - ClaudeAuth: sign-in, status and sign-out through the CLI's own commands
   (`claude auth login | status | logout`). The CLI keeps its credentials in its own config
@@ -32,10 +34,12 @@ import os
 import pty
 import re
 import secrets
+import shlex
 import shutil
 import signal
 import struct
 import subprocess
+import sys
 import termios
 import threading
 import time
@@ -57,9 +61,11 @@ RUNTIMES = (RUNTIME_HERMES, RUNTIME_CLAUDE)
 STRIPPED_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN",
                 "ANTHROPIC_PROFILE", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY")
 
-# Built-in tools allowed without a prompt (everything else is denied in dontAsk mode).
-DEFAULT_ALLOWED_TOOLS = ("Bash", "Read", "Edit", "Write", "Glob", "Grep", "NotebookEdit", "WebFetch", "WebSearch",
-                         "TodoWrite")
+# The lead's built-in tools, allowed without a prompt (everything else is denied in dontAsk mode). No web
+# tool: the web is Scout's (crew.py).
+DEFAULT_ALLOWED_TOOLS = ("Bash", "Read", "Edit", "Write", "Glob", "Grep", "NotebookEdit", "TodoWrite")
+LEAD_GATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lead_gate.py")
+LEAD_GATE_TIMEOUT = 10  # seconds; a hook that times out does not block the call
 
 MSG_NOT_SIGNED_IN = "Connect your Claude plan again"
 MSG_LIMIT = "Your Claude plan's usage limit was reached"
@@ -202,6 +208,26 @@ def render_mcp_config(pf: PlatformFile, env: dict[str, str]) -> dict[str, Any]:
     return {"mcpServers": servers}
 
 
+def render_settings() -> dict[str, Any]:
+    """--settings for Claude Code: one `PreToolUse` hook that keeps the lead off Scout's web tools.
+
+    The session has to keep those tools, because a deny rule would take them from Scout too (crew.py). The
+    hook runs lead_gate.py before every call to one of them, in the lead and in a sub-agent alike. It
+    blocks the lead's call and lets a sub-agent's through (code.claude.com/docs/en/hooks: hooks from
+    settings run inside sub-agents too, and `agent_id` in the hook's input tells the two apart).
+
+    The matcher is a list of exact tool names separated by `|`. The command runs lead_gate.py as a file
+    with this interpreter in isolated mode (-I): nothing from the working directory, the Bridge package
+    or PYTHON* variables is imported.
+    """
+    guarded = crew.claude_lead_gate(PLATFORM_SERVER_NAME)
+    command = shlex.join([sys.executable or "python3", "-I", LEAD_GATE, *guarded])
+    return {"hooks": {"PreToolUse": [{
+        "matcher": "|".join(guarded),
+        "hooks": [{"type": "command", "command": command, "timeout": LEAD_GATE_TIMEOUT}],
+    }]}}
+
+
 class ClaudeRunner:
     """Runs one turn with `claude -p` (stream-json). Same interface as HermesClient.run."""
 
@@ -218,6 +244,7 @@ class ClaudeRunner:
         self.data_dir = data_dir
         self.workdir = os.path.join(data_dir, "workspace")
         self.mcp_path = os.path.join(data_dir, ".platform", "claude-mcp.json")
+        self.settings_path = os.path.join(data_dir, ".platform", "claude-settings.json")
         self.sessions = SessionMap(os.path.join(data_dir, ".platform", "claude-sessions.json"))
         self.load_platform = load_platform
         self.auth = auth
@@ -238,15 +265,20 @@ class ClaudeRunner:
             return lock
 
     def _args(self, pf: PlatformFile, instructions: str, session_id: str, resume: bool) -> list[str]:
-        allowed = list(self.allowed_tools) + [f"mcp__{PLATFORM_SERVER_NAME}"] + \
+        # Permission rules are the session's: the lead's and every specialist's calls are checked against
+        # them. So the allow list also names what only Scout uses (its built-in web search), and the deny
+        # list only what nobody has: sending the answer (the Bridge does it) and fetching pages from the
+        # container. The lead is kept off Scout's web tools by the hook in --settings (render_settings).
+        # Each list is written the way the docs show it for that flag: commas for --allowedTools (headless
+        # page), one argument per rule for --disallowedTools (CLI reference).
+        allowed = list(self.allowed_tools) + crew.claude_session_allowed() + [f"mcp__{PLATFORM_SERVER_NAME}"] + \
             [f"mcp__{server_key(s)}" for s in pf.mcp_servers if s.url] + [crew.CLAUDE_AGENT_TOOL]
         args = [*self.cmd, "-p", "--output-format", "stream-json", "--verbose",
                 "--mcp-config", self.mcp_path, "--strict-mcp-config",
                 "--permission-mode", "dontAsk", "--permission-prompts", "none",
                 "--allowedTools", ",".join(allowed),
-                # The Bridge sends the final answer itself.
-                "--disallowedTools", f"mcp__{PLATFORM_SERVER_NAME}__send_message",
-                "--setting-sources", "user",
+                "--disallowedTools", *crew.claude_session_denied(PLATFORM_SERVER_NAME),
+                "--setting-sources", "user", "--settings", self.settings_path,
                 # The crew as sub-agents of this (lead) session; each has its own tool list.
                 "--agents", json.dumps(crew.claude_agents(PLATFORM_SERVER_NAME, self.crew_model)),
                 "--append-system-prompt", f"{instructions}\n\n{crew.CLAUDE_HANDOFF}"]
@@ -265,6 +297,7 @@ class ClaudeRunner:
         os.makedirs(self.workdir, mode=0o700, exist_ok=True)
         os.makedirs(self.env["CLAUDE_CONFIG_DIR"], mode=0o700, exist_ok=True)
         _write_private(self.mcp_path, json.dumps(render_mcp_config(pf, self.base_env)))
+        _write_private(self.settings_path, json.dumps(render_settings()))
         deadline = time.monotonic() + timeout
         with self._session_lock(session_key):
             known = self.sessions.get(session_key)

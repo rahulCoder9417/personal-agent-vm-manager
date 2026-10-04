@@ -287,6 +287,37 @@ def claude_agents(platform_server: str = "platform", model: str = "") -> dict[st
     }
 
 
+# The lead and its sub-agents are one Claude Code session and share its permission rules
+# (code.claude.com/docs/en/permissions "Manage permissions", /sub-agents "Available tools",
+# /tools-reference "Agent tool behavior"):
+# - Deny wins over allow, whatever the order and however specific the rules are. A bare tool name in the
+#   deny list takes the tool out of the session. A sub-agent inherits "the tools available in the main
+#   conversation", so it loses that tool too, even when its own `tools` names it.
+# - A sub-agent's calls are checked against the session's allow rules. In dontAsk mode a tool that is not
+#   allowed for the session is refused for a specialist as well.
+# So the session denies only what nobody may have (claude_session_denied) and allows what Scout needs
+# (claude_session_allowed). The lead is kept off Scout's tools by a `PreToolUse` hook, the documented way to
+# tell the lead's calls from a sub-agent's (claude_lead_gate; bridge/lead_gate.py).
+
+
+def claude_session_allowed() -> list[str]:
+    """Built-in tools the session must allow because a specialist uses them, though the lead may not:
+    Scout's built-in web search."""
+    return list(_CLAUDE_TOOLS[WEB])
+
+
+def claude_session_denied(platform_server: str = "platform") -> list[str]:
+    """The session's `--disallowedTools`: what neither the lead nor any specialist has. The Bridge sends
+    the answer itself, and nobody fetches a page from inside the container."""
+    return [f"mcp__{platform_server}__send_message", *_CLAUDE_NEVER]
+
+
+def claude_lead_gate(platform_server: str = "platform") -> list[str]:
+    """The tools the lead must not call although the session has them: Scout's web tools. A deny rule would
+    take them from Scout too, so a hook refuses the lead's own calls instead (bridge/lead_gate.py)."""
+    return [*_CLAUDE_TOOLS[WEB], *(_claude_platform_tool(group, platform_server) for group in PLATFORM_WEB)]
+
+
 def claude_env(parallel: int = DEFAULT_MAX_PARALLEL) -> dict[str, str]:
     """Documented Claude Code settings (code.claude.com/docs/en/env-vars) that keep the crew flat."""
     return {

@@ -5,13 +5,17 @@ State lives in $CLAUDE_CONFIG_DIR:
   fake_mode           optional behaviour switch: limit | crash | hang | max_turns | login_hang | login_no_url |
                       crew (the lead starts specialists in the foreground) | crew_background |
                       crew_unreported (a background specialist whose end the stream never reports) |
-                      crew_hang (a specialist starts, then the CLI hangs)
-  fake_calls.jsonl    one line per -p run: argv, prompt (stdin), cwd, selected env, the MCP config, --agents
+                      crew_hang (a specialist starts, then the CLI hangs) |
+                      web (the lead calls the web tools itself, then Scout calls them; the PreToolUse hooks
+                      of --settings are run for each call)
+  fake_calls.jsonl    one line per -p run: argv, prompt (stdin), cwd, selected env, the MCP config, --agents,
+                      the --settings file
   fake_sessions.json  known session ids -> number of turns
 """
 
 import json
 import os
+import subprocess
 import sys
 import time
 
@@ -98,13 +102,19 @@ def print_mode(args) -> int:
         # Like the real CLI: an invalid --agents value ends the run before the session starts.
         sys.stderr.write("Error: Invalid --agents configuration:\ninvalid JSON\n")
         return 1
+    settings_path = flag(args, "--settings")
+    settings = None
+    if settings_path and os.path.exists(settings_path):
+        with open(settings_path) as fh:
+            settings = json.load(fh)
     call = {"argv": args, "prompt": prompt, "cwd": os.getcwd(),
             "env": {k: os.environ.get(k) for k in ("CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY", "DISABLE_AUTOUPDATER",
                                                    "HTTPS_PROXY", "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH",
                                                    "CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS",
                                                    "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS")},
             "mcp": mcp, "mcp_mode": oct(os.stat(mcp_path).st_mode & 0o777) if mcp_path else None,
-            "agents": agents}
+            "agents": agents, "settings": settings,
+            "settings_mode": oct(os.stat(settings_path).st_mode & 0o777) if settings is not None else None}
     with open(os.path.join(CFG, "fake_calls.jsonl"), "a") as fh:
         fh.write(json.dumps(call) + "\n")
 
@@ -148,13 +158,17 @@ def print_mode(args) -> int:
         msg(sid, "assistant", [agent_call("h1", "byte", "a long job")])
         time.sleep(60)
         return 1
+    if m == "web":
+        out({"type": "result", "subtype": "success", "is_error": False, "session_id": sid,
+             "result": "\n".join(the_web_tools(sid, settings))})
+        return 0
     if m in CREW_MODES:
         CREW_MODES[m](sid)
         out({"type": "result", "subtype": "success", "is_error": False, "result": "the crew is done",
              "session_id": sid})
         return 0
     out({"type": "assistant", "session_id": sid, "message": {"content": [
-        {"type": "tool_use", "id": "t1", "name": "mcp__platform__web_search", "input": {"q": "x"}}]}})
+        {"type": "tool_use", "id": "t1", "name": "mcp__platform__get_profile", "input": {}}]}})
     out({"type": "user", "session_id": sid, "message": {"content": [
         {"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}})
     out({"type": "assistant", "session_id": sid, "message": {"content": [{"type": "text", "text": "done"}]}})
@@ -173,6 +187,61 @@ def msg(sid, role, content, parent=None, **extra) -> None:
 def agent_call(call_id, agent, description, tool="Agent", **extra):
     return {"type": "tool_use", "id": call_id, "name": tool,
             "input": {"subagent_type": agent, "description": description, "prompt": "the task", **extra}}
+
+
+def pre_tool_use(settings, sid, call_id, name, tool_input, agent=None):
+    """Run the `PreToolUse` command hooks of --settings for one tool call, the way the docs describe
+    (code.claude.com/docs/en/hooks): a matcher made of exact tool names separated by `|`; the command
+    through `sh -c`, with the call as JSON on stdin; `agent_id` and `agent_type` in it only for a call from
+    inside a sub-agent; exit code 2 blocks the call and stderr is the reason. Returns that reason, or None
+    when the call may run."""
+    event = {"session_id": sid, "cwd": os.getcwd(), "permission_mode": "dontAsk", "hook_event_name": "PreToolUse",
+             "tool_name": name, "tool_input": tool_input, "tool_use_id": call_id}
+    if agent:
+        event.update(agent_id=f"agent-{call_id}", agent_type=agent)
+    for group in ((settings or {}).get("hooks") or {}).get("PreToolUse") or []:
+        matcher = group.get("matcher") or "*"
+        if matcher != "*" and name not in [part.strip() for part in matcher.split("|")]:
+            continue
+        for hook in group.get("hooks") or []:
+            if hook.get("type") != "command":
+                continue
+            done = subprocess.run(["sh", "-c", hook["command"]], input=json.dumps(event), capture_output=True,
+                                  text=True, timeout=hook.get("timeout", 600))
+            if done.returncode == 2:
+                return done.stderr.strip()
+    return None
+
+
+WEB_TOOLS = ("WebSearch", "mcp__platform__web_search", "mcp__platform__read_page")
+
+
+def the_web_tools(sid, settings) -> list:
+    """The lead calls each web tool itself and another platform tool, then starts Scout, which calls each
+    web tool. Every call goes through the PreToolUse hooks. Returns one line per call: who, the tool, and
+    "ok" or "refused: <reason>"."""
+    lines = []
+
+    def call(who, call_id, name, parent=None):
+        msg(sid, "assistant", [{"type": "tool_use", "id": call_id, "name": name, "input": {}}], parent=parent)
+        reason = pre_tool_use(settings, sid, call_id, name, {}, agent=who if parent else None)
+        result = {"type": "tool_result", "tool_use_id": call_id, "content": reason or "ok"}
+        if reason:
+            result["is_error"] = True
+        msg(sid, "user", [result], parent=parent)
+        lines.append(f"{who} {name}: " + (f"refused: {reason}" if reason else "ok"))
+
+    for i, name in enumerate((*WEB_TOOLS, "mcp__platform__get_profile")):
+        call("lead", f"l{i}", name)
+    msg(sid, "assistant", [agent_call("a1", "scout", "looking it up")])
+    msg(sid, "user", [{"type": "text", "text": "the task"}], parent="a1")
+    for i, name in enumerate(WEB_TOOLS):
+        call("scout", f"s{i}", name, parent="a1")
+    msg(sid, "user", [{"type": "tool_result", "tool_use_id": "a1", "content": [{"type": "text", "text": "report"}]}],
+        tool_use_result={"status": "completed", "agentId": "x1", "agentType": "scout", "prompt": "the task",
+                         "content": [{"type": "text", "text": "report"}]})
+    msg(sid, "assistant", [{"type": "text", "text": "done"}])
+    return lines
 
 
 def crew_foreground(sid) -> None:
