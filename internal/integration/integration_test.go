@@ -173,10 +173,33 @@ func TestAwakeCap(t *testing.T) {
 	}
 }
 
-// Done when: a container can't reach anything except the egress proxy's allowlisted domains.
-// A probe container with the sandbox runtime/network gets an allowlist for one domain.
-func TestEgressOnlyThroughAllowlist(t *testing.T) {
-	e := setup(t, nil)
+// execIn runs a command in a running container and returns its exit code and output.
+func execIn(t *testing.T, api *client.Client, containerID string, args ...string) (int, string) {
+	t.Helper()
+	ctx := context.Background()
+	ex, err := api.ContainerExecCreate(ctx, containerID, container.ExecOptions{Cmd: args, AttachStdout: true, AttachStderr: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	att, err := api.ContainerExecAttach(ctx, ex.ID, container.ExecStartOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	_, _ = stdcopy.StdCopy(&out, &out, att.Reader)
+	att.Close()
+	insp, err := api.ContainerExecInspect(ctx, ex.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("%v -> exit %d: %s", args, insp.ExitCode, strings.TrimSpace(out.String()))
+	return insp.ExitCode, out.String()
+}
+
+// probe starts a curl container with the sandbox runtime, network and restrictions, writes the
+// egress rule for it (as user `name`) and returns a function that runs a command in it.
+func probe(t *testing.T, e *env, name string, rule egress.Rule) func(args ...string) int {
+	t.Helper()
 	ctx := context.Background()
 	api, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
@@ -198,38 +221,27 @@ func TestEgressOnlyThroughAllowlist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ip := info.IPs[e.cfg.SandboxNetwork]
-
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	eg := egress.NewWriter(e.cfg.EgressAllowlistDir, e.cfg.EgressProxyContainer, e.eng, 0, log)
-	if err := eg.Write("it-probe", ip, egress.Rule{Domains: []string{"example.com"}}); err != nil {
+	if err := eg.Write(name, info.IPs[e.cfg.SandboxNetwork], rule); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = eg.Remove("it-probe"); _ = eg.ReloadNow(context.Background()) })
+	t.Cleanup(func() { _ = eg.Remove(name); _ = eg.ReloadNow(context.Background()) })
 	if err := eg.ReloadNow(ctx); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(3 * time.Second) // squid reconfigure
-
-	run := func(args ...string) int {
-		ex, err := api.ContainerExecCreate(ctx, c.ID, container.ExecOptions{Cmd: args, AttachStdout: true, AttachStderr: true})
-		if err != nil {
-			t.Fatal(err)
-		}
-		att, err := api.ContainerExecAttach(ctx, ex.ID, container.ExecStartOptions{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		var out bytes.Buffer
-		_, _ = stdcopy.StdCopy(&out, &out, att.Reader)
-		att.Close()
-		insp, err := api.ContainerExecInspect(ctx, ex.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Logf("%v -> exit %d: %s", args, insp.ExitCode, strings.TrimSpace(out.String()))
-		return insp.ExitCode
+	return func(args ...string) int {
+		code, _ := execIn(t, api, c.ID, args...)
+		return code
 	}
+}
+
+// Done when: a container can't reach anything except the egress proxy's allowlisted domains.
+// A probe container with the sandbox runtime/network gets an allowlist for one domain.
+func TestEgressOnlyThroughAllowlist(t *testing.T) {
+	e := setup(t, nil)
+	run := probe(t, e, "it-probe", egress.Rule{Domains: []string{"example.com"}})
 	proxy := e.cfg.EgressProxyURL
 	if run("curl", "-sS", "-m", "10", "-o", "/dev/null", "https://example.com") == 0 {
 		t.Fatal("direct internet access must fail")
@@ -239,5 +251,121 @@ func TestEgressOnlyThroughAllowlist(t *testing.T) {
 	}
 	if run("curl", "-sS", "-m", "15", "-f", "-x", proxy, "-o", "/dev/null", "https://example.org") == 0 {
 		t.Fatal("non-allowlisted domain through the proxy must be denied")
+	}
+}
+
+// Scout's browser, the network rule: a container with the open web reaches any public web address
+// on ports 80 and 443 through the proxy, and nothing internal; another container keeps the strict
+// rule. (docs/build-report.md section 9 lists what a real Squid 7.7 answered for the same rule.)
+func TestBrowserEgressOpenWeb(t *testing.T) {
+	e := setup(t, nil)
+	open := probe(t, e, "it-open", egress.Rule{OpenWeb: true})
+	strict := probe(t, e, "it-strict", egress.Rule{Domains: []string{"example.com"}})
+	proxy := e.cfg.EgressProxyURL
+	curl := func(run func(...string) int, url string) bool {
+		return run("curl", "-sS", "-m", "15", "-f", "-x", proxy, "-o", "/dev/null", url) == 0
+	}
+	if open("curl", "-sS", "-m", "10", "-o", "/dev/null", "https://example.org") == 0 {
+		t.Fatal("direct internet access must still fail: the proxy is the only way out")
+	}
+	for _, url := range []string{"https://example.org", "http://example.org", "https://example.com"} {
+		if !curl(open, url) {
+			t.Errorf("the open web must reach %s", url)
+		}
+	}
+	for _, url := range []string{
+		"http://169.254.169.254/latest/meta-data/", // cloud metadata
+		"http://127.0.0.1/", "http://localhost/",   // the proxy's own loopback
+		"http://10.0.0.1/", "http://192.168.0.1/", "http://172.30.0.2/", // private ranges, the proxy itself
+		"http://postgres/", "http://redis/", "http://vm-manager/", "http://egress-proxy/", // service names
+		"http://api:8080/", "http://api:8080/admin", // the api outside /mcp and /git/
+		"http://localtest.me/",             // a public name that points at 127.0.0.1
+		"https://example.org:8443/",        // not a web port
+		"http://example.org:8080/",         // not a web port
+		"http://metadata.google.internal/", // a private-use name
+	} {
+		if curl(open, url) {
+			t.Errorf("%s must be refused even with the open web", url)
+		}
+	}
+	// What every container has still works for it: the Platform MCP path is not refused by the proxy
+	// (any HTTP answer from the api counts; 403 from the proxy does not).
+	if open("sh", "-c", "curl -sS -m 15 -x "+proxy+" -o /dev/null -w '%{http_code}' "+e.cfg.PlatformMCPURL+" | grep -qv '^403$'") != 0 {
+		t.Error("the Platform MCP path must stay reachable for a container with the open web")
+	}
+	// The other container keeps today's strict rule.
+	if !curl(strict, "https://example.com") || curl(strict, "https://example.org") {
+		t.Error("a container without the browser must reach its own domains only")
+	}
+}
+
+// Scout's browser, in a real container: a sandbox created with the browser gets the browser's
+// memory limit, and the browser's self-check passes inside it: Chromium under gVisor on the
+// read-only root filesystem as uid 10001, through the egress proxy with the rule the manager
+// wrote for this container, measured by the Bridge's meter.
+func TestBrowserInContainer(t *testing.T) {
+	e := setup(t, nil)
+	ctx := context.Background()
+	uid := fmt.Sprintf("it-browser-%d", time.Now().Unix())
+	key := os.Getenv("IT_LITELLM_KEY")
+	if key == "" {
+		t.Fatal("IT_LITELLM_KEY is required")
+	}
+	_ = e.m.Delete(ctx, uid)
+	if _, _, err := e.m.Create(ctx, sandbox.CreateRequest{UserID: uid, LiteLLMKey: key, Priority: sandbox.PriorityHigh,
+		Timezone: "UTC", BrowserEnabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = e.m.Delete(context.Background(), uid) })
+	sb, _, err := e.m.Wake(ctx, uid, 0)
+	if err != nil {
+		t.Fatalf("wake: %v", err)
+	}
+	if !sb.BrowserEnabled {
+		t.Fatal("the sandbox must report the browser as turned on")
+	}
+	api, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := api.ContainerInspect(ctx, sb.ContainerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.HostConfig.Memory != e.cfg.BrowserMemoryBytes || info.Config.Labels[sandbox.LabelBrowser] != "true" {
+		t.Fatalf("browser container: memory %d (want %d), labels %v", info.HostConfig.Memory, e.cfg.BrowserMemoryBytes, info.Config.Labels)
+	}
+	time.Sleep(3 * time.Second) // squid reconfigure after the wake wrote the rule
+	code, out := execIn(t, api, sb.ContainerID, "python", "-m", "bridge.browser_check")
+	if code != 0 || !strings.Contains(out, "all checks passed") {
+		t.Fatalf("the browser self-check failed in the container (exit %d):\n%s", code, out)
+	}
+	mem, err := e.eng.MemoryUsage(ctx, sb.ContainerID)
+	if err == nil {
+		t.Logf("MEASURED RAM of a browser container after the self-check: %.0f MiB (limit %.0f MiB) -- record it in README",
+			float64(mem)/(1<<20), float64(e.cfg.BrowserMemoryBytes)/(1<<20))
+	}
+
+	// Turned off: the next wake re-creates the container with the ordinary limit and no browser.
+	if _, err := e.m.SetBrowser(ctx, uid, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.m.Stop(ctx, uid, false, "it"); err != nil {
+		t.Fatal(err)
+	}
+	off, _, err := e.m.Wake(ctx, uid, 0)
+	if err != nil {
+		t.Fatalf("wake after turning the browser off: %v", err)
+	}
+	info, err = api.ContainerInspect(ctx, off.ContainerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if off.ContainerID == sb.ContainerID || info.HostConfig.Memory != e.cfg.MemoryBytes {
+		t.Fatalf("after turning the browser off: container %s (was %s), memory %d", off.ContainerID, sb.ContainerID, info.HostConfig.Memory)
+	}
+	time.Sleep(3 * time.Second)
+	if code, _ := execIn(t, api, off.ContainerID, "curl", "-sS", "-m", "15", "-f", "-x", e.cfg.EgressProxyURL, "-o", "/dev/null", "https://example.org"); code == 0 {
+		t.Fatal("without the browser the container must not reach the open web")
 	}
 }
