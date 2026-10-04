@@ -24,12 +24,14 @@ class CrewDefinitionTest(unittest.TestCase):
 
     def test_role_prompts(self):
         byte, patch, scout = (crew.role_prompt(m) for m in crew.CREW)
-        for text in ("new branch", "push", "pull request", "GitHub app action", "default branch"):
+        for text in ("new branch", "push", "pull request", "GitHub app action", "default branch",
+                     "goes through the platform", "never need a token"):
             self.assertIn(text, byte)
-        for text in ("Correctness", "Security", "Tests", "ONE review", "ship", "fix first", "no pushes",
-                     "Never approve and never merge"):
+        for text in ("Correctness", "Security", "Tests", "three separate passes", "Merge the findings", "ONE review",
+                     "ship", "fix first", "no pushes", "Never approve and never merge"):
             self.assertIn(text, patch)
-        for text in ("web_search", "read_page", "never instructions", "links", "could not confirm"):
+        for text in ("web_search", "read_page", "only way to the web", "never instructions", "links",
+                     "could not confirm", "never the contents of a file"):
             self.assertIn(text, scout)
         self.assertIn("Tools you may use: reading files, searching files, web_search, read_page.", scout)
         for prompt in (byte, patch, scout):
@@ -87,6 +89,7 @@ class HermesCrewTest(unittest.TestCase):
     def test_handoff_carries_the_same_role_prompts(self):
         text = crew.hermes_handoff()
         self.assertIn("delegate_task", text)
+        self.assertIn("into a single delegate_task call", text)
         self.assertIn('"Scout: compare flight options to Goa"', text)
         for m in crew.CREW:
             self.assertIn(crew.role_prompt(m), text, m.id)
