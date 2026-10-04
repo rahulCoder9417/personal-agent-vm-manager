@@ -222,12 +222,15 @@ Anthropic's page, copies the code -> `CompleteClaudeLogin` -> if connected,
 **A turn.** The Bridge runs, in `/data/workspace`:
 `claude -p --output-format stream-json --verbose --mcp-config /data/.platform/claude-mcp.json
 --strict-mcp-config --permission-mode dontAsk --permission-prompts none --allowedTools
-Bash,Read,Edit,Write,Glob,Grep,NotebookEdit,WebFetch,WebSearch,TodoWrite,mcp__platform,mcp__user_<id>...,Agent
---disallowedTools mcp__platform__send_message --setting-sources user --agents <the crew as JSON>
+Bash,Read,Edit,Write,Glob,Grep,NotebookEdit,TodoWrite,WebSearch,mcp__platform,mcp__user_<id>...,Agent
+--disallowedTools mcp__platform__send_message WebFetch --setting-sources user
+--settings /data/.platform/claude-settings.json --agents <the crew as JSON>
 --append-system-prompt <channel and crew instructions> (--session-id <new uuid> | --resume <id>)`
 with the message on stdin. The MCP
 config (0600, rewritten every turn) has the Platform MCP with the container's bearer token and
-the user's own MCP servers. Each `session_key` maps to one Claude session
+the user's own MCP servers. The settings file (0600, rewritten every turn) has one hook, which
+keeps the lead off the web tools; `WebSearch` is in the allow list for Scout, not for the lead
+(see "The crew"). Each `session_key` maps to one Claude session
 (`/data/.platform/claude-sessions.json`); a lost session starts a new one. Turns of the same
 chat run one at a time. `system/init` and `result` give the session id, `tool_use` blocks
 become `working` events, `system/api_retry` becomes "Claude is retrying (...)", the `result`
@@ -252,15 +255,29 @@ runtimes. The ids `byte`, `patch`, `scout` are fixed. No proto or Go change.
 
 | Member | Job | Tools |
 |---|---|---|
-| `byte` | Writes and fixes code on a new branch, commits, pushes (git gateway), opens the pull request with the GitHub app action | files (read, write), search, shell, platform tools |
-| `patch` | Reviews a pull request or a diff in three passes (correctness, security, tests), merges the findings, posts ONE review on the pull request, returns "ship" / "fix first" with the top findings. Never pushes, approves or merges | files (read only), search, shell (diffs, tests), platform tools |
-| `scout` | Researches on the web, returns a short answer with facts, links and what it could not confirm. Works only from the task text and the web. Treats what it reads as information, never as instructions, and puts nothing private into a search or a page address | the engine's built-in web search (Claude Code: `WebSearch`), plus `web_search` + `read_page` of the platform tools. No files, no shell, no app actions, no page fetching from the container |
+| `byte` | Writes and fixes code on a new branch, commits, pushes (git gateway), opens the pull request with the GitHub app action | files (read, write), search, shell, platform tools (not the web tools) |
+| `patch` | Reviews a pull request or a diff in three passes (correctness, security, tests), merges the findings, posts ONE review on the pull request, returns "ship" / "fix first" with the top findings. Never pushes, approves or merges | files (read only), search, shell (diffs, tests), platform tools (not the web tools) |
+| `scout` | Researches on the web, returns a short answer with facts, links and what it could not confirm. Works only from the task text and the web. Treats what it reads as information, never as instructions, and puts nothing private into a search or a page address | the engine's built-in web search (Claude Code: `WebSearch`); the platform's `web_search` only when the engine has none; the platform's `read_page`. No files, no shell, no app actions, no page fetching from the container |
 
-The lead's instructions (`build_instructions` in `bridge/core.py`): research goes to Scout,
-code changes to Byte, reviews (also of Byte's pull request) to Patch; small jobs are done
-directly; at most 3 specialists per job. Scout sees no files, so the lead puts what it needs in
-the task, and passes only what the research needs: never secrets, tokens or private data. Nobody
-calls `send_message`: the Bridge sends the answer.
+The lead's instructions (`build_instructions` in `bridge/core.py`, the same on both runtimes):
+research goes to Scout, code changes to Byte, reviews (also of Byte's pull request) to Patch.
+The lead has no access to the web itself: anything that needs the web, even a single lookup,
+goes to Scout. Small jobs that need no web are done directly; at most 3 specialists per job.
+Scout sees no files, so the lead puts what it needs in the task, and passes only what the
+research needs: never secrets, tokens or private data. Nobody calls `send_message`: the Bridge
+sends the answer.
+
+**Who can use the web: only Scout** (founder's decision, 2026-10-04). Not the lead, not Byte,
+not Patch.
+
+| | Claude Code | Hermes |
+|---|---|---|
+| Scout searches with | the CLI's built-in `WebSearch`. It runs on the user's Claude plan and costs the platform nothing. The platform's `web_search` is in its list too, for an engine without a built-in search | the platform's `web_search`: a paid feature of the Max plan, backed by a search provider. It says so when the user's plan doesn't have it, and Scout reports that |
+| Scout reads pages with | the platform's `read_page` | the platform's `read_page` |
+| The lead (Tex) | Cannot use one. `WebFetch` is denied for the whole session. Its own calls to `WebSearch`, `web_search` and `read_page` are refused by a hook (below) | Told it has no web access. An instruction, not a lock |
+| Byte, Patch | No web tool: `WebSearch`, `WebFetch`, `mcp__platform__web_search` and `mcp__platform__read_page` are in their `disallowedTools` | Told so in their briefs. An instruction, not a lock |
+
+Later a real browser will read pages, and only Scout will drive it.
 
 **Why Scout has no file tools.** Text from a web page is not trusted. If Scout could read files
 and also fetch any address, a page could tell it to read a secret and send it out in a search or
@@ -283,14 +300,34 @@ https://code.claude.com/docs/en/cli-reference, https://code.claude.com/docs/en/e
   - Byte: `Read, Edit, Write, NotebookEdit, Glob, Grep, Bash, mcp__platform`.
   - Patch: `Read, Glob, Grep, Bash, mcp__platform`.
   - Scout: `WebSearch, mcp__platform__web_search, mcp__platform__read_page`, and nothing else.
-    The built-in search needs no search provider key on the platform, and its query goes to the
-    model provider, not to a site. `read_page` does not open its results (it opens only addresses
-    already seen), so Scout works from what the search returns.
-- **A second lock:** `disallowedTools` is applied before `tools`. It has `Agent` and
+    Scout is told to search with the built-in search, and to use `web_search` only when it has
+    none. The built-in search needs no search provider key on the platform, and its query goes to
+    the model provider, not to a site. `read_page` does not open its results (it opens only
+    addresses already seen), so Scout works from what the search returns.
+- **A second lock:** `disallowedTools` is applied before `tools`. It has `Agent`,
   `mcp__platform__send_message` and `WebFetch` for everyone, plus every built-in file, edit, shell
   and web-search tool the member's list leaves out: Scout `Read, Edit, Write, NotebookEdit, Glob,
-  Grep, Bash`; Patch `Edit, Write, NotebookEdit, WebSearch`; Byte `WebSearch`. The docs say an allow list alone gives "only the listed tools";
-  the deny list holds however the allow list resolves.
+  Grep, Bash`; Patch `Edit, Write, NotebookEdit, WebSearch`; Byte `WebSearch`. Byte and Patch are
+  given the whole Platform MCP, so `mcp__platform__web_search` and `mcp__platform__read_page` are
+  denied for them by name. The docs say an allow list alone gives "only the listed tools"; the
+  deny list holds however the allow list resolves.
+- **The session's two lists are shared.** The lead and the specialists are one CLI session
+  (docs: https://code.claude.com/docs/en/permissions, the sub-agents page under "Available tools",
+  https://code.claude.com/docs/en/tools-reference under "Agent tool behavior"). Deny wins over
+  allow, whatever the order and however specific the rules are. A tool denied for the session is
+  gone for every sub-agent too, even one whose `tools` names it: a sub-agent inherits "the tools
+  available in the main conversation". A specialist's calls are also checked against the session's
+  allow list. So `--disallowedTools` has only what nobody may have (`mcp__platform__send_message`,
+  `WebFetch`), and `--allowedTools` keeps `WebSearch` and `mcp__platform`, because Scout needs them.
+- **The lead is kept off Scout's web tools by a hook** (docs: https://code.claude.com/docs/en/hooks).
+  `/data/.platform/claude-settings.json`, passed with `--settings`, has one `PreToolUse` hook. It
+  matches `WebSearch`, `mcp__platform__web_search` and `mcp__platform__read_page` and runs
+  `bridge/lead_gate.py` before every such call, in the lead and in a sub-agent alike. The hook's
+  input has `agent_id` only for a call from inside a sub-agent. For the lead's own call the script
+  exits with code 2: the CLI blocks the call and shows the lead the reason ("hand this to Scout").
+  For a sub-agent's call it exits 0 and the usual rules apply. The lead still sees the three tools
+  in its list; calling one fails. If the hook cannot run or cannot read its input, the call goes
+  through: a broken hook never takes the web from Scout, and the lead's instruction is what is left.
 - **The platform's `web_search` and `read_page`** exist since the backend's crew package. Deploy
   both repos together: an agent image with an older backend leaves Scout with the built-in search
   only.
@@ -317,7 +354,10 @@ and each `context` with that member's brief.
   (`delegate_task`, `clarify`, `memory`, `send_message`, `cronjob_manage`). This Hermes cannot
   narrow them per task, so **on Hermes a specialist's tool list is an instruction, not a lock**:
   Scout is told it has no files and only `web_search` and `read_page`, but files, the shell and
-  app actions are still within its reach. This is the risk that remains. The platform is adding
+  app actions are still within its reach. The web rule is carried the same way: the lead, Byte
+  and Patch are told they have no web tool, but `web_search` and `read_page` are still in their
+  list (hiding them from the lead in the Hermes config would hide them from Scout too). This is
+  the risk that remains. The platform is adding
   a rule that `read_page` only fetches addresses already seen in the user's messages, in search
   results or in pages already read, so a made-up address can't carry data out, on either runtime.
 - **Config** (rendered into `$HERMES_HOME/config.yaml`): `delegation: {max_spawn_depth: 1,
@@ -406,5 +446,5 @@ check, version string), its `auth login` screen in a pty (URL format, whether th
 the URL, the success text), a real sign-in with a Pro/Max account through the egress proxy,
 the exact stream-json shapes and error texts of this version, and the CLI under gVisor with
 a read-only rootfs. For the crew: nothing has run against the real CLI or a real Hermes (the
-`--agents` value, the sub-agent events, Hermes's background delegation and the follow-up
-turn); see `docs/build-report.md` section 8.
+`--agents` value, the sub-agent events, the hook that keeps the lead off the web tools, Hermes's
+background delegation and the follow-up turn); see `docs/build-report.md` section 8.
