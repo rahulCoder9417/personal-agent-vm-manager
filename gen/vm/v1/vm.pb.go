@@ -384,8 +384,10 @@ type Sandbox struct {
 	Runtime            AgentRuntime           `protobuf:"varint,8,opt,name=runtime,proto3,enum=vm.v1.AgentRuntime" json:"runtime,omitempty"`
 	// Claude Code has valid credentials in /data (as last seen by the vm-manager).
 	ClaudeConnected bool `protobuf:"varint,9,opt,name=claude_connected,json=claudeConnected,proto3" json:"claude_connected,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// The browser is turned on for this user (as stored; a running container gets it on its next wake).
+	BrowserEnabled bool `protobuf:"varint,10,opt,name=browser_enabled,json=browserEnabled,proto3" json:"browser_enabled,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *Sandbox) Reset() {
@@ -481,18 +483,27 @@ func (x *Sandbox) GetClaudeConnected() bool {
 	return false
 }
 
+func (x *Sandbox) GetBrowserEnabled() bool {
+	if x != nil {
+		return x.BrowserEnabled
+	}
+	return false
+}
+
 type CreateSandboxRequest struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
 	UserId string                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
 	// This user's LiteLLM virtual key (the only AI credential in the container).
-	LitellmKey    string           `protobuf:"bytes,2,opt,name=litellm_key,json=litellmKey,proto3" json:"litellm_key,omitempty"`
-	Priority      Priority         `protobuf:"varint,3,opt,name=priority,proto3,enum=vm.v1.Priority" json:"priority,omitempty"`
-	Allowlist     []string         `protobuf:"bytes,4,rep,name=allowlist,proto3" json:"allowlist,omitempty"`
-	McpServers    []*UserMcpServer `protobuf:"bytes,5,rep,name=mcp_servers,json=mcpServers,proto3" json:"mcp_servers,omitempty"`
-	Timezone      string           `protobuf:"bytes,6,opt,name=timezone,proto3" json:"timezone,omitempty"`
-	Runtime       AgentRuntime     `protobuf:"varint,7,opt,name=runtime,proto3,enum=vm.v1.AgentRuntime" json:"runtime,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	LitellmKey string           `protobuf:"bytes,2,opt,name=litellm_key,json=litellmKey,proto3" json:"litellm_key,omitempty"`
+	Priority   Priority         `protobuf:"varint,3,opt,name=priority,proto3,enum=vm.v1.Priority" json:"priority,omitempty"`
+	Allowlist  []string         `protobuf:"bytes,4,rep,name=allowlist,proto3" json:"allowlist,omitempty"`
+	McpServers []*UserMcpServer `protobuf:"bytes,5,rep,name=mcp_servers,json=mcpServers,proto3" json:"mcp_servers,omitempty"`
+	Timezone   string           `protobuf:"bytes,6,opt,name=timezone,proto3" json:"timezone,omitempty"`
+	Runtime    AgentRuntime     `protobuf:"varint,7,opt,name=runtime,proto3,enum=vm.v1.AgentRuntime" json:"runtime,omitempty"`
+	// The browser is turned on for this user from the start (see SetBrowser).
+	BrowserEnabled bool `protobuf:"varint,8,opt,name=browser_enabled,json=browserEnabled,proto3" json:"browser_enabled,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *CreateSandboxRequest) Reset() {
@@ -572,6 +583,13 @@ func (x *CreateSandboxRequest) GetRuntime() AgentRuntime {
 		return x.Runtime
 	}
 	return AgentRuntime_AGENT_RUNTIME_UNSPECIFIED
+}
+
+func (x *CreateSandboxRequest) GetBrowserEnabled() bool {
+	if x != nil {
+		return x.BrowserEnabled
+	}
+	return false
 }
 
 type CreateSandboxResponse struct {
@@ -1458,10 +1476,13 @@ func (x *GetUsageRequest) GetUserId() string {
 }
 
 type UserUsage struct {
-	state          protoimpl.MessageState `protogen:"open.v1"`
-	UserId         string                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
-	AwakeSeconds   int64                  `protobuf:"varint,2,opt,name=awake_seconds,json=awakeSeconds,proto3" json:"awake_seconds,omitempty"`
-	BrowserSeconds int64                  `protobuf:"varint,3,opt,name=browser_seconds,json=browserSeconds,proto3" json:"browser_seconds,omitempty"`
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	UserId       string                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	AwakeSeconds int64                  `protobuf:"varint,2,opt,name=awake_seconds,json=awakeSeconds,proto3" json:"awake_seconds,omitempty"`
+	// Seconds the browser was open (from its start to its close), as reported by the container
+	// at the end of a turn. Each report is counted once, in the window that holds the moment the
+	// vm-manager recorded it, so back-to-back windows never count a second twice.
+	BrowserSeconds int64 `protobuf:"varint,3,opt,name=browser_seconds,json=browserSeconds,proto3" json:"browser_seconds,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -2157,6 +2178,102 @@ func (*ClaudeLogoutResponse) Descriptor() ([]byte, []int) {
 	return file_vm_v1_vm_proto_rawDescGZIP(), []int{32}
 }
 
+type SetBrowserRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	UserId        string                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	Enabled       bool                   `protobuf:"varint,2,opt,name=enabled,proto3" json:"enabled,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SetBrowserRequest) Reset() {
+	*x = SetBrowserRequest{}
+	mi := &file_vm_v1_vm_proto_msgTypes[33]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetBrowserRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetBrowserRequest) ProtoMessage() {}
+
+func (x *SetBrowserRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_vm_v1_vm_proto_msgTypes[33]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetBrowserRequest.ProtoReflect.Descriptor instead.
+func (*SetBrowserRequest) Descriptor() ([]byte, []int) {
+	return file_vm_v1_vm_proto_rawDescGZIP(), []int{33}
+}
+
+func (x *SetBrowserRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *SetBrowserRequest) GetEnabled() bool {
+	if x != nil {
+		return x.Enabled
+	}
+	return false
+}
+
+type SetBrowserResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Sandbox       *Sandbox               `protobuf:"bytes,1,opt,name=sandbox,proto3" json:"sandbox,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SetBrowserResponse) Reset() {
+	*x = SetBrowserResponse{}
+	mi := &file_vm_v1_vm_proto_msgTypes[34]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetBrowserResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetBrowserResponse) ProtoMessage() {}
+
+func (x *SetBrowserResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_vm_v1_vm_proto_msgTypes[34]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetBrowserResponse.ProtoReflect.Descriptor instead.
+func (*SetBrowserResponse) Descriptor() ([]byte, []int) {
+	return file_vm_v1_vm_proto_rawDescGZIP(), []int{34}
+}
+
+func (x *SetBrowserResponse) GetSandbox() *Sandbox {
+	if x != nil {
+		return x.Sandbox
+	}
+	return nil
+}
+
 var File_vm_v1_vm_proto protoreflect.FileDescriptor
 
 const file_vm_v1_vm_proto_rawDesc = "" +
@@ -2168,7 +2285,7 @@ const file_vm_v1_vm_proto_rawDesc = "" +
 	"\x03url\x18\x03 \x01(\tR\x03url\x12(\n" +
 	"\x10auth_header_name\x18\x04 \x01(\tR\x0eauthHeaderName\x12\x1f\n" +
 	"\vauth_secret\x18\x05 \x01(\tR\n" +
-	"authSecret\"\xe4\x02\n" +
+	"authSecret\"\x8d\x03\n" +
 	"\aSandbox\x12\x17\n" +
 	"\auser_id\x18\x01 \x01(\tR\x06userId\x12!\n" +
 	"\fcontainer_id\x18\x02 \x01(\tR\vcontainerId\x12#\n" +
@@ -2178,7 +2295,9 @@ const file_vm_v1_vm_proto_rawDesc = "" +
 	"\fmemory_bytes\x18\x06 \x01(\x03R\vmemoryBytes\x12\x1c\n" +
 	"\tallowlist\x18\a \x03(\tR\tallowlist\x12-\n" +
 	"\aruntime\x18\b \x01(\x0e2\x13.vm.v1.AgentRuntimeR\aruntime\x12)\n" +
-	"\x10claude_connected\x18\t \x01(\bR\x0fclaudeConnected\"\x9d\x02\n" +
+	"\x10claude_connected\x18\t \x01(\bR\x0fclaudeConnected\x12'\n" +
+	"\x0fbrowser_enabled\x18\n" +
+	" \x01(\bR\x0ebrowserEnabled\"\xc6\x02\n" +
 	"\x14CreateSandboxRequest\x12\x17\n" +
 	"\auser_id\x18\x01 \x01(\tR\x06userId\x12\x1f\n" +
 	"\vlitellm_key\x18\x02 \x01(\tR\n" +
@@ -2188,7 +2307,8 @@ const file_vm_v1_vm_proto_rawDesc = "" +
 	"\vmcp_servers\x18\x05 \x03(\v2\x14.vm.v1.UserMcpServerR\n" +
 	"mcpServers\x12\x1a\n" +
 	"\btimezone\x18\x06 \x01(\tR\btimezone\x12-\n" +
-	"\aruntime\x18\a \x01(\x0e2\x13.vm.v1.AgentRuntimeR\aruntime\"g\n" +
+	"\aruntime\x18\a \x01(\x0e2\x13.vm.v1.AgentRuntimeR\aruntime\x12'\n" +
+	"\x0fbrowser_enabled\x18\b \x01(\bR\x0ebrowserEnabled\"g\n" +
 	"\x15CreateSandboxResponse\x12(\n" +
 	"\asandbox\x18\x01 \x01(\v2\x0e.vm.v1.SandboxR\asandbox\x12$\n" +
 	"\x0emcp_token_hash\x18\x02 \x01(\tR\fmcpTokenHash\"Z\n" +
@@ -2288,7 +2408,12 @@ const file_vm_v1_vm_proto_rawDesc = "" +
 	"\amessage\x18\x02 \x01(\tR\amessage\".\n" +
 	"\x13ClaudeLogoutRequest\x12\x17\n" +
 	"\auser_id\x18\x01 \x01(\tR\x06userId\"\x16\n" +
-	"\x14ClaudeLogoutResponse*f\n" +
+	"\x14ClaudeLogoutResponse\"F\n" +
+	"\x11SetBrowserRequest\x12\x17\n" +
+	"\auser_id\x18\x01 \x01(\tR\x06userId\x12\x18\n" +
+	"\aenabled\x18\x02 \x01(\bR\aenabled\">\n" +
+	"\x12SetBrowserResponse\x12(\n" +
+	"\asandbox\x18\x01 \x01(\v2\x0e.vm.v1.SandboxR\asandbox*f\n" +
 	"\fAgentRuntime\x12\x1d\n" +
 	"\x19AGENT_RUNTIME_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14AGENT_RUNTIME_HERMES\x10\x01\x12\x1d\n" +
@@ -2316,7 +2441,7 @@ const file_vm_v1_vm_proto_rawDesc = "" +
 	"\x1bDELIVER_EVENT_TYPE_ACCEPTED\x10\x01\x12\x1e\n" +
 	"\x1aDELIVER_EVENT_TYPE_WORKING\x10\x02\x12 \n" +
 	"\x1cDELIVER_EVENT_TYPE_TURN_DONE\x10\x03\x12\x1c\n" +
-	"\x18DELIVER_EVENT_TYPE_ERROR\x10\x042\xd5\b\n" +
+	"\x18DELIVER_EVENT_TYPE_ERROR\x10\x042\x98\t\n" +
 	"\tVmManager\x12J\n" +
 	"\rCreateSandbox\x12\x1b.vm.v1.CreateSandboxRequest\x1a\x1c.vm.v1.CreateSandboxResponse\x12D\n" +
 	"\vWakeSandbox\x12\x19.vm.v1.WakeSandboxRequest\x1a\x1a.vm.v1.WakeSandboxResponse\x127\n" +
@@ -2333,7 +2458,9 @@ const file_vm_v1_vm_proto_rawDesc = "" +
 	"\x0fSetAgentRuntime\x12\x1d.vm.v1.SetAgentRuntimeRequest\x1a\x1e.vm.v1.SetAgentRuntimeResponse\x12S\n" +
 	"\x10StartClaudeLogin\x12\x1e.vm.v1.StartClaudeLoginRequest\x1a\x1f.vm.v1.StartClaudeLoginResponse\x12\\\n" +
 	"\x13CompleteClaudeLogin\x12!.vm.v1.CompleteClaudeLoginRequest\x1a\".vm.v1.CompleteClaudeLoginResponse\x12G\n" +
-	"\fClaudeLogout\x12\x1a.vm.v1.ClaudeLogoutRequest\x1a\x1b.vm.v1.ClaudeLogoutResponseB5Z3github.com/personal-agent/vm-manager/gen/vm/v1;vmv1b\x06proto3"
+	"\fClaudeLogout\x12\x1a.vm.v1.ClaudeLogoutRequest\x1a\x1b.vm.v1.ClaudeLogoutResponse\x12A\n" +
+	"\n" +
+	"SetBrowser\x12\x18.vm.v1.SetBrowserRequest\x1a\x19.vm.v1.SetBrowserResponseB5Z3github.com/personal-agent/vm-manager/gen/vm/v1;vmv1b\x06proto3"
 
 var (
 	file_vm_v1_vm_proto_rawDescOnce sync.Once
@@ -2348,7 +2475,7 @@ func file_vm_v1_vm_proto_rawDescGZIP() []byte {
 }
 
 var file_vm_v1_vm_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
-var file_vm_v1_vm_proto_msgTypes = make([]protoimpl.MessageInfo, 33)
+var file_vm_v1_vm_proto_msgTypes = make([]protoimpl.MessageInfo, 35)
 var file_vm_v1_vm_proto_goTypes = []any{
 	(AgentRuntime)(0),                   // 0: vm.v1.AgentRuntime
 	(SandboxState)(0),                   // 1: vm.v1.SandboxState
@@ -2388,6 +2515,8 @@ var file_vm_v1_vm_proto_goTypes = []any{
 	(*CompleteClaudeLoginResponse)(nil), // 35: vm.v1.CompleteClaudeLoginResponse
 	(*ClaudeLogoutRequest)(nil),         // 36: vm.v1.ClaudeLogoutRequest
 	(*ClaudeLogoutResponse)(nil),        // 37: vm.v1.ClaudeLogoutResponse
+	(*SetBrowserRequest)(nil),           // 38: vm.v1.SetBrowserRequest
+	(*SetBrowserResponse)(nil),          // 39: vm.v1.SetBrowserResponse
 }
 var file_vm_v1_vm_proto_depIdxs = []int32{
 	1,  // 0: vm.v1.Sandbox.state:type_name -> vm.v1.SandboxState
@@ -2408,41 +2537,44 @@ var file_vm_v1_vm_proto_depIdxs = []int32{
 	5,  // 15: vm.v1.SetEgressAllowlistRequest.mcp_servers:type_name -> vm.v1.UserMcpServer
 	0,  // 16: vm.v1.SetAgentRuntimeRequest.runtime:type_name -> vm.v1.AgentRuntime
 	6,  // 17: vm.v1.SetAgentRuntimeResponse.sandbox:type_name -> vm.v1.Sandbox
-	7,  // 18: vm.v1.VmManager.CreateSandbox:input_type -> vm.v1.CreateSandboxRequest
-	9,  // 19: vm.v1.VmManager.WakeSandbox:input_type -> vm.v1.WakeSandboxRequest
-	12, // 20: vm.v1.VmManager.Deliver:input_type -> vm.v1.DeliverRequest
-	14, // 21: vm.v1.VmManager.Touch:input_type -> vm.v1.TouchRequest
-	16, // 22: vm.v1.VmManager.StopSandbox:input_type -> vm.v1.StopSandboxRequest
-	18, // 23: vm.v1.VmManager.DeleteSandbox:input_type -> vm.v1.DeleteSandboxRequest
-	20, // 24: vm.v1.VmManager.GetSandbox:input_type -> vm.v1.GetSandboxRequest
-	21, // 25: vm.v1.VmManager.ListSandboxes:input_type -> vm.v1.ListSandboxesRequest
-	23, // 26: vm.v1.VmManager.GetUsage:input_type -> vm.v1.GetUsageRequest
-	26, // 27: vm.v1.VmManager.SetEgressAllowlist:input_type -> vm.v1.SetEgressAllowlistRequest
-	28, // 28: vm.v1.VmManager.SnapshotVolume:input_type -> vm.v1.SnapshotVolumeRequest
-	30, // 29: vm.v1.VmManager.SetAgentRuntime:input_type -> vm.v1.SetAgentRuntimeRequest
-	32, // 30: vm.v1.VmManager.StartClaudeLogin:input_type -> vm.v1.StartClaudeLoginRequest
-	34, // 31: vm.v1.VmManager.CompleteClaudeLogin:input_type -> vm.v1.CompleteClaudeLoginRequest
-	36, // 32: vm.v1.VmManager.ClaudeLogout:input_type -> vm.v1.ClaudeLogoutRequest
-	8,  // 33: vm.v1.VmManager.CreateSandbox:output_type -> vm.v1.CreateSandboxResponse
-	10, // 34: vm.v1.VmManager.WakeSandbox:output_type -> vm.v1.WakeSandboxResponse
-	13, // 35: vm.v1.VmManager.Deliver:output_type -> vm.v1.DeliverEvent
-	15, // 36: vm.v1.VmManager.Touch:output_type -> vm.v1.TouchResponse
-	17, // 37: vm.v1.VmManager.StopSandbox:output_type -> vm.v1.StopSandboxResponse
-	19, // 38: vm.v1.VmManager.DeleteSandbox:output_type -> vm.v1.DeleteSandboxResponse
-	6,  // 39: vm.v1.VmManager.GetSandbox:output_type -> vm.v1.Sandbox
-	22, // 40: vm.v1.VmManager.ListSandboxes:output_type -> vm.v1.ListSandboxesResponse
-	25, // 41: vm.v1.VmManager.GetUsage:output_type -> vm.v1.GetUsageResponse
-	27, // 42: vm.v1.VmManager.SetEgressAllowlist:output_type -> vm.v1.SetEgressAllowlistResponse
-	29, // 43: vm.v1.VmManager.SnapshotVolume:output_type -> vm.v1.SnapshotVolumeResponse
-	31, // 44: vm.v1.VmManager.SetAgentRuntime:output_type -> vm.v1.SetAgentRuntimeResponse
-	33, // 45: vm.v1.VmManager.StartClaudeLogin:output_type -> vm.v1.StartClaudeLoginResponse
-	35, // 46: vm.v1.VmManager.CompleteClaudeLogin:output_type -> vm.v1.CompleteClaudeLoginResponse
-	37, // 47: vm.v1.VmManager.ClaudeLogout:output_type -> vm.v1.ClaudeLogoutResponse
-	33, // [33:48] is the sub-list for method output_type
-	18, // [18:33] is the sub-list for method input_type
-	18, // [18:18] is the sub-list for extension type_name
-	18, // [18:18] is the sub-list for extension extendee
-	0,  // [0:18] is the sub-list for field type_name
+	6,  // 18: vm.v1.SetBrowserResponse.sandbox:type_name -> vm.v1.Sandbox
+	7,  // 19: vm.v1.VmManager.CreateSandbox:input_type -> vm.v1.CreateSandboxRequest
+	9,  // 20: vm.v1.VmManager.WakeSandbox:input_type -> vm.v1.WakeSandboxRequest
+	12, // 21: vm.v1.VmManager.Deliver:input_type -> vm.v1.DeliverRequest
+	14, // 22: vm.v1.VmManager.Touch:input_type -> vm.v1.TouchRequest
+	16, // 23: vm.v1.VmManager.StopSandbox:input_type -> vm.v1.StopSandboxRequest
+	18, // 24: vm.v1.VmManager.DeleteSandbox:input_type -> vm.v1.DeleteSandboxRequest
+	20, // 25: vm.v1.VmManager.GetSandbox:input_type -> vm.v1.GetSandboxRequest
+	21, // 26: vm.v1.VmManager.ListSandboxes:input_type -> vm.v1.ListSandboxesRequest
+	23, // 27: vm.v1.VmManager.GetUsage:input_type -> vm.v1.GetUsageRequest
+	26, // 28: vm.v1.VmManager.SetEgressAllowlist:input_type -> vm.v1.SetEgressAllowlistRequest
+	28, // 29: vm.v1.VmManager.SnapshotVolume:input_type -> vm.v1.SnapshotVolumeRequest
+	30, // 30: vm.v1.VmManager.SetAgentRuntime:input_type -> vm.v1.SetAgentRuntimeRequest
+	32, // 31: vm.v1.VmManager.StartClaudeLogin:input_type -> vm.v1.StartClaudeLoginRequest
+	34, // 32: vm.v1.VmManager.CompleteClaudeLogin:input_type -> vm.v1.CompleteClaudeLoginRequest
+	36, // 33: vm.v1.VmManager.ClaudeLogout:input_type -> vm.v1.ClaudeLogoutRequest
+	38, // 34: vm.v1.VmManager.SetBrowser:input_type -> vm.v1.SetBrowserRequest
+	8,  // 35: vm.v1.VmManager.CreateSandbox:output_type -> vm.v1.CreateSandboxResponse
+	10, // 36: vm.v1.VmManager.WakeSandbox:output_type -> vm.v1.WakeSandboxResponse
+	13, // 37: vm.v1.VmManager.Deliver:output_type -> vm.v1.DeliverEvent
+	15, // 38: vm.v1.VmManager.Touch:output_type -> vm.v1.TouchResponse
+	17, // 39: vm.v1.VmManager.StopSandbox:output_type -> vm.v1.StopSandboxResponse
+	19, // 40: vm.v1.VmManager.DeleteSandbox:output_type -> vm.v1.DeleteSandboxResponse
+	6,  // 41: vm.v1.VmManager.GetSandbox:output_type -> vm.v1.Sandbox
+	22, // 42: vm.v1.VmManager.ListSandboxes:output_type -> vm.v1.ListSandboxesResponse
+	25, // 43: vm.v1.VmManager.GetUsage:output_type -> vm.v1.GetUsageResponse
+	27, // 44: vm.v1.VmManager.SetEgressAllowlist:output_type -> vm.v1.SetEgressAllowlistResponse
+	29, // 45: vm.v1.VmManager.SnapshotVolume:output_type -> vm.v1.SnapshotVolumeResponse
+	31, // 46: vm.v1.VmManager.SetAgentRuntime:output_type -> vm.v1.SetAgentRuntimeResponse
+	33, // 47: vm.v1.VmManager.StartClaudeLogin:output_type -> vm.v1.StartClaudeLoginResponse
+	35, // 48: vm.v1.VmManager.CompleteClaudeLogin:output_type -> vm.v1.CompleteClaudeLoginResponse
+	37, // 49: vm.v1.VmManager.ClaudeLogout:output_type -> vm.v1.ClaudeLogoutResponse
+	39, // 50: vm.v1.VmManager.SetBrowser:output_type -> vm.v1.SetBrowserResponse
+	35, // [35:51] is the sub-list for method output_type
+	19, // [19:35] is the sub-list for method input_type
+	19, // [19:19] is the sub-list for extension type_name
+	19, // [19:19] is the sub-list for extension extendee
+	0,  // [0:19] is the sub-list for field type_name
 }
 
 func init() { file_vm_v1_vm_proto_init() }
@@ -2456,7 +2588,7 @@ func file_vm_v1_vm_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_vm_v1_vm_proto_rawDesc), len(file_vm_v1_vm_proto_rawDesc)),
 			NumEnums:      5,
-			NumMessages:   33,
+			NumMessages:   35,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
