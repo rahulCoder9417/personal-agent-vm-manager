@@ -1,8 +1,9 @@
 # personal-agent vm-manager
 
 The only service that controls Docker. It creates, wakes, stops and deletes each
-user's sandboxed agent container (Hermes Agent + Claude Code + Bridge), delivers messages
-into it, records awake time for billing, and writes each container's egress allowlist.
+user's sandboxed agent container (Hermes Agent + Claude Code + Bridge, and Scout's browser for
+users who have it), delivers messages into it, records awake time and browser time for billing,
+and writes each container's egress allowlist.
 
 Two agent runtimes, chosen per user (`SetAgentRuntime`):
 - **hermes** (default): Hermes Agent on the platform's models through LiteLLM.
@@ -26,7 +27,7 @@ internal/bridge          HTTP client for the Bridge
 internal/egress          Squid allowlist files + proxy reload
 internal/platformfile    /data/.platform/platform.json (the container's secrets)
 internal/integration     Docker/gVisor tests (build tag `integration`)
-agent-image/             Dockerfile + Bridge (Python) + its tests
+agent-image/             Dockerfile + Bridge (Python) + its tests + browser/ (the pinned browser server)
 ```
 
 ## Commands
@@ -53,7 +54,9 @@ backend's compose sets: `GRPC_ADDR` (:9090), `SANDBOX_NETWORK` (personal-agent_s
 `EGRESS_PROXY_URL` (http://172.30.0.2:3128), `EGRESS_PROXY_CONTAINER` (egress-proxy),
 `EGRESS_ALLOWLIST_DIR` (/allowlists), `LITELLM_BASE_URL` (http://litellm:4000),
 `PLATFORM_MCP_URL` (http://api:8080/mcp). Claude Code: `CLAUDE_EGRESS_DOMAINS` (default
-`api.anthropic.com,claude.ai,claude.com,platform.claude.com`), `CLAUDE_LOGIN_TTL` (10m). Tunables: `AWAKE_CAP`, `IDLE_TIMEOUT`,
+`api.anthropic.com,claude.ai,claude.com,platform.claude.com`), `CLAUDE_LOGIN_TTL` (10m). Scout's
+browser: `SANDBOX_BROWSER_MEMORY_MB` (2048) and `SANDBOX_BROWSER_PIDS_LIMIT` (1024), the limits of a
+container with the browser turned on (see "Scout's browser"). Tunables: `AWAKE_CAP`, `IDLE_TIMEOUT`,
 `SANDBOX_MEMORY_MB`, `SANDBOX_CPUS`, `SANDBOX_PIDS_LIMIT`, `DELIVER_TIMEOUT`, `AGENT_IMAGE`,
 `AGENT_IMAGE_VERSION`, ...
 
@@ -77,8 +80,15 @@ Notes on behaviour the proto leaves open:
   are written to /data and used on the next wake. MCP server hosts are not added to
   the egress allowlist automatically: send them in `domains`.
 - `GetUsage`: awake seconds clipped to `[since, until)`; open periods count up to
-  min(until, now); `until_unix_ms = 0` means now. `browser_seconds` is counted when a
-  period ends; nothing records browser time yet, so it is 0 in the MVP.
+  min(until, now); `until_unix_ms = 0` means now. `browser_seconds` is the browser time the
+  containers reported in the window: each report counts in the window that holds the moment
+  the vm-manager stored it (its own clock), so windows asked one after the other return every
+  second exactly once. A user with browser time and no awake time in the window still gets a row.
+- `CreateSandbox.browser_enabled` / `SetBrowser` / `Sandbox.browser_enabled`: the switch for
+  Scout's browser (a Max-plan feature). `Sandbox.browser_enabled` is the stored switch.
+  `SetBrowser` only stores it and answers at once; the container gets it on its **next wake**
+  (see "Scout's browser"). A sandbox that is awake keeps what it was woken with until it stops;
+  call `StopSandbox` after `SetBrowser` to apply the change sooner. `NOT_FOUND` for an unknown user.
 - `SnapshotVolume`: `destination` is a directory inside `SNAPSHOT_ROOT` (absolute, or
   relative to it). Writes `<user_id>-<UTC time>.tar.gz` and returns its path and size.
   Streams /data through the Docker archive API (no helper container). Running
@@ -107,9 +117,10 @@ Notes on behaviour the proto leaves open:
 States: `stopped -> waking -> awake <-> busy`, and `broken`.
 
 - **Create**: volume `pa-data-<user>` + container `pa-sbx-<user>` (stopped) + secrets. Idempotent.
-- **Wake**: capacity guard, re-create if the image version changed or the container is
-  missing (keeps /data), start (retry once, then re-create), wait for `GET /healthz`,
-  write the egress file, open an awake period.
+- **Wake**: capacity guard, re-create if the image version changed, the container is
+  missing, or the browser switch changed since the container was made (keeps /data), write
+  the browser switch into platform.json, start (retry once, then re-create), wait for
+  `GET /healthz`, write the egress file, open an awake period.
 - **Runtime**: stored in the table and in platform.json; survives re-creation (it is on /data).
 - **Deliver**: wake if needed, `POST /deliver`, relay events; `busy` on `accepted`,
   back to `awake` + last-active on `turn_done` / `error`. Timeout (15 min or
@@ -130,7 +141,10 @@ containers, lowest priority first, then longest idle.
 
 gVisor (`runsc`), 600 MB (no swap), 1 CPU, pids limit 256, read-only rootfs, only the
 `/data` named volume writable, `cap-drop ALL`, `no-new-privileges`, non-root uid 10001,
-the sandbox network only, no published ports, `--init`, no restart policy. A disk
+the sandbox network only, no published ports, `--init`, no restart policy. A container with
+Scout's browser turned on gets 2048 MB and a pids limit of 1024 instead
+(`SANDBOX_BROWSER_MEMORY_MB`, `SANDBOX_BROWSER_PIDS_LIMIT`) and the label `pa.browser=true`;
+everything else is the same. A disk
 quota on /data needs a volume driver that supports it (`SANDBOX_VOLUME_DRIVER` /
 `SANDBOX_VOLUME_OPTS`); the default `local` driver has none.
 
@@ -150,8 +164,8 @@ Header `X-Bridge-Secret: <secret>` on every call except health.
 
 | Call | Behaviour |
 |---|---|
-| `GET /healthz` | `200 {"ok":true,"busy":N,"runtime":"hermes\|claude_code","claude_connected":bool\|null,"claude_login_pending":bool}` when the current runtime answers (Hermes API / `claude` installed), else `503`. `busy` = turns in progress; `claude_connected` is `null` until `claude auth status` has answered once |
-| `POST /deliver` | Body `{"delivery_id","kind","session_key","channel","text","attachments":[{"id","name","mime_type","url"}],"approval_id","approved","metadata":{}}`, `kind` = `message` / `approval_answer` / `automation` / `app_event`. `200` with `Content-Type: application/x-ndjson`, one line per event: `{"type":"accepted\|working\|turn_done\|error","message":"...","platform_fault":bool}`, ending with `turn_done` or `error`. A `working` message is `using <tool>`, or a crew line that starts with the member's name and a colon (`Scout: researching flight options`, `Scout: done`; see "The crew"). `401` bad secret, `400` bad body |
+| `GET /healthz` | `200 {"ok":true,"busy":N,"runtime":"hermes\|claude_code","claude_connected":bool\|null,"claude_login_pending":bool,"browser":bool}` when the current runtime answers (Hermes API / `claude` installed), else `503`. `busy` = turns in progress; `claude_connected` is `null` until `claude auth status` has answered once; `browser` = Scout's browser is turned on in this container |
+| `POST /deliver` | Body `{"delivery_id","kind","session_key","channel","text","attachments":[{"id","name","mime_type","url"}],"approval_id","approved","metadata":{}}`, `kind` = `message` / `approval_answer` / `automation` / `app_event`. `200` with `Content-Type: application/x-ndjson`, one line per event: `{"type":"accepted\|working\|turn_done\|error","message":"...","platform_fault":bool}`, ending with `turn_done` or `error`. A `working` message is `using <tool>`, or a crew line that starts with the member's name and a colon (`Scout: researching flight options`, `Scout: done`; see "The crew"). The last event also has `"browser_seconds":N,"browser_report_id":"<delivery_id>#<n>"` when Scout's browser was open: whole seconds since the Bridge's last report, and an id under which the vm-manager stores the report once (both are left out when the browser never started). `401` bad secret, `400` bad body |
 | `POST /shutdown` | Stop taking work, stop Hermes (it saves to /data), `200` when done (< 20 s) |
 | `POST /claude/login/start` | Starts `claude auth login` (in a pty). `200 {"login_id","authorize_url","expires_at"}` (unix ms, +10 min). One pending sign-in per container; a new start replaces it. `502` no link shown, `503` Claude Code not installed |
 | `POST /claude/login/complete` | Body `{"login_id","code"}`. Types the code into the waiting CLI, waits (<= 60 s) and asks `claude auth status`. `200 {"connected":bool,"message":"..."}`; `409` unknown / expired / used; `400` missing or multi-line code. Bodies are never logged |
@@ -161,6 +175,7 @@ Dedupe by `delivery_id`: a repeat of a finished delivery returns `accepted` +
 `turn_done` without running again; a repeat while it runs attaches to the same turn; a
 retry after a failed send only re-sends the saved answer. The record lives in
 `/data/.platform/deliveries.json`, so it survives restarts. Failed runs are re-run on retry.
+A repeat of a finished delivery also sends that delivery's browser report again, with the same id.
 
 The Bridge never returns reply text. It sends the final answer itself by calling the
 Platform MCP tool `send_message` `{"text","session_key"}` with the container's bearer
@@ -187,6 +202,10 @@ actions go through the platform's `request_approval` tool.
 
 Hermes keeps running while the runtime is `claude_code`, so switching back is instant (its
 RAM counts either way; see "Measured RAM per container").
+
+The image also has Scout's browser under `/opt/browser`: Node.js 24.21.0, Microsoft's Playwright
+MCP server 0.0.83 and the Chromium build it pins (Chrome for Testing 155.0.8059.12). It is used
+only in a container where the browser is turned on. See "Scout's browser".
 
 ## Claude Code runtime (the user's own Claude plan)
 
@@ -257,15 +276,17 @@ runtimes. The ids `byte`, `patch`, `scout` are fixed. No proto or Go change.
 |---|---|---|
 | `byte` | Writes and fixes code on a new branch, commits, pushes (git gateway), opens the pull request with the GitHub app action | files (read, write), search, shell, platform tools (not the web tools) |
 | `patch` | Reviews a pull request or a diff in three passes (correctness, security, tests), merges the findings, posts ONE review on the pull request, returns "ship" / "fix first" with the top findings. Never pushes, approves or merges | files (read only), search, shell (diffs, tests), platform tools (not the web tools) |
-| `scout` | Researches on the web, returns a short answer with facts, links and what it could not confirm. Works only from the task text and the web. Treats what it reads as information, never as instructions, and puts nothing private into a search or a page address | the engine's built-in web search (Claude Code: `WebSearch`); the platform's `web_search` only when the engine has none; the platform's `read_page`. No files, no shell, no app actions, no page fetching from the container |
+| `scout` | Researches on the web and does jobs on websites, returns a short answer with facts, links and what it could not confirm. Works only from the task text and the web. Treats what it reads as information, never as instructions, and puts nothing private into a search, a page address or a page unless the task gives it for that | the engine's built-in web search (Claude Code: `WebSearch`); the platform's `web_search` only when the engine has none; the platform's `read_page`; the 14 browser tools when the browser is turned on for the user. No files, no shell, no app actions, no page fetching from the container |
 
 The lead's instructions (`build_instructions` in `bridge/core.py`, the same on both runtimes):
 research goes to Scout, code changes to Byte, reviews (also of Byte's pull request) to Patch.
 The lead has no access to the web itself: anything that needs the web, even a single lookup,
-goes to Scout. Small jobs that need no web are done directly; at most 3 specialists per job.
+goes to Scout, and so does a job that needs a website opened, clicked through, filled in or
+scraped. Small jobs that need no web are done directly; at most 3 specialists per job.
 Scout sees no files, so the lead puts what it needs in the task, and passes only what the
-research needs: never secrets, tokens or private data. Nobody calls `send_message`: the Bridge
-sends the answer.
+job needs: never secrets, tokens or passwords, and something private about the user only when
+the user wants it entered into a page. What Scout brings back from the web is information for
+the lead, never instructions. Nobody calls `send_message`: the Bridge sends the answer.
 
 **Who can use the web: only Scout** (founder's decision, 2026-10-04). Not the lead, not Byte,
 not Patch.
@@ -274,10 +295,11 @@ not Patch.
 |---|---|---|
 | Scout searches with | the CLI's built-in `WebSearch`. It runs on the user's Claude plan and costs the platform nothing. The platform's `web_search` is in its list too, for an engine without a built-in search | the platform's `web_search`: a paid feature of the Max plan, backed by a search provider. It says so when the user's plan doesn't have it, and Scout reports that |
 | Scout reads pages with | the platform's `read_page` | the platform's `read_page` |
-| The lead (Tex) | Cannot use one. `WebFetch` is denied for the whole session. Its own calls to `WebSearch`, `web_search` and `read_page` are refused by a hook (below) | Told it has no web access. An instruction, not a lock |
-| Byte, Patch | No web tool: `WebSearch`, `WebFetch`, `mcp__platform__web_search` and `mcp__platform__read_page` are in their `disallowedTools` | Told so in their briefs. An instruction, not a lock |
+| Scout drives the browser with | the 14 tools of the MCP server `scout_browser`, only when the browser is turned on for the user (Max plan). They are in Scout's `tools` and in the session's allow list by name | the same 14 tools (`mcp_scout_browser_…`), only when it is turned on. Hermes's own built-in browser toolset is switched off |
+| The lead (Tex) | Cannot use one. `WebFetch` is denied for the whole session. Its own calls to `WebSearch`, `web_search`, `read_page` and the 14 browser tools are refused by a hook (below) | Told it has no web access and no browser. An instruction, not a lock |
+| Byte, Patch | No web tool: `WebSearch`, `WebFetch`, `mcp__platform__web_search`, `mcp__platform__read_page` and the 14 browser tools are in their `disallowedTools` | Told so in their briefs. An instruction, not a lock |
 
-Later a real browser will read pages, and only Scout will drive it.
+The browser itself is described in "Scout's browser" below.
 
 **Why Scout has no file tools.** Text from a web page is not trusted. If Scout could read files
 and also fetch any address, a page could tell it to read a secret and send it out in a search or
@@ -299,7 +321,9 @@ https://code.claude.com/docs/en/cli-reference, https://code.claude.com/docs/en/e
   connections, so `--strict-mcp-config` still decides which servers exist.
   - Byte: `Read, Edit, Write, NotebookEdit, Glob, Grep, Bash, mcp__platform`.
   - Patch: `Read, Glob, Grep, Bash, mcp__platform`.
-  - Scout: `WebSearch, mcp__platform__web_search, mcp__platform__read_page`, and nothing else.
+  - Scout: `WebSearch, mcp__platform__web_search, mcp__platform__read_page`, and nothing else;
+    with the browser turned on for the user also `mcp__scout_browser__browser_navigate` and the
+    13 other browser tools, each by name.
     Scout is told to search with the built-in search, and to use `web_search` only when it has
     none. The built-in search needs no search provider key on the platform, and its query goes to
     the model provider, not to a site. `read_page` does not open its results (it opens only
@@ -309,7 +333,7 @@ https://code.claude.com/docs/en/cli-reference, https://code.claude.com/docs/en/e
   and web-search tool the member's list leaves out: Scout `Read, Edit, Write, NotebookEdit, Glob,
   Grep, Bash`; Patch `Edit, Write, NotebookEdit, WebSearch`; Byte `WebSearch`. Byte and Patch are
   given the whole Platform MCP, so `mcp__platform__web_search` and `mcp__platform__read_page` are
-  denied for them by name. The docs say an allow list alone gives "only the listed tools"; the
+  denied for them by name, and so are the 14 browser tools. The docs say an allow list alone gives "only the listed tools"; the
   deny list holds however the allow list resolves.
 - **The session's two lists are shared.** The lead and the specialists are one CLI session
   (docs: https://code.claude.com/docs/en/permissions, the sub-agents page under "Available tools",
@@ -319,13 +343,16 @@ https://code.claude.com/docs/en/cli-reference, https://code.claude.com/docs/en/e
   available in the main conversation". A specialist's calls are also checked against the session's
   allow list. So `--disallowedTools` has only what nobody may have (`mcp__platform__send_message`,
   `WebFetch`), and `--allowedTools` keeps `WebSearch` and `mcp__platform`, because Scout needs them.
+  With the browser turned on it also names the 14 browser tools one by one, never the whole server
+  `mcp__scout_browser`: in `dontAsk` mode a tool that is not named is refused for everyone.
 - **The lead is kept off Scout's web tools by a hook** (docs: https://code.claude.com/docs/en/hooks).
   `/data/.platform/claude-settings.json`, passed with `--settings`, has one `PreToolUse` hook. It
-  matches `WebSearch`, `mcp__platform__web_search` and `mcp__platform__read_page` and runs
+  matches `WebSearch`, `mcp__platform__web_search`, `mcp__platform__read_page` and the 14 browser
+  tools (one list in `bridge/crew.py`: Scout's web tools) and runs
   `bridge/lead_gate.py` before every such call, in the lead and in a sub-agent alike. The hook's
   input has `agent_id` only for a call from inside a sub-agent. For the lead's own call the script
   exits with code 2: the CLI blocks the call and shows the lead the reason ("hand this to Scout").
-  For a sub-agent's call it exits 0 and the usual rules apply. The lead still sees the three tools
+  For a sub-agent's call it exits 0 and the usual rules apply. The lead still sees the tools
   in its list; calling one fails. If the hook cannot run or cannot read its input, the call goes
   through: a broken hook never takes the web from Scout, and the lead's instruction is what is left.
 - **The platform's `web_search` and `read_page`** exist since the backend's crew package. Deploy
@@ -356,7 +383,8 @@ and each `context` with that member's brief.
   Scout is told it has no files and only `web_search` and `read_page`, but files, the shell and
   app actions are still within its reach. The web rule is carried the same way: the lead, Byte
   and Patch are told they have no web tool, but `web_search` and `read_page` are still in their
-  list (hiding them from the lead in the Hermes config would hide them from Scout too). This is
+  list (hiding them from the lead in the Hermes config would hide them from Scout too). The
+  browser tools are the same: with the browser turned on, every Hermes agent has them. This is
   the risk that remains. The platform is adding
   a rule that `read_page` only fetches addresses already seen in the user's messages, in search
   results or in pages already read, so a made-up address can't carry data out, on either runtime.
@@ -389,6 +417,117 @@ specialists on Claude Code, e.g. `haiku`. Both are read from the Bridge's enviro
 vm-manager passes containers a fixed list of variables that doesn't include them, so set them
 with an `ENV` line in `agent-image/Dockerfile`, like the other optional `BRIDGE_*` settings.
 
+## Scout's browser (Max plan)
+
+A headless browser inside the user's own container, for pages that need JavaScript, clicks or a
+form. Founder's decision of 2026-10-04: the browser runs in the container (not at a hosted
+provider), it is part of the Max plan, it costs 2 credits per minute of browser time, and only
+Scout drives it. Signing in to sites is not part of this version. The full account, with what was
+run and what was not, is in `docs/build-report.md` section 9.
+
+**The switch.** `sandboxes.browser_enabled`, set by `CreateSandbox.browser_enabled` and
+`SetBrowser`, returned as `Sandbox.browser_enabled`. On the next wake the vm-manager:
+1. re-creates the container if it was made with or without the browser and the switch changed
+   (the label `pa.browser`; memory and process limits are fixed when a container is made; /data
+   is kept, as in an image rollout);
+2. writes `"browser_enabled": true` into `/data/.platform/platform.json` (or takes it out);
+3. writes the egress rule for the container it started (below).
+The Bridge reads the switch once, when it boots. A running container never changes.
+
+**What is in the image** (`/opt/browser`, read-only at runtime; `agent-image/Dockerfile`):
+Node.js 24.21.0 (the one binary from `node:24.21.0-trixie-slim`), `@playwright/mcp` 0.0.83 with
+`playwright` / `playwright-core` 1.64.0-alpha-1790635538000 (`npm ci` from
+`agent-image/browser/package-lock.json`), and the browser that Playwright version pins: Chrome for
+Testing 155.0.8059.12 (`playwright-core install --no-shell chromium`), with the system libraries
+and fonts from Playwright's own list (`install-deps chromium`). This is how Microsoft's own
+Playwright MCP image is built. The image grows by an estimated 0.7 GB (Chromium alone is 400 MB
+unpacked); not measured, because the image has not been built yet.
+
+**How the engines drive it.** An MCP server named `scout_browser`, over stdio, only in a container
+with the browser turned on. Its command is the same for both engines (`bridge/browser.py`):
+
+```
+python -I /opt/bridge/bridge/browser_mcp.py --allow <the 14 tools> \
+  --env PLAYWRIGHT_BROWSERS_PATH=/opt/browser/ms-playwright --env HOME=/data/home --env TMPDIR=/data/tmp \
+  -- node /opt/browser/node_modules/@playwright/mcp/cli.js --config /data/.platform/browser-mcp.json
+```
+
+- **Claude Code:** an entry in `--mcp-config` (`"type": "stdio"`). The CLI starts the server for
+  each run and it ends with the run, and the browser with it.
+- **Hermes:** an entry in `mcp_servers` (`command`, `args`). Hermes starts it once and keeps it;
+  the Bridge closes the browser when a turn ends.
+- The server opens the browser at the first tool call, not before.
+
+**The guard** (`bridge/browser_mcp.py`, standard library, run as a file on its own). Playwright MCP
+is made for a developer's own machine; its documentation says it "is not a security boundary". So
+the engines never talk to it directly. The guard passes MCP messages between engine and server with
+three rules:
+- **Tools:** it lists and lets through 14 tools: `browser_navigate`, `browser_navigate_back`,
+  `browser_snapshot`, `browser_find`, `browser_click`, `browser_type`, `browser_fill_form`,
+  `browser_select_option`, `browser_press_key`, `browser_hover`, `browser_wait_for`,
+  `browser_handle_dialog`, `browser_tabs`, `browser_close`. The server's other 11 are refused:
+  they read files from the container (`browser_file_upload`, `browser_drop`), run code
+  (`browser_run_code_unsafe`, `browser_evaluate`), write pictures (`browser_take_screenshot`) or
+  are for debugging pages.
+- **Addresses:** an `url` argument must be a full `http://` or `https://` address (or
+  `about:blank`). Seen with 0.0.83: the server refuses `file:///…` but opens
+  `view-source:file:///…` and shows the file. The guard refuses both, and every other scheme.
+- **Files:** a `filename` argument is dropped, so nothing is written into the user's workspace.
+On Claude Code the tools are `mcp__scout_browser__browser_navigate` and so on; on Hermes
+`mcp_scout_browser_browser_navigate` and so on.
+
+**The browser's settings** (`/data/.platform/browser-mcp.json`, written by the Bridge):
+
+| Setting | Why |
+|---|---|
+| `headless`, `chromiumSandbox: false` (Chromium gets `--headless --no-sandbox`) | gVisor is the sandbox. Chromium's own needs privileges the container does not have |
+| `--disable-dev-shm-usage` | shared memory goes to `TMPDIR` (`/data/tmp`), not to the small `/dev/shm` |
+| `--disable-gpu` | no GPU in the container; one process less |
+| `userDataDir /data/browser/profile`, `--disk-cache-dir=/data/browser/cache` (100 MB), `outputDir /data/browser/output` (20 MB) | the root filesystem is read-only; cookies stay in the user's own volume |
+| `proxy.server` = the container's `HTTPS_PROXY` | every request goes through the egress proxy. Playwright adds `--proxy-bypass-list=<-loopback>`, so requests to the container's own loopback go to the proxy too, and are refused there |
+| `timeouts.idle: 120000` | the server closes the browser after 2 minutes without a tool call and opens it again on the next one |
+| `snapshot.mode: none` | a tool that acts on a page does not write the page to a file; Scout asks for it with `browser_snapshot` |
+| `imageResponses: omit`, `webmcp: false`, `codegen: none` | no pictures; tools a page registers itself are not passed on; no code samples in answers |
+
+**The network.** See "Egress contract": that container, and only it, may reach any public web
+address on ports 80 and 443. The rule belongs to the container's address, not to the browser:
+every program in that container can use it.
+
+**Browser time.** Measured by the Bridge (`BrowserMeter` in `bridge/browser.py`): once a second
+it looks in `/proc` for a process started from `/opt/browser/ms-playwright`. The time runs from
+the moment a browser's main process exists to the moment none does. The browser is closed:
+by Scout (`browser_close`), by the server after 2 idle minutes, by the Bridge when the last
+running turn ends, and by the Bridge after 15 seconds with a browser open and no turn running.
+With the last event of a turn the Bridge reports the whole seconds since its last report
+(`browser_seconds`, `browser_report_id`); the vm-manager stores the report (table
+`browser_usage`, unique per user and report id) before it passes the event on, and `GetUsage`
+returns it. Nothing is reported when the browser never started. Limits of this: the time is
+measured inside the user's own container, by a process the agent could disturb or go around
+(it has a shell), so it is good enough to charge an honest user and cannot be used to charge
+another one; a turn that is force-stopped on its time limit reports nothing (that turn is not
+charged anyway).
+
+**Memory and how many containers fit.** A browser container's limit is 2048 MB instead of
+600 MB: at its limit one takes the room of 3.4 ordinary ones. The awake cap counts containers,
+not memory, so set `AWAKE_CAP` for the worst case you allow: on the 7.6 GiB test server about
+5.5 GiB is left for sandboxes, which is 9 ordinary containers at their limit, or 2 browser
+containers at theirs. Measured on the development machine (not in the image, not under gVisor;
+proportional set size): the server process 115 to 165 MiB (on Hermes it stays for as long as the
+container is awake; on Claude Code only during a run), Chromium with one page 140 MiB
+(example.com) to 380 MiB (a news front page), in 6 processes and about 90 threads with the
+server. So a browser in use adds roughly 0.3 to 0.55 GiB to a container. A container that goes
+over its limit is killed and the turn fails.
+
+**Check it in a container.** `docker exec pa-sbx-<user_id> python -m bridge.browser_check` starts
+the server the way an engine does, opens a page, checks the refusals, the proxy, the close and
+the meter, and prints one line per check (`--no-network` leaves out the two checks that need the
+network). The image build runs it with `--no-network`. Run it while no turn uses the browser.
+
+**Not in this version:** signing in to sites (Scout is told never to type a password or a code,
+and to report that a sign-in is needed); two turns using the browser at the same time (one
+profile, one browser: the second gets an error from the server); screenshots; file downloads and
+uploads.
+
 ## Egress contract (with the backend's infra)
 
 The proxy is Squid. The backend's base `squid.conf` has
@@ -402,7 +541,34 @@ acl u_<hash>_dst dstdomain .example.com other.org
 http_access allow u_<hash>_src u_<hash>_dst
 ```
 
-(dst lines skipped when the list is empty), then sends `SIGHUP` to the
+(dst lines skipped when the list is empty). For a container with Scout's browser the file is:
+
+```
+acl u_<hash>_src src <container_ip>/32
+acl u_<hash>_int_name dstdom_regex -n -i ^[^.]+$ (^|\.)(internal|local|localhost|lan|home\.arpa)$
+acl u_<hash>_int_ip dst 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.168.0.0/16 198.18.0.0/15 224.0.0.0/4 240.0.0.0/4 168.63.129.16/32 ::/128 ::1/128 64:ff9b::/96 fc00::/7 fe80::/10 ff00::/8
+http_access deny u_<hash>_src u_<hash>_int_name
+http_access deny u_<hash>_src u_<hash>_int_ip
+acl u_<hash>_dst dstdomain .example.com other.org
+http_access allow u_<hash>_src u_<hash>_dst
+acl u_<hash>_web port 80 443
+http_access allow u_<hash>_src u_<hash>_web
+```
+
+Squid takes the first `http_access` line that matches. The base config has already refused
+other ports than 80, 443, 4000 and 8080 and allowed what every container may reach (LiteLLM,
+the api's `/mcp` and `/git/` paths), so those still work. Then, for this container's address
+only: names without a dot (the platform's service names, `localhost`) and private-use endings
+are refused; so is every destination whose address, after Squid resolved the name, is private,
+loopback, link-local (the cloud metadata address `169.254.169.254` is in it), shared (CGNAT),
+multicast or reserved, or the IPv6 counterpart, which covers a public name that points inward;
+then the user's own domains are allowed, and last any other destination on ports 80 and 443.
+Every line names the container's source address, so no other container gains anything, and a
+container without the browser keeps exactly the file above. The rule is written for the
+container that was started (label `pa.browser`), so it opens and closes together with the
+browser itself, at a wake.
+
+The vm-manager then sends `SIGHUP` to the
 `EGRESS_PROXY_CONTAINER` through the Docker API (coalesced, at most once per
 `EGRESS_RELOAD_MIN_INTERVAL`). Rewritten on every wake and on `SetEgressAllowlist`;
 **removed on every stop** (a stopped container's IP can be reused by another user's
@@ -428,8 +594,9 @@ gVisor `runsc` release-20260921.0), `docker stats --no-stream pa-sbx-<user_id>`:
 Not yet measured after a real turn (no model provider key on that server; Claude Code turns
 come next). The platform services took ~0.85 GiB (LiteLLM alone ~545 MiB), so on the 7.6 GiB
 test server ~5.5 GiB is left for sandboxes: ~15 awake at ~350 MiB, fewer once turns add
-Claude Code's own process. `AWAKE_CAP` is 3 there for the first test; re-measure during a
-Claude Code turn before raising it:
+Claude Code's own process. A container with Scout's browser has a limit of 2048 MB and can
+take the room of three others (see "Scout's browser"). `AWAKE_CAP` is 3 there for the first
+test; re-measure during a Claude Code turn, and with a browser open, before raising it:
 
 ```bash
 docker stats --no-stream pa-sbx-<user_id>
@@ -448,3 +615,11 @@ the exact stream-json shapes and error texts of this version, and the CLI under 
 a read-only rootfs. For the crew: nothing has run against the real CLI or a real Hermes (the
 `--agents` value, the sub-agent events, the hook that keeps the lead off the web tools, Hermes's
 background delegation and the follow-up turn); see `docs/build-report.md` section 8.
+For Scout's browser: the image has not been built with it, and no engine has driven it. Run on
+the development machine instead, with the real Playwright MCP 0.0.83 and Chrome for Testing 155:
+the Bridge's settings and command, the guard, the meter and the self-check, in a box with a
+read-only root and only `/data` writable, and under gVisor itself (`runsc` release-20260921.0,
+rootless `runsc do`), through a real Squid 7.7 loaded with the generated rule. Not run: the
+image build on Debian with Node 24, a container with its real limits and read-only root under
+Docker and gVisor, the server started by Claude Code and by Hermes, Scout actually using the
+tools, the rule in the backend's Squid, memory in practice; see `docs/build-report.md` section 9.
