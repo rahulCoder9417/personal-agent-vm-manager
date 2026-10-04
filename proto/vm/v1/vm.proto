@@ -42,6 +42,12 @@ service VmManager {
   rpc CompleteClaudeLogin(CompleteClaudeLoginRequest) returns (CompleteClaudeLoginResponse);
   // Signs Claude Code out (removes its credentials from /data).
   rpc ClaudeLogout(ClaudeLogoutRequest) returns (ClaudeLogoutResponse);
+
+  // --- Scout's browser (a Max-plan feature): a headless browser inside the user's own container ---
+  // Turns the browser on or off for the user. It takes effect on the user's next wake: the
+  // container is re-created then if its limits must change (more memory with the browser),
+  // the way an image rollout already works. /data is kept.
+  rpc SetBrowser(SetBrowserRequest) returns (SetBrowserResponse);
 }
 
 enum AgentRuntime {
@@ -87,6 +93,8 @@ message Sandbox {
   AgentRuntime runtime = 8;
   // Claude Code has valid credentials in /data (as last seen by the vm-manager).
   bool claude_connected = 9;
+  // The browser is turned on for this user (as stored; a running container gets it on its next wake).
+  bool browser_enabled = 10;
 }
 
 message CreateSandboxRequest {
@@ -98,6 +106,8 @@ message CreateSandboxRequest {
   repeated UserMcpServer mcp_servers = 5;
   string timezone = 6;
   AgentRuntime runtime = 7;
+  // The browser is turned on for this user from the start (see SetBrowser).
+  bool browser_enabled = 8;
 }
 
 message CreateSandboxResponse {
@@ -199,6 +209,9 @@ message GetUsageRequest {
 message UserUsage {
   string user_id = 1;
   int64 awake_seconds = 2;
+  // Seconds the browser was open (from its start to its close), as reported by the container
+  // at the end of a turn. Each report is counted once, in the window that holds the moment the
+  // vm-manager recorded it, so back-to-back windows never count a second twice.
   int64 browser_seconds = 3;
 }
 
@@ -249,3 +262,9 @@ message CompleteClaudeLoginResponse {
 
 message ClaudeLogoutRequest { string user_id = 1; }
 message ClaudeLogoutResponse {}
+
+message SetBrowserRequest {
+  string user_id = 1;
+  bool enabled = 2;
+}
+message SetBrowserResponse { Sandbox sandbox = 1; }

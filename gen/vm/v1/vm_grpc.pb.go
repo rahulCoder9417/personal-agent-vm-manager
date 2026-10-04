@@ -38,6 +38,7 @@ const (
 	VmManager_StartClaudeLogin_FullMethodName    = "/vm.v1.VmManager/StartClaudeLogin"
 	VmManager_CompleteClaudeLogin_FullMethodName = "/vm.v1.VmManager/CompleteClaudeLogin"
 	VmManager_ClaudeLogout_FullMethodName        = "/vm.v1.VmManager/ClaudeLogout"
+	VmManager_SetBrowser_FullMethodName          = "/vm.v1.VmManager/SetBrowser"
 )
 
 // VmManagerClient is the client API for VmManager service.
@@ -77,6 +78,11 @@ type VmManagerClient interface {
 	CompleteClaudeLogin(ctx context.Context, in *CompleteClaudeLoginRequest, opts ...grpc.CallOption) (*CompleteClaudeLoginResponse, error)
 	// Signs Claude Code out (removes its credentials from /data).
 	ClaudeLogout(ctx context.Context, in *ClaudeLogoutRequest, opts ...grpc.CallOption) (*ClaudeLogoutResponse, error)
+	// --- Scout's browser (a Max-plan feature): a headless browser inside the user's own container ---
+	// Turns the browser on or off for the user. It takes effect on the user's next wake: the
+	// container is re-created then if its limits must change (more memory with the browser),
+	// the way an image rollout already works. /data is kept.
+	SetBrowser(ctx context.Context, in *SetBrowserRequest, opts ...grpc.CallOption) (*SetBrowserResponse, error)
 }
 
 type vmManagerClient struct {
@@ -246,6 +252,16 @@ func (c *vmManagerClient) ClaudeLogout(ctx context.Context, in *ClaudeLogoutRequ
 	return out, nil
 }
 
+func (c *vmManagerClient) SetBrowser(ctx context.Context, in *SetBrowserRequest, opts ...grpc.CallOption) (*SetBrowserResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetBrowserResponse)
+	err := c.cc.Invoke(ctx, VmManager_SetBrowser_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // VmManagerServer is the server API for VmManager service.
 // All implementations must embed UnimplementedVmManagerServer
 // for forward compatibility.
@@ -283,6 +299,11 @@ type VmManagerServer interface {
 	CompleteClaudeLogin(context.Context, *CompleteClaudeLoginRequest) (*CompleteClaudeLoginResponse, error)
 	// Signs Claude Code out (removes its credentials from /data).
 	ClaudeLogout(context.Context, *ClaudeLogoutRequest) (*ClaudeLogoutResponse, error)
+	// --- Scout's browser (a Max-plan feature): a headless browser inside the user's own container ---
+	// Turns the browser on or off for the user. It takes effect on the user's next wake: the
+	// container is re-created then if its limits must change (more memory with the browser),
+	// the way an image rollout already works. /data is kept.
+	SetBrowser(context.Context, *SetBrowserRequest) (*SetBrowserResponse, error)
 	mustEmbedUnimplementedVmManagerServer()
 }
 
@@ -337,6 +358,9 @@ func (UnimplementedVmManagerServer) CompleteClaudeLogin(context.Context, *Comple
 }
 func (UnimplementedVmManagerServer) ClaudeLogout(context.Context, *ClaudeLogoutRequest) (*ClaudeLogoutResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ClaudeLogout not implemented")
+}
+func (UnimplementedVmManagerServer) SetBrowser(context.Context, *SetBrowserRequest) (*SetBrowserResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetBrowser not implemented")
 }
 func (UnimplementedVmManagerServer) mustEmbedUnimplementedVmManagerServer() {}
 func (UnimplementedVmManagerServer) testEmbeddedByValue()                   {}
@@ -622,6 +646,24 @@ func _VmManager_ClaudeLogout_Handler(srv interface{}, ctx context.Context, dec f
 	return interceptor(ctx, in, info, handler)
 }
 
+func _VmManager_SetBrowser_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetBrowserRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VmManagerServer).SetBrowser(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VmManager_SetBrowser_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VmManagerServer).SetBrowser(ctx, req.(*SetBrowserRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // VmManager_ServiceDesc is the grpc.ServiceDesc for VmManager service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -684,6 +726,10 @@ var VmManager_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ClaudeLogout",
 			Handler:    _VmManager_ClaudeLogout_Handler,
+		},
+		{
+			MethodName: "SetBrowser",
+			Handler:    _VmManager_SetBrowser_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
