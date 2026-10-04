@@ -29,7 +29,9 @@ func TestDeliverStreamsNDJSON(t *testing.T) {
 		w.Header().Set("Content-Type", "application/x-ndjson")
 		fl := w.(http.Flusher)
 		for _, line := range []string{
-			`{"type":"accepted"}`, ``, `{"type":"working","message":"using tool"}`, `{"type":"turn_done"}`,
+			`{"type":"accepted"}`, ``, `{"type":"working","message":"using tool"}`,
+			// The last event of a turn may carry the browser time, as the Bridge writes it.
+			`{"type":"turn_done","message":"","platform_fault":false,"browser_seconds":73,"browser_report_id":"d1#1"}`,
 		} {
 			_, _ = fmt.Fprintln(w, line)
 			fl.Flush()
@@ -44,6 +46,7 @@ func TestDeliverStreamsNDJSON(t *testing.T) {
 	}
 	defer func() { _ = st.Close() }()
 	var types []string
+	var last Event
 	for {
 		ev, err := st.Next()
 		if errors.Is(err, io.EOF) {
@@ -53,9 +56,16 @@ func TestDeliverStreamsNDJSON(t *testing.T) {
 			t.Fatal(err)
 		}
 		types = append(types, ev.Type)
+		if ev.Type != EventTurnDone && (ev.BrowserSeconds != 0 || ev.BrowserReportID != "") {
+			t.Fatalf("an event without browser time must read as none: %+v", ev)
+		}
+		last = ev
 	}
 	if strings.Join(types, ",") != "accepted,working,turn_done" {
 		t.Fatalf("events: %v", types)
+	}
+	if last.BrowserSeconds != 73 || last.BrowserReportID != "d1#1" {
+		t.Fatalf("browser time on the last event: %+v", last)
 	}
 	if got.DeliveryID != "d1" || got.Text != "hello" || got.Attachments == nil || string(got.Metadata) != "{}" {
 		t.Fatalf("request body: %+v", got)

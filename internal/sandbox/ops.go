@@ -76,7 +76,8 @@ func (m *Manager) List(ctx context.Context, states ...store.State) ([]Info, erro
 	return out, nil
 }
 
-// Usage returns awake seconds per user in [since, until). until zero = now.
+// Usage returns awake seconds and browser seconds per user in [since, until). until zero = now.
+// Browser seconds are the reports recorded in the window (see recordBrowser).
 func (m *Manager) Usage(ctx context.Context, userID string, since, until time.Time) ([]store.Usage, error) {
 	if userID != "" {
 		if err := validateUserID(userID); err != nil {
@@ -140,7 +141,7 @@ func (m *Manager) SetEgressAllowlist(ctx context.Context, userID string, domains
 	if sb.State.Running() {
 		c, err := m.eng.InspectContainer(ctx, sb.ContainerID)
 		if err == nil && c.Running && c.IPs[m.cfg.SandboxNetwork] != "" {
-			if err := m.eg.Write(userID, c.IPs[m.cfg.SandboxNetwork], m.egressDomains(sb)); err != nil {
+			if err := m.eg.Write(userID, c.IPs[m.cfg.SandboxNetwork], m.egressRule(sb, c)); err != nil {
 				return err
 			}
 		}

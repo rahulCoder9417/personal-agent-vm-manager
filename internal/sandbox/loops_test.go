@@ -13,6 +13,7 @@ import (
 
 	"github.com/personal-agent/vm-manager/internal/config"
 	"github.com/personal-agent/vm-manager/internal/docker"
+	"github.com/personal-agent/vm-manager/internal/egress"
 	"github.com/personal-agent/vm-manager/internal/ids"
 	"github.com/personal-agent/vm-manager/internal/store"
 )
@@ -295,7 +296,7 @@ func TestReconcilerFixesDrift(t *testing.T) {
 	orphan, _ := e.eng.CreateContainer(ctx, docker.ContainerSpec{Name: "pa-sbx-ghost", VolumeName: "pa-data-ghost", VolumeTarget: "/data",
 		Labels: map[string]string{LabelManaged: "true", LabelUserID: "ghost"}})
 	// 5. a leftover egress file for a user that is not awake.
-	_ = e.eg.Write("rogue", "172.30.9.9", nil)
+	_ = e.eg.Write("rogue", "172.30.9.9", egress.Rule{})
 
 	e.restart()
 	e.m.ReconcileOnce(ctx)

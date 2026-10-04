@@ -164,10 +164,14 @@ func (m *Manager) relay(parent context.Context, sb store.Sandbox, body bridge.De
 		case bridge.EventWorking:
 			emit(ev.Type, ev.Message, false)
 		case bridge.EventTurnDone:
+			// Browser time first: it is stored before the caller hears that the turn is over, so
+			// a usage sync that follows the turn already sees it.
+			m.recordBrowser(bg, userID, body.DeliveryID, ev)
 			endTurn()
 			emit(ev.Type, ev.Message, false)
 			return
 		case bridge.EventError:
+			m.recordBrowser(bg, userID, body.DeliveryID, ev)
 			endTurn()
 			emit(ev.Type, ev.Message, ev.PlatformFault)
 			return
