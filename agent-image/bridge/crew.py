@@ -10,6 +10,12 @@ lead should use it), a role prompt and a tool list. Both engines are fed from th
 
 The ids are fixed: the backend and the apps use them too. The Bridge sends the final answer
 itself, so neither the lead nor a specialist calls `send_message`.
+
+The web is Scout's alone (founder's decision, 2026-10-04). Scout searches with the engine's built-in
+search when the engine has one (Claude Code: it costs the platform nothing) and with the platform tool
+`web_search` when it has none (Hermes: a paid feature of the Max plan). It reads pages with the platform
+tool `read_page`. The lead, Byte and Patch have no web tool. Claude Code enforces this (see "Claude Code"
+below); on Hermes it is an instruction, because tools cannot be narrowed per agent there.
 """
 
 from __future__ import annotations
@@ -24,12 +30,15 @@ DEFAULT_MAX_PARALLEL = 3  # specialists running at the same time (BRIDGE_CREW_MA
 # Tool groups a member may use; each engine maps them to its own tool names.
 READ, WRITE, SEARCH, SHELL = "read", "write", "search", "shell"
 WEB = "web"  # the engine's own web search (Claude Code: WebSearch; Hermes has none set up)
-PLATFORM = "platform"  # every Platform MCP tool except send_message
-WEB_SEARCH, READ_PAGE = "platform:web_search", "platform:read_page"  # single Platform MCP tools
+PLATFORM = "platform"  # the Platform MCP tools, without send_message and without its two web tools
+WEB_SEARCH, READ_PAGE = "platform:web_search", "platform:read_page"  # the Platform MCP's web tools
+PLATFORM_WEB = (WEB_SEARCH, READ_PAGE)
+WEB_GROUPS = (WEB, *PLATFORM_WEB)  # every way to the web; only Scout has them
 
 _TOOL_WORDS = {
     READ: "reading files", WRITE: "writing and editing files", SEARCH: "searching files", SHELL: "the shell",
-    PLATFORM: "the platform tools", WEB_SEARCH: "web_search", READ_PAGE: "read_page",
+    PLATFORM: "the platform tools (not web_search or read_page)",
+    WEB_SEARCH: "web_search (only when you have no built-in search)", READ_PAGE: "read_page",
     WEB: "your built-in web search (when you have one)",
 }
 
@@ -119,9 +128,11 @@ SCOUT = Member(
         "and report back.\n"
         "\n"
         "How you work:\n"
-        "- Search with your built-in web search when you have one, and with the platform tool web_search when you "
-        "do not. Open a page with the platform tool read_page. These are the only tools you have, and your only way "
-        "to the web.\n"
+        "- Search with your built-in web search when you have one. Use the platform tool web_search only when you "
+        "have no built-in search: it is a paid feature of the Max plan, and it says so when it is not available to "
+        "the user. When it says that, do not try it again: say in your report that the search was not available. "
+        "Open a page with the platform tool read_page. These are the only tools you have, and your only way to the "
+        "web.\n"
         "- read_page opens only an address that came from web_search, from the user's own messages, or from a page "
         "you already read with it. It refuses every other address, results of your built-in search included. When "
         "it refuses, do not try again and do not change the address: work from what the search itself returned.\n"
@@ -137,8 +148,9 @@ SCOUT = Member(
         "Report back briefly: the answer first, then the key facts, the links you used, and what you could not "
         "confirm."
     ),
-    # No file tools: a page Scout reads must not be able to make it read something and send it out.
-    # The built-in search sends the query to the model provider, not to a site, so it is not a way out.
+    # The only member with web tools. No file tools: a page Scout reads must not be able to make it read
+    # something and send it out. The built-in search sends the query to the model provider, not to a site,
+    # so it is not a way out.
     tools=(WEB, WEB_SEARCH, READ_PAGE),
 )
 
@@ -156,11 +168,22 @@ _COMMON_RULES = (
 )
 
 
+_NO_WEB = ("You have no web search and no page reading: do not use web_search, read_page or any other web tool. "
+           "When the job needs something looked up on the web, say so in your report, and Tex will ask Scout.")
+
+
+def has_web(member: Member) -> bool:
+    """Whether the member has a web tool. Only Scout does."""
+    return any(group in member.tools for group in WEB_GROUPS)
+
+
 def role_prompt(member: Member) -> str:
-    """The full brief of a specialist: its role, the tools it may use, and the rules all of them share."""
+    """The full brief of a specialist: its role, the tools it may use (for everyone but Scout: no web tool),
+    and the rules all of them share."""
     tools = ", ".join(_TOOL_WORDS[t] for t in member.tools)
-    return (f"{member.prompt}\n\nTools you may use: {tools}. Use no other tool, even when one is available.\n\n"
-            f"{_COMMON_RULES}")
+    no_web = "" if has_web(member) else f" {_NO_WEB}"
+    return (f"{member.prompt}\n\nTools you may use: {tools}. Use no other tool, even when one is available."
+            f"{no_web}\n\n{_COMMON_RULES}")
 
 
 def lead_instructions() -> str:
@@ -169,8 +192,12 @@ def lead_instructions() -> str:
         f"You are {LEAD_NAME}, the lead of a small crew. Three specialists can take work from you: Scout "
         "(research on the web), Byte (writing and fixing code) and Patch (reviewing a pull request or a diff). Hand "
         "research to Scout, code changes to Byte, and the review of a pull request or of Byte's work to Patch. "
-        "After Byte opens a pull request you may have Patch review it. Do small jobs yourself, without a "
-        "specialist: a quick answer, a single lookup, a small edit. "
+        "After Byte opens a pull request you may have Patch review it. "
+        "You have no access to the web yourself, and neither have Byte and Patch: only Scout searches the web and "
+        "reads pages. Anything that needs the web, even a single lookup, goes to Scout. Never use a web search or "
+        "page-reading tool yourself (web_search, read_page or a built-in one), even when one is available to you. "
+        "Do small jobs that need no web yourself, without a specialist: a quick answer, a look at the user's files "
+        "or apps, a small edit. "
         f"Use at most {MAX_PER_JOB} specialists for one job. A specialist knows nothing about this chat, so tell it "
         "everything it needs, and write the final answer yourself from what it reports. "
         "Scout has no access to files, so what it needs goes in the task; when you hand a job to Scout, pass only "
@@ -200,6 +227,11 @@ _CLAUDE_TOOLS = {READ: ("Read",), WRITE: ("Edit", "Write", "NotebookEdit"), SEAR
 _CLAUDE_NEVER = ("WebFetch",)
 
 
+def _claude_platform_tool(group: str, platform_server: str) -> str:
+    """"platform:web_search" -> "mcp__<server>__web_search"."""
+    return f"mcp__{platform_server}__{group.split(':', 1)[1]}"
+
+
 def claude_tools(member: Member, platform_server: str = "platform") -> list[str]:
     """The member's tool list in Claude Code's names: built-in tools by name, `mcp__<server>` for every
     tool of an MCP server, `mcp__<server>__<tool>` for one ("Available tools" on the sub-agents page)."""
@@ -208,21 +240,25 @@ def claude_tools(member: Member, platform_server: str = "platform") -> list[str]
         if group == PLATFORM:
             out.append(f"mcp__{platform_server}")
         elif group.startswith(PLATFORM + ":"):
-            out.append(f"mcp__{platform_server}__{group.split(':', 1)[1]}")
+            out.append(_claude_platform_tool(group, platform_server))
         else:
             out.extend(_CLAUDE_TOOLS[group])
     return out
 
 
 def claude_denied(member: Member, platform_server: str = "platform") -> list[str]:
-    """The member's `disallowedTools`: starting sub-agents, sending the answer, fetching pages from the
-    container, and every built-in file, edit, shell and web-search tool its tool list leaves out (for Scout:
-    every file, edit and shell tool).
+    """The member's `disallowedTools`: starting sub-agents, sending the answer, the platform's web tools
+    unless they are its own (Byte and Patch are given the whole Platform MCP, so `web_search` and
+    `read_page` are taken out by name, like `send_message`), fetching pages from the container, and every
+    built-in file, edit, shell and web-search tool its tool list leaves out (for Scout: every file, edit
+    and shell tool).
 
     The docs say a `tools` allow list alone gives "only the listed tools". The deny list is a second lock
     that does not depend on how the allow list resolves, e.g. when none of its entries matches a tool.
     """
-    out = [CLAUDE_AGENT_TOOL, f"mcp__{platform_server}__send_message", *_CLAUDE_NEVER]
+    out = [CLAUDE_AGENT_TOOL, f"mcp__{platform_server}__send_message"]
+    out.extend(_claude_platform_tool(group, platform_server) for group in PLATFORM_WEB if group not in member.tools)
+    out.extend(_CLAUDE_NEVER)
     for group, names in _CLAUDE_TOOLS.items():
         if group not in member.tools:
             out.extend(names)
@@ -233,11 +269,11 @@ def claude_agents(platform_server: str = "platform", model: str = "") -> dict[st
     """The value of `--agents`: {id: {description, prompt, tools, disallowedTools, model}}.
 
     `tools` is an allow list. It leaves out `Agent`, so a specialist cannot start helpers of its own;
-    `disallowedTools` (applied first, see claude_denied) says the same again, keeps `send_message` away
-    even where `tools` names the whole Platform MCP, and names the built-in tools the member must not
-    have. No `mcpServers`: a specialist shares the lead's MCP connections, narrowed by `tools`. No
-    `permissionMode`: a specialist runs in the lead's mode. `model` is the lead's (`inherit`) unless a
-    cheaper one is set.
+    `disallowedTools` (applied first, see claude_denied) says the same again, keeps `send_message` and,
+    for everyone but Scout, the platform's web tools away even where `tools` names the whole Platform MCP,
+    and names the built-in tools the member must not have. No `mcpServers`: a specialist shares the
+    lead's MCP connections, narrowed by `tools`. No `permissionMode`: a specialist runs in the lead's
+    mode. `model` is the lead's (`inherit`) unless a cheaper one is set.
     """
     return {
         m.id: {

@@ -42,7 +42,9 @@ class PlatformTest(unittest.TestCase):
         platform = cfg["mcp_servers"]["platform"]
         self.assertEqual(platform["url"], "http://api:8080/mcp")
         self.assertEqual(platform["headers"], {"Authorization": "Bearer tok-123"})
-        self.assertIn("send_message", platform["tools"]["exclude"])
+        # Only send_message is hidden. web_search and read_page stay: a Hermes child gets the lead's tools,
+        # so hiding them from the lead would take them from Scout too. On Hermes the web rule is an instruction.
+        self.assertEqual(platform["tools"]["exclude"], ["send_message"])
         self.assertEqual(cfg["mcp_servers"]["user_m_1"]["headers"], {"X-Api-Key": "k1"})
         self.assertNotIn("headers", cfg["mcp_servers"]["user_m2"])
         self.assertFalse(cfg["cron"]["enabled"])
