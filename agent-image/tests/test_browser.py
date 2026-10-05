@@ -74,6 +74,8 @@ class SettingsTest(unittest.TestCase):
                 "userDataDir": "/data/browser/profile",
                 "launchOptions": {
                     "headless": True,
+                    # The full browser: the image has no separate headless shell.
+                    "channel": "chromium",
                     # No Chromium sandbox: the container (gVisor) is the sandbox.
                     "chromiumSandbox": False,
                     "args": ["--disable-dev-shm-usage", "--disable-gpu", "--disk-cache-size=104857600",

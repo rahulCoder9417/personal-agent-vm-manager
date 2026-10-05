@@ -481,6 +481,7 @@ On Claude Code the tools are `mcp__scout_browser__browser_navigate` and so on; o
 | Setting | Why |
 |---|---|
 | `headless`, `chromiumSandbox: false` (Chromium gets `--headless --no-sandbox`) | gVisor is the sandbox. Chromium's own needs privileges the container does not have |
+| `channel: chromium` | the full browser, the only one in the image. Without a channel Playwright starts a headless launch from its separate headless shell, which `install --no-shell` leaves out, and fails with `Browser "chromium" is not installed` |
 | `--disable-dev-shm-usage` | shared memory goes to `TMPDIR` (`/data/tmp`), not to the small `/dev/shm` |
 | `--disable-gpu` | no GPU in the container; one process less |
 | `userDataDir /data/browser/profile`, `--disk-cache-dir=/data/browser/cache` (100 MB), `outputDir /data/browser/output` (20 MB) | the root filesystem is read-only; cookies stay in the user's own volume |

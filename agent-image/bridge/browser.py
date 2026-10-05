@@ -11,7 +11,9 @@ Three parts:
 - Its settings (render_config), written to /data/.platform/browser-mcp.json. What they are for:
     headless, no Chromium sandbox   the container itself is the sandbox (gVisor); Chromium's own sandbox
                                     needs privileges the container does not have
-    --disable-dev-shm-usage         shared memory goes to TMPDIR (/data/tmp), not to the small /dev/shm
+    channel chromium                the full browser, the only one in the image; without a channel
+                                    Playwright looks for its separate headless shell and fails
+    --disable-dev-shm-usage        shared memory goes to TMPDIR (/data/tmp), not to the small /dev/shm
     --disable-gpu                   there is no GPU; one process less
     profile, cache, output in /data the root filesystem is read-only, and cookies stay in the user's own
                                     volume (/data/browser/profile)
@@ -104,6 +106,9 @@ def render_config(env: dict[str, str], data_dir: str = "/data") -> dict[str, Any
     paths = data_paths(data_dir)
     launch: dict[str, Any] = {
         "headless": True,
+        # The full browser. Without a channel Playwright starts a headless launch from its separate
+        # "headless shell" download, which the image does not have (`install --no-shell`).
+        "channel": "chromium",
         "chromiumSandbox": False,
         "args": [*CHROMIUM_FLAGS, f"--disk-cache-dir={paths['cache']}"],
     }
