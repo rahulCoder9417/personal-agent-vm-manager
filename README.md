@@ -131,7 +131,9 @@ States: `stopped -> waking -> awake <-> busy`, and `broken`.
 - **Delete**: container, volume, egress file, row. Awake periods are kept for billing.
 
 Loops: idle reaper (1 min; not busy, nothing in flight, no pending Claude sign-in, Bridge
-reports no turn and no sign-in, idle >= 3 min), health checker (30 s; 2 failed checks -> restart; more than 3 restarts without a
+reports no turn and no sign-in, idle >= 3 min; it waits up to 10 s for the user's lock, which a health check
+holds at the same moments, and logs "reaper: sandbox busy with another operation" when it still has to leave a
+sandbox to the next round), health checker (30 s; 2 failed checks -> restart; more than 3 restarts without a
 good check -> stop + `broken` + an `alert=true` log line), reconciler (startup + 5 min;
 running/not-running drift, stale `waking`/`busy`, orphan and duplicate containers,
 leftover egress files; never deletes volumes). Capacity guard: evict awake, not-busy
@@ -184,8 +186,22 @@ token. The agent (Hermes or Claude Code) sees the other Platform MCP tools but n
 Deliver errors from the Claude Code runtime: not signed in / login expired / token revoked
 -> `"Connect your Claude plan again"`, `platform_fault=false`; plan usage limit, rate limit or
 spend limit -> `"Your Claude plan's usage limit was reached: <the CLI's message>"`,
+`platform_fault=false`; account on hold or organisation not allowed -> `"Your Claude account can't be
+used right now"`, `platform_fault=false`; Anthropic's safeguards refused the request (on the first model
+and on the CLI's fallback) -> `"Claude declined this request under Anthropic's usage policy"`,
 `platform_fault=false`; step limit (`error_max_turns`) -> `platform_fault=false`; crash,
-timeout, overload, anything else -> `platform_fault=true`.
+timeout, overload, anything else -> `platform_fault=true`. The Bridge decides from the CLI's own error code
+for a failed API call (the `error` of its assistant message: `authentication_failed`, `billing_error`,
+`rate_limit`, ...), a `stop_reason` of `refusal`, then the error text.
+
+Every failed Claude Code run is logged once in `docker logs` (`bridge.claude WARNING claude run failed: {...}`):
+the delivery, the reason, `platform_fault`, the exit code, how the run ended (`subtype`, `is_error`,
+`terminal_reason`, `api_error_status`, `stop_reason`), the CLI's last API error (its code, text and a refusal's
+category), the last API retry and the last 10 lines of stderr. The container's secrets are replaced with
+`[secret]`, and a line that quotes the user's message is left out.
+
+A message whose turn failed is never acted on later, on either engine (see "A turn" under "Claude Code
+runtime", and "Agent image" for Hermes).
 
 ## Agent image
 
@@ -196,7 +212,12 @@ with the user's key via the egress proxy; MCP = Platform MCP with the container 
 memory" below); skills and sessions under `/data/hermes`), starts `hermes gateway run` with only its API server on 127.0.0.1
 (random per-boot key), and drives one Hermes run per delivery with
 `X-Hermes-Session-Key: <session_key>`, so each chat keeps its own session (a delivery in
-which the lead hands work to its crew takes follow-up runs; see "The crew"). Hermes's own
+which the lead hands work to its crew takes follow-up runs; see "The crew"). Hermes saves a turn to its
+session on every exit path, a failed one included, and has no documented way over its API to take a turn
+back, so after a turn that reached Hermes and failed, the chat goes on in a new Hermes conversation: the key
+gets a suffix (`telegram:42#1`, then `#2`, ...; `/data/.platform/hermes-conversations.json`). The failed
+message is never continued; the cost is that Hermes starts that chat afresh. What carries over is the
+platform's memory (`recall`) and Hermes's `session_search` over earlier conversations. Hermes's own
 approval prompts are denied by policy (`BRIDGE_HERMES_APPROVAL`); risky real-world
 actions go through the platform's `request_approval` tool.
 
@@ -211,6 +232,14 @@ The shell works without tirith, which fails open by default. `model_catalog: {en
 the model-catalog refresh 30 s after start and every 20 minutes (Nous's catalog, OpenRouter's model
 list, Nous Portal's recommendations). It feeds only the `/model` picker, and the model here is fixed.
 Read in the pinned source; details in `docs/build-report.md` section 9, "The four findings".
+`model.context_length: 128000` gives Hermes the model's context size, so it no longer asks LiteLLM for it at
+every start (`GET /v1/models/agent-default`, which LiteLLM refuses to a user's key and logs as an error, then
+`/v1/models` and `/api/show`) and no longer falls back to 256,000 tokens. 128,000 fits the smallest model
+`agent-default` stands for (the cheap model on Free, 131,072); `BRIDGE_HERMES_CONTEXT_LENGTH` overrides it.
+The start-up warning `install out of sync (ffmpeg, node, npm, ripgrep: not installed or outdated)` has no
+setting: Hermes's package manager reports it only when `/data/hermes/tools/facts.json` exists, which is the
+case only in a volume where Hermes downloaded its tools before they were turned off (the test user's, 486 MB).
+Deleting `/data/hermes/tools` in that volume ends it (not done; see `docs/build-report.md` section 10).
 
 The image also has Scout's browser under `/opt/browser`: Node.js 24.21.0, Microsoft's Playwright
 MCP server 0.0.83 and the Chromium build it pins (Chrome for Testing 155.0.8059.12). It is used
@@ -272,14 +301,26 @@ Anthropic's page, copies the code -> `CompleteClaudeLogin` -> if connected,
 Bash,Read,Edit,Write,Glob,Grep,NotebookEdit,TodoWrite,WebSearch,mcp__platform,mcp__user_<id>...,Agent
 --disallowedTools mcp__platform__send_message WebFetch --setting-sources user
 --settings /data/.platform/claude-settings.json --agents <the crew as JSON>
---append-system-prompt <channel and crew instructions> (--session-id <new uuid> | --resume <id>)`
+--append-system-prompt <channel and crew instructions> (--session-id <new uuid> | --resume <id> --fork-session)`
 with the message on stdin. The MCP
 config (0600, rewritten every turn) has the Platform MCP with the container's bearer token and
 the user's own MCP servers. The settings file (0600, rewritten every turn) has one hook, which
 keeps the lead off the web tools; `WebSearch` is in the allow list for Scout, not for the lead
 (see "The crew"). Each `session_key` maps to one Claude session
 (`/data/.platform/claude-sessions.json`); a lost session starts a new one. Turns of the same
-chat run one at a time. `system/init` and `result` give the session id, `tool_use` blocks
+chat run one at a time. **A failed turn is never continued.** The CLI writes the message into the session
+before it calls the model, a failed one included, and on `--resume` the model sees it again (2026-10-08: three
+messages refused for the plan's limit were carried out 90 minutes later, with the next message). So a turn on an
+existing chat runs in a copy of its session (`--resume <id> --fork-session`: "When resuming, create a new session
+ID instead of reusing the original", CLI reference; the original "stays unchanged", agent-sdk/sessions). The chat
+moves on to the copy only when the turn completed, and the Bridge then removes the replaced
+`$CLAUDE_CONFIG_DIR/projects/<project>/<id>.jsonl` (the copy holds all of it; its folder stays). After a
+failure, a timeout or a crash the chat keeps the session from before; the copy with the failed message is never
+resumed and the CLI deletes it after 30 days. A first turn that fails leaves the chat with no session. Checked
+with the 2.1.283 binary against a fake API: the copy has the same recorded system prompt, the next request has
+no failed message, and a copy resumes with the replaced file gone. The cost: each turn writes the chat's
+transcript once more (about 0.7 MB for the test user's main chat).
+`system/init` and `result` give the session id, `tool_use` blocks
 become `working` events, `system/api_retry` becomes "Claude is retrying (...)", the `result`
 text is the answer the Bridge sends with `send_message`. `BRIDGE_CLAUDE_MODEL` and
 `BRIDGE_CLAUDE_MAX_TURNS` are optional (default: the plan's default model, no turn limit);
@@ -673,4 +714,7 @@ tools, the rule in the backend's Squid, memory in practice; see `docs/build-repo
 (Part of this list has since run on the server, 2026-10-05: see that section's "First run on the
 server".) The changes of 2026-10-08 (one memory, Scout's `read_page` line per engine, Hermes fetching
 nothing, the browser's switches) are tested against fakes, the pinned browser and the Hermes source,
-not yet in an image on the server; the checks to run are in that section's "Not verified yet".
+not yet in an image on the server; the checks to run are in that section's "Not verified yet". So is the
+second round of 2026-10-08 (a failed turn never continued, failed runs logged, refusals not a platform fault,
+the reaper's wait, Hermes's context size), also run with the real 2.1.283 binary against a fake API; the
+checks are in `docs/build-report.md` section 10.
