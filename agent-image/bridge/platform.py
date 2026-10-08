@@ -78,6 +78,33 @@ def server_key(server: MCPServer) -> str:
     return f"user_{safe}"
 
 
+HERMES_CONTEXT_LENGTH = 128_000
+HERMES_MIN_CONTEXT_LENGTH = 64_000  # Hermes refuses a model with less (agent/model_metadata.py MINIMUM_CONTEXT_LENGTH)
+
+
+def hermes_context_length(env: dict[str, str]) -> int:
+    """`model.context_length` for Hermes: the total context window of the model behind LiteLLM's name.
+
+    Given, not detected. Without it Hermes asks LiteLLM at every start: `GET /v1/models/agent-default`, which
+    LiteLLM refuses to a user's key ("Only proxy admin can be used ...", 401, logged by LiteLLM as an error), then
+    `/v1/models` and Ollama's `/api/show`, and falls back to 256,000 tokens ("Could not determine context length
+    ... Set model.context_length in config.yaml to override"). The setting is documented in Hermes's
+    cli-config.yaml.example ("Set manually only when auto-detection is wrong (e.g. ... a proxy that doesn't expose
+    /v1/models)"), and an explicit value is returned before any probe (agent/model_metadata.py
+    get_model_context_length, step 0, at the pinned commit).
+
+    `agent-default` is an alias on each user's LiteLLM key: the cheap model on Free (Llama 3.3 70B, a 131,072-token
+    window), Claude on Pro and Max, the user's own provider with their own key. 128,000 fits the smallest of them,
+    so Hermes compresses a long chat before the cheap model's window is full (256,000 did not).
+    BRIDGE_HERMES_CONTEXT_LENGTH overrides it (64,000 at least)."""
+    raw = (env.get("BRIDGE_HERMES_CONTEXT_LENGTH") or "").strip()
+    try:
+        value = int(raw) if raw else HERMES_CONTEXT_LENGTH
+    except ValueError:
+        return HERMES_CONTEXT_LENGTH
+    return value if value >= HERMES_MIN_CONTEXT_LENGTH else HERMES_CONTEXT_LENGTH
+
+
 def render_hermes_config(pf: PlatformFile, env: dict[str, str], data_dir: str = "/data") -> dict[str, Any]:
     """Build the Hermes config dict.
 
@@ -91,7 +118,7 @@ def render_hermes_config(pf: PlatformFile, env: dict[str, str], data_dir: str = 
     - delegation (the crew): children cannot delegate, BRIDGE_CREW_MAX_PARALLEL at a time (default 3)
     - Hermes's own memory off: the user's memory is the platform's (remember / recall / forget)
     - no runtime installs and no model catalog: Hermes fetches nothing from GitHub, PyPI, Nous or
-      OpenRouter when it starts
+      OpenRouter when it starts; and the model's context size is given, so it does not probe LiteLLM for it
     - skills and sessions under HERMES_HOME (= /data/hermes)
     """
     base = env.get("LITELLM_BASE_URL", "http://litellm:4000").rstrip("/")
@@ -123,6 +150,8 @@ def render_hermes_config(pf: PlatformFile, env: dict[str, str], data_dir: str = 
             "base_url": base,
             "api_key": pf.litellm_key,
             "default": env.get("LITELLM_MODEL", "agent-default"),
+            # The model's context size, given instead of detected (hermes_context_length).
+            "context_length": hermes_context_length(env),
         },
         "mcp_servers": servers,
         # No Hermes-side scheduling or outbound messaging: the platform owns both.
