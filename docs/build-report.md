@@ -601,7 +601,7 @@ Checked three ways: the binary's own `--help`; the model table built into it (th
 |---|---|
 | A new chat on Claude Code | For a Claude Code user: "My code word is kiwi", then New chat, then "What is my code word? One line." It must not know it (unless it was saved with `remember`). `docker exec pa-sbx-<user> cat /data/.platform/claude-sessions.json`: the chat's `epoch` went up and its `session_id` changed |
 | A new chat on Hermes | The same for a Hermes user; `docker exec pa-sbx-<user> cat /data/.platform/hermes-conversations.json`: the chat's `generation` and `epoch` went up |
-| The chosen model and effort reach Anthropic | Choose Opus 5.5 and `xhigh`, send a message; the newest `/data/claude/projects/-data-workspace/<id>.jsonl` has `"model":"claude-opus-5-5"` on the answer. The effort is not in the transcript; the CLI's `/status` is not available in `-p` |
+| The chosen model and effort reach Anthropic | Choose Opus 5.5 and `xhigh`, send a message; in the chat's newest `/data/claude/projects/-data-workspace/<id>.jsonl` the answer's line has `"model":"claude-opus-5-5"` and `"effort":"xhigh"` (2.1.283 writes both on each answer, seen in the run above; on Haiku 4.5 there is no `effort`) |
 | Sonnet 5.5 on a real plan with 2.1.283 | Choose Sonnet 5.5 and send a message. If the turn ends with "Claude Code could not use the model ...", bump `CLAUDE_CODE_VERSION` to 2.1.284 or later (a deliberate image change) |
 | A refused model is not our fault | Choose a model the plan does not have (if any); the backend's activity shows the turn as the user's, not refunded as a platform fault |
 
