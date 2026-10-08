@@ -16,6 +16,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -45,6 +46,54 @@ def browser_fields(rec: Optional[dict]) -> dict:
     if not isinstance(seconds, int) or isinstance(seconds, bool) or seconds <= 0 or not isinstance(report_id, str):
         return {}
     return {"browser_seconds": seconds, "browser_report_id": report_id}
+
+
+# Claude Code's effort levels (2.1.283 `claude --help`: "--effort <level> ... (low, medium, high, xhigh, max)").
+CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+# A model alias or id as `--model` takes it (e.g. `opus`, `claude-opus-5-5`, `claude-opus-4-8[1m]`). It starts with a
+# letter or digit, so it can never be read as another flag of the command line.
+_CLAUDE_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._\[\]-]{0,99}")
+
+
+@dataclass(frozen=True)
+class TurnOptions:
+    """What the backend says about a turn in the delivery's metadata (shared spec "New chat" and "Claude Code
+    model and effort"):
+
+    chat_epoch     metadata "chat_epoch": the chat's number of new starts. When it is higher than the last one the
+                   engine saw for the chat, the engine starts a fresh conversation for it (ClaudeRunner.run,
+                   HermesClient.run). Missing means 0.
+    claude_model   metadata "claude.model": Claude Code's `--model` for this turn; "" = the Bridge's default.
+    claude_effort  metadata "claude.effort": Claude Code's `--effort` for this turn; "" = the CLI's default.
+    """
+
+    chat_epoch: int = 0
+    claude_model: str = ""
+    claude_effort: str = ""
+
+    @classmethod
+    def from_metadata(cls, meta: Any) -> "TurnOptions":
+        """Read leniently: a value that is not what the spec says is left out (logged), so a bad field never
+        stops a message; the turn runs as if it were missing."""
+        meta = meta if isinstance(meta, dict) else {}
+        epoch = meta.get("chat_epoch", 0)
+        if epoch is None:
+            epoch = 0
+        if not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < 0:
+            log.warning("metadata chat_epoch is not a whole number >= 0; taken as 0")
+            epoch = 0
+        claude = meta.get("claude")
+        if claude is not None and not isinstance(claude, dict):
+            log.warning("metadata claude is not an object; left out")
+        claude = claude if isinstance(claude, dict) else {}
+        model, effort = claude.get("model"), claude.get("effort")
+        if model is not None and not (isinstance(model, str) and _CLAUDE_MODEL.fullmatch(model)):
+            log.warning("metadata claude.model is not a model name; the default model is used")
+            model = None
+        if effort is not None and effort not in CLAUDE_EFFORTS:
+            log.warning("metadata claude.effort is not one of %s; the default effort is used", ", ".join(CLAUDE_EFFORTS))
+            effort = None
+        return cls(chat_epoch=epoch, claude_model=model or "", claude_effort=effort or "")
 
 
 @dataclass
@@ -94,6 +143,9 @@ class DeliverRequest:
             attachments=atts, approval_id=str(raw.get("approval_id") or ""), approved=bool(raw.get("approved")),
             metadata=meta if isinstance(meta, dict) else {"value": meta},
         )
+
+    def options(self) -> TurnOptions:
+        return TurnOptions.from_metadata(self.metadata)
 
 
 def build_input(req: DeliverRequest) -> str:
@@ -160,7 +212,7 @@ class Runner(Protocol):
     def healthy(self) -> bool: ...
 
     def run(self, text: str, instructions: str, session_key: str, idempotency_key: str,
-            on_progress: Callable[[str], None], timeout: float) -> Any: ...
+            on_progress: Callable[[str], None], timeout: float, options: Optional[TurnOptions] = None) -> Any: ...
 
 
 class Sender(Protocol):
@@ -326,6 +378,7 @@ class Bridge:
                     idempotency_key=f"{req.delivery_id}#{attempts}",
                     on_progress=lambda msg: turn.publish(event(WORKING, msg)),
                     timeout=self.turn_timeout,
+                    options=req.options(),
                 )
                 if result.status != "completed":
                     reason = getattr(result, "reason", "") or ""

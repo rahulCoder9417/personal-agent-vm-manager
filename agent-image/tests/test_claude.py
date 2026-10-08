@@ -17,8 +17,9 @@ import urllib.request
 
 from bridge import browser, crew
 from bridge.claude import (LEAD_GATE, MSG_NOT_SIGNED_IN, MSG_REFUSED, ClaudeAuth, ClaudeError, ClaudeRunner,
-                           CrewEvents, LoginNotFound, Redactor, classify_failure, find_authorize_url, render_settings)
-from bridge.core import MEMORY_RULES, Bridge, DeliverRequest, DeliveryStore
+                           CrewEvents, LoginNotFound, Redactor, SessionMap, classify_failure, find_authorize_url,
+                           render_settings)
+from bridge.core import MEMORY_RULES, Bridge, DeliverRequest, DeliveryStore, TurnOptions
 from bridge.lead_gate import BLOCK, PASS, REFUSAL
 from bridge.platform import load_platform_file
 from bridge.runtime import PlatformReader, RuntimeRunner
@@ -155,10 +156,10 @@ class ClaudeRunnerTest(unittest.TestCase):
         self.runner = ClaudeRunner([self.e.cli], self.e.env, self.e.data, self.e.reader().load, auth=self.auth)
         self.progress = []
 
-    def run_turn(self, text="hello", session_key="telegram:42", timeout=20):
-        return self.runner.run(text=text, instructions="The user is talking to you through telegram.",
-                               session_key=session_key, idempotency_key="d#1", on_progress=self.progress.append,
-                               timeout=timeout)
+    def run_turn(self, text="hello", session_key="telegram:42", timeout=20, options=None, runner=None):
+        return (runner or self.runner).run(text=text, instructions="The user is talking to you through telegram.",
+                                           session_key=session_key, idempotency_key="d#1",
+                                           on_progress=self.progress.append, timeout=timeout, options=options)
 
     def test_stream_json_run_and_cli_arguments(self):
         self.e.sign_in()
@@ -387,6 +388,67 @@ class ClaudeRunnerTest(unittest.TestCase):
         self.assertNotEqual(flag(c[2]["argv"], "--session-id"), first)
         self.assertEqual(flag(c[3]["argv"], "--resume"), c[1]["session"])
         self.assertEqual(c[3]["history"], ["one", "two"])
+
+    def test_a_new_chat_starts_a_new_session(self):
+        # Shared spec "New chat": a delivery whose chat_epoch is higher than the last one this engine saw for the
+        # chat starts a new session (not resumed); a lower one changes nothing; a missing one is 0. Each engine keeps
+        # its own number, so a chat that started anew while it ran on Hermes starts anew here too.
+        self.e.sign_in()
+        self.run_turn("one")  # no options: epoch 0
+        self.run_turn("two", options=TurnOptions(chat_epoch=0))
+        self.run_turn("other chat", "web")
+        self.run_turn("three", options=TurnOptions(chat_epoch=1))
+        self.run_turn("four", options=TurnOptions(chat_epoch=1))
+        self.run_turn("five", options=TurnOptions(chat_epoch=0))  # lower than the chat's: no reset
+        again = ClaudeRunner([self.e.cli], self.e.env, self.e.data, self.e.reader().load)  # a Bridge restart
+        self.run_turn("six", options=TurnOptions(chat_epoch=1), runner=again)
+        self.run_turn("other chat again", "web", options=TurnOptions(chat_epoch=0), runner=again)
+        c = self.e.calls()
+        self.assertEqual(c[1]["history"], ["one"])
+        # The new chat: a new session, nothing of the old one.
+        self.assertIsNotNone(flag(c[3]["argv"], "--session-id"))
+        self.assertIsNone(flag(c[3]["argv"], "--resume"))
+        self.assertEqual(c[3]["history"], [])
+        self.assertNotIn(c[3]["session"], {c[0]["session"], c[1]["session"]})
+        # Then it goes on as usual, in copies of the new session, also after a lower number and a restart.
+        self.assertEqual(c[4]["history"], ["three"])
+        self.assertEqual(c[5]["history"], ["three", "four"])
+        self.assertEqual(c[6]["history"], ["three", "four", "five"])
+        # Another chat keeps its own session.
+        self.assertEqual(c[7]["history"], ["other chat"])
+        with open(os.path.join(self.e.data, ".platform", "claude-sessions.json")) as fh:
+            saved = json.load(fh)
+        self.assertEqual((saved["telegram:42"]["epoch"], saved["telegram:42"]["session_id"]), (1, c[6]["session"]))
+        self.assertEqual(saved["web"]["epoch"], 0)
+
+    def test_a_new_chat_whose_first_turn_fails_does_not_go_back(self):
+        self.e.sign_in()
+        self.run_turn("one")
+        self.e.mode("limit")
+        self.assertEqual(self.run_turn("two", options=TurnOptions(chat_epoch=1)).reason, "plan_limit")
+        self.e.mode("")
+        self.run_turn("three", options=TurnOptions(chat_epoch=1))
+        c = self.e.calls()
+        self.assertEqual(c[1]["history"], [], "the new chat's first turn ran in a new session")
+        self.assertIsNotNone(flag(c[2]["argv"], "--session-id"), "the old session is never resumed again")
+        self.assertEqual(c[2]["history"], [])
+
+    def test_the_session_map_keeps_the_epoch(self):
+        path = os.path.join(self.e.data, ".platform", "claude-sessions.json")
+        with open(path, "w") as fh:  # written by an older Bridge: no epoch
+            json.dump({"telegram:42": {"session_id": "11111111-1111-1111-1111-111111111111", "at": 1}}, fh)
+        sessions = SessionMap(path)
+        self.assertEqual(sessions.epoch("telegram:42"), 0)
+        self.assertFalse(sessions.new_chat("telegram:42", 0))
+        self.assertEqual(sessions.get("telegram:42"), "11111111-1111-1111-1111-111111111111")
+        self.assertTrue(sessions.new_chat("telegram:42", 2))
+        self.assertIsNone(sessions.get("telegram:42"))
+        self.assertFalse(sessions.new_chat("telegram:42", 1))
+        sessions.set("telegram:42", "22222222-2222-2222-2222-222222222222")
+        sessions.drop("telegram:42")  # a lost session: the chat keeps its epoch
+        self.assertEqual((SessionMap(path).get("telegram:42"), SessionMap(path).epoch("telegram:42")), (None, 2))
+        self.assertTrue(sessions.new_chat("web", 1), "a chat this engine never saw")
+        self.assertEqual(oct(os.stat(path).st_mode & 0o777), oct(0o600))
 
     def test_lost_session_starts_a_new_one(self):
         self.e.sign_in()

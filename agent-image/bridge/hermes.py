@@ -58,24 +58,35 @@ class Conversations:
     messaging platforms, not of the API server). So after a failed turn the chat starts a new conversation: the
     key gets a suffix (`#1`, `#2`, ...), and a key Hermes has not seen starts a fresh session (the API server
     docs: "A request without any continuation starts a fresh session"). What carries over: the platform's
-    memory (remember / recall) and Hermes's session_search over earlier conversations."""
+    memory (remember / recall) and Hermes's session_search over earlier conversations.
+
+    The user's "New chat" moves the chat on the same way (new_chat): the backend counts each chat's new starts
+    (the delivery's `chat_epoch`), and when a delivery's number is higher than the last one Hermes saw for the
+    chat, the chat gets a new key before the turn runs. Each record: {"generation": n, "epoch": e}. The file of an
+    older Bridge holds the bare generation; it is read as epoch 0."""
 
     def __init__(self, path: Optional[str]):
         self.path = path
         self._lock = threading.Lock()
-        self._data: dict[str, int] = {}
+        self._data: dict[str, dict[str, int]] = {}
         if path and os.path.exists(path):
             try:
                 with open(path, encoding="utf-8") as fh:
                     loaded = json.load(fh)
                 if isinstance(loaded, dict):
-                    self._data = {k: v for k, v in loaded.items() if isinstance(v, int) and v > 0}
+                    for k, v in loaded.items():
+                        if isinstance(v, dict):
+                            rec = {"generation": _count(v.get("generation")), "epoch": _count(v.get("epoch"))}
+                        else:
+                            rec = {"generation": _count(v), "epoch": 0}
+                        if rec["generation"] or rec["epoch"]:
+                            self._data[k] = rec
             except (OSError, json.JSONDecodeError):
                 log.warning("could not read %s; starting empty", path)
 
     def key(self, session_key: str) -> str:
         with self._lock:
-            generation = self._data.get(session_key, 0)
+            generation = self._data.get(session_key, {}).get("generation", 0)
         if not generation:
             return session_key
         suffix = f"#{generation}"
@@ -86,13 +97,34 @@ class Conversations:
     def failed(self, session_key: str) -> None:
         """The chat's turn failed: its next turn starts a new conversation."""
         with self._lock:
-            self._data[session_key] = self._data.get(session_key, 0) + 1
-            if self.path:
-                tmp = f"{self.path}.{secrets.token_hex(4)}.tmp"
-                fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-                with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                    json.dump(self._data, fh)
-                os.replace(tmp, self.path)
+            rec = self._data.setdefault(session_key, {"generation": 0, "epoch": 0})
+            rec["generation"] += 1
+            self._save()
+
+    def new_chat(self, session_key: str, epoch: int) -> bool:
+        """The user started a new chat (`chat_epoch` higher than the last one seen for this chat): the chat's turns
+        go on in a new conversation, as after a failed turn. A lower or equal number changes nothing. True when the
+        chat moved on."""
+        with self._lock:
+            rec = self._data.get(session_key, {"generation": 0, "epoch": 0})
+            if epoch <= rec["epoch"]:
+                return False
+            self._data[session_key] = {"generation": rec["generation"] + 1, "epoch": epoch}
+            self._save()
+        return True
+
+    def _save(self) -> None:
+        if not self.path:
+            return
+        tmp = f"{self.path}.{secrets.token_hex(4)}.tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(self._data, fh)
+        os.replace(tmp, self.path)
+
+
+def _count(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
 
 
 @dataclass
@@ -204,7 +236,7 @@ class HermesClient:
             pass
 
     def run(self, text: str, instructions: str, session_key: str, idempotency_key: str,
-            on_progress, timeout: float = 900) -> RunResult:
+            on_progress, timeout: float = 900, options: Any = None) -> RunResult:
         """Run one turn to the end. on_progress(message) is called for tool activity.
 
         The crew: on this API Hermes runs the lead's specialists in the background. The lead's run
@@ -212,11 +244,17 @@ class HermesClient:
         finish, and the client has to start the next turn. So after a run that handed work over,
         wait for the specialists and run again in the same session; the last run's answer is the
         turn's answer.
+
+        `options` (core.TurnOptions): only `chat_epoch` is used here; a higher one than the chat's last starts a
+        new conversation first. The Claude Code model and effort are not Hermes's.
         """
         instructions = f"{instructions}\n\n{crew.hermes_handoff(self.with_browser)}"
         deadline = time.monotonic() + timeout
         progress = crew.Progress(on_progress)
-        # The chat's current Hermes conversation; after a failed turn, a new one (Conversations).
+        epoch = getattr(options, "chat_epoch", 0) or 0
+        if epoch and self.conversations.new_chat(session_key, epoch):
+            log.info("hermes: a new chat for this session (chat %d); it starts a new conversation", epoch)
+        # The chat's current Hermes conversation; after a failed turn or a new chat, a new one (Conversations).
         key = self.conversations.key(session_key)
         started: list[str] = []
         try:
