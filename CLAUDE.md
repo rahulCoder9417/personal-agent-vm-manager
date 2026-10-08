@@ -4,11 +4,13 @@ The **only** service that controls Docker. It creates, wakes, stops and deletes 
 
 ## Read before doing anything
 
-The design lives in the backend repo: **`../beckend/docs/mvp-hld.md`**. The parts that matter here:
-- **0.5** Hermes inside a container · **0.6** closing containers
-- **1.1–1.2** why this is a separate service; the gRPC RPC list
-- **4** networks · **6** the vm-manager itself · **8** the `sandboxes` table
-- **9, Phase 2** what to build and the "done when…" checks
+The design lives in the backend repo: **`../beckend/docs/hld-mvp.md`** (the product and the parts) and **`../beckend/docs/backend-report.md`** (the logic, in words). The sections of the report that matter here, all in its Part D:
+- **"Containers: what the backend asks for"**: the gRPC calls and when the backend makes each
+- **"The life of a container"**: states, waking, delivering, stopping, the awake limit, the reconciler
+- **"Inside the container"**: the Bridge, the two engines, the crew, the limits, the secrets
+- **"The way out: the egress proxy"** and **"Scout's browser"**
+
+The original build phases are all built. An old "HLD x.y" reference in a code comment is mapped to its new place in the report's last section.
 
 ## What lives here
 

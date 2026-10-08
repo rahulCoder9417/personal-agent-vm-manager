@@ -11,7 +11,7 @@ Two agent runtimes, chosen per user (`SetAgentRuntime`):
   (they sign in with Anthropic; usage bills their plan). See "Claude Code runtime" below.
 The backend calls it over gRPC (`proto/vm/v1/vm.proto`, the source of truth).
 
-Design: `../beckend/docs/mvp-hld.md` sections 0.5, 0.6, 1.2, 4, 6, 8, 9 (Phase 2).
+Design: `../beckend/docs/hld-mvp.md`, and `../beckend/docs/backend-report.md` Part D ("Containers: what the backend asks for" to "Scout's browser").
 What was built vs the design: `docs/build-report.md`.
 
 ## Layout
