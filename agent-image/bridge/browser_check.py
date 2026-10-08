@@ -159,6 +159,9 @@ def run(env: dict[str, str], data_dir: str, url: str, refused: str, network: boo
             check("Chromium runs headless, without its own sandbox, with its profile in /data",
                   "--headless" in flags and "--no-sandbox" in flags
                   and f"--user-data-dir={browser.data_paths(data_dir)['profile']}" in flags, " ".join(flags))
+            missing = [f for f in browser.NO_BACKGROUND_FLAGS if f not in argv]
+            check("no background networking and no component updates (" + ", ".join(browser.NO_BACKGROUND_FLAGS)
+                  + ")", not missing, "missing: " + " ".join(missing) if missing else "")
             proxy = browser.proxy_url(env)
             if proxy:
                 check("every request goes through the egress proxy, loopback included",

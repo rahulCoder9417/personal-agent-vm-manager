@@ -15,6 +15,17 @@ Three parts:
                                     Playwright looks for its separate headless shell and fails
     --disable-dev-shm-usage        shared memory goes to TMPDIR (/data/tmp), not to the small /dev/shm
     --disable-gpu                   there is no GPU; one process less
+    --disable-background-networking, --disable-component-update
+                                    no background requests and no component updates of the browser's own.
+                                    Playwright passes both itself; they are named here too so that a newer
+                                    Playwright cannot drop them unnoticed (the self-check looks for them on
+                                    the running browser). They do NOT stop what Chrome for Testing 155 still
+                                    sends to Google when it starts: the Google account check
+                                    (accounts.google.com/ListAccounts), the push-messaging registration
+                                    (android.clients.google.com, mtalk.google.com:5228), an on-demand
+                                    component install (update.googleapis.com) and preconnects to
+                                    www.google.com. No switch or policy was found that stops the first three;
+                                    see docs/build-report.md section 9
     profile, cache, output in /data the root filesystem is read-only, and cookies stay in the user's own
                                     volume (/data/browser/profile)
     proxy = the egress proxy        every request, loopback included (Playwright adds
@@ -57,8 +68,13 @@ GUARD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "browser_mcp.py
 IDLE_SECONDS = 120  # the server closes the browser after this long without a tool call
 OUTPUT_MAX_BYTES = 20 * 1024 * 1024  # old output files (page logs) are removed above this
 CACHE_MAX_BYTES = 100 * 1024 * 1024  # Chromium's disk cache
-# Chromium flags on top of what Playwright passes itself (see the module text).
-CHROMIUM_FLAGS = ("--disable-dev-shm-usage", "--disable-gpu", f"--disk-cache-size={CACHE_MAX_BYTES}")
+# Chromium switches on top of what Playwright passes itself (see the module text). Plain switches only:
+# Playwright puts these after its own, and a second --disable-features or --enable-features would replace its
+# list instead of adding to it. Not --disable-extensions: Playwright MCP drops that one on purpose
+# (ignoreDefaultArgs), from our list too.
+NO_BACKGROUND_FLAGS = ("--disable-background-networking", "--disable-component-update")
+CHROMIUM_FLAGS = ("--disable-dev-shm-usage", "--disable-gpu", *NO_BACKGROUND_FLAGS,
+                  f"--disk-cache-size={CACHE_MAX_BYTES}")
 TOOL_TIMEOUT = 120  # seconds an engine waits for one browser tool call (a navigation may take 60)
 
 

@@ -78,7 +78,10 @@ class SettingsTest(unittest.TestCase):
                     "channel": "chromium",
                     # No Chromium sandbox: the container (gVisor) is the sandbox.
                     "chromiumSandbox": False,
-                    "args": ["--disable-dev-shm-usage", "--disable-gpu", "--disk-cache-size=104857600",
+                    # Plain switches only (a --disable-features of ours would replace Playwright's list). The
+                    # two background ones are Playwright's own defaults too; named here so they stay.
+                    "args": ["--disable-dev-shm-usage", "--disable-gpu", "--disable-background-networking",
+                             "--disable-component-update", "--disk-cache-size=104857600",
                              "--disk-cache-dir=/data/browser/cache"],
                     # Everything through the egress proxy.
                     "proxy": {"server": "http://172.30.0.2:3128"},
@@ -95,6 +98,14 @@ class SettingsTest(unittest.TestCase):
             "allowUnrestrictedFileAccess": False,
         })
         self.assertEqual(browser.IDLE_SECONDS, 120)
+        # Our switches go after Playwright's own (Playwright 1.64 appends them). A feature list of ours would
+        # replace Playwright's --disable-features list, and Playwright MCP drops --disable-extensions from any
+        # list, so neither is used.
+        args = browser.render_config(self.env, "/data")["browser"]["launchOptions"]["args"]
+        for arg in args:
+            self.assertFalse(arg.startswith(("--disable-features", "--enable-features", "--disable-extensions")), arg)
+        for flag in browser.NO_BACKGROUND_FLAGS:
+            self.assertIn(flag, args)
         # Nothing the browser writes is outside /data (the root filesystem is read-only).
         config = json.dumps(browser.render_config(self.env, "/data"))
         for path in ("/tmp", "/dev/shm", "/opt", "/root", "/var"):
@@ -815,6 +826,8 @@ class RealBrowserTest(unittest.TestCase):
                      "ok     refused: browser_run_code_unsafe",
                      "ok     the meter sees the browser open",
                      "ok     Chromium runs headless, without its own sandbox, with its profile in /data",
+                     "ok     no background networking and no component updates (--disable-background-networking, "
+                     "--disable-component-update)",
                      "ok     the page can be read (browser_snapshot)",
                      "ok     browser_close closes the browser",
                      "ok     the meter measured the time it was open",
