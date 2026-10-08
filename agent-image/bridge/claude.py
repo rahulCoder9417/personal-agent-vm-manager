@@ -4,7 +4,11 @@ Two parts:
 
 - ClaudeRunner: one delivered message = one `claude -p --output-format stream-json` run.
   Each chat (session_key) keeps its own Claude Code session (session_key -> session id,
-  stored in /data). The Platform MCP is passed with --mcp-config (this container's bearer
+  stored in /data); a turn runs in a copy of it (--fork-session) that the chat keeps only when
+  the turn completed, so a failed message is never acted on later (ClaudeRunner.run). A failed
+  run is logged without secrets or the user's message (_log_failure); a refusal by Anthropic or
+  the user's plan or account is never a platform fault (classify_failure).
+  The Platform MCP is passed with --mcp-config (this container's bearer
   token, the same as Hermes gets). Permissions: dontAsk mode with an allow list (file and
   shell work inside the sandbox, our MCP tools), so nothing ever waits for a prompt; risky
   real-world actions go through the platform's request_approval tool. The crew (crew.py) is
@@ -29,6 +33,7 @@ usage is billed to the user's own plan.
 from __future__ import annotations
 
 import fcntl
+import glob
 import hmac
 import json
 import logging
@@ -75,7 +80,16 @@ MSG_NOT_SIGNED_IN = "Connect your Claude plan again"
 MSG_LIMIT = "Your Claude plan's usage limit was reached"
 MSG_ACCOUNT = "Your Claude account can't be used right now"
 MSG_MAX_TURNS = "the agent hit its step limit before finishing"
+MSG_REFUSED = "Claude declined this request under Anthropic's usage policy"
 MSG_FAILED = "Claude Code could not finish"
+
+# The `error` of the CLI's own assistant message for a failed API call (Agent SDK, SDKAssistantMessageError:
+# code.claude.com/docs/en/agent-sdk/typescript). The ones that are the user's plan or account, not ours. A
+# refusal comes as `invalid_request` with stop_reason "refusal" (seen with 2.1.283) and is told apart by that.
+_ERROR_REASONS = {"authentication_failed": "not_signed_in", "oauth_org_not_allowed": "account",
+                  "account_on_hold": "account", "billing_error": "plan_limit", "rate_limit": "plan_limit"}
+# A Claude Code session id (a UUID): the only thing ever put into a transcript path.
+_SESSION_ID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 
 _AUTH_MARKERS = ("not logged in", "please run /login", "login expired", "oauth token revoked",
                  "oauth token has expired", "invalid api key", "authentication required", "sign in again",
@@ -132,11 +146,81 @@ def _one_line(text: str, limit: int = 200) -> str:
     return text[:limit]
 
 
-def classify_failure(text: str, retry_error: str = "", subtype: str = "") -> RunResult:
-    """Turn a failed run (result text / last api_retry category / result subtype) into a RunResult."""
+# --- what is logged about a failed run -----------------------------------------------------------------
+
+_TOKEN_PATTERNS = re.compile(
+    # name: value (the name is kept)
+    r"(?i)(?P<key>\b(?:x-bridge-secret|authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret"
+    r"|password)[\"']?\s*[:=]\s*[\"']?)(?:bearer\s+)?[^\s\"',;]+"
+    r"|\bbearer\s+\S+"  # an Authorization header value on its own
+    r"|\bsk-[a-z0-9][a-z0-9_-]{8,}")  # Anthropic / LiteLLM / OpenAI style keys
+_QUOTE_WINDOW = 24  # a logged line that shares this many characters in a row with the user's message is left out
+STDERR_LINES = 10
+
+
+class Redactor:
+    """Leaves the container's secrets and the user's message out of what the Bridge logs about a failed run.
+
+    Secrets: the values the Bridge knows (the Platform MCP token, the Bridge secret, the LiteLLM key, the user's
+    MCP server secrets) and anything shaped like a token. The user's message: a line that quotes it (any
+    _QUOTE_WINDOW characters in a row, or the whole message when it is shorter) is replaced as a whole."""
+
+    def __init__(self, secrets: list[str], message: str):
+        self.secrets = sorted({s for s in secrets if s and len(s) >= 4}, key=len, reverse=True)
+        self.message = " ".join(str(message or "").split())
+        self._windows: Optional[set[str]] = None  # built on first use: only a failed run logs anything
+
+    def _quotes_message(self, norm: str) -> bool:
+        msg = self.message
+        if len(msg) < _QUOTE_WINDOW:
+            return len(msg) >= 4 and msg in norm
+        if self._windows is None:
+            self._windows = {msg[i:i + _QUOTE_WINDOW] for i in range(len(msg) - _QUOTE_WINDOW + 1)}
+        return any(norm[i:i + _QUOTE_WINDOW] in self._windows for i in range(max(len(norm) - _QUOTE_WINDOW + 1, 0)))
+
+    def line(self, text: Any, limit: int = 300) -> str:
+        norm = " ".join(str(text or "").split())
+        if not norm:
+            return ""
+        if self._quotes_message(norm):
+            return "[left out: quotes the user's message]"
+        for s in self.secrets:
+            norm = norm.replace(s, "[secret]")
+        return _TOKEN_PATTERNS.sub(lambda m: (m.group("key") or "") + "[secret]", norm)[:limit]
+
+
+def _api_error(ev: dict) -> Optional[dict]:
+    """The CLI's own assistant message for a failed API call (it carries `error`), as a few fields."""
+    if not ev.get("error"):
+        return None
+    message = ev.get("message") if isinstance(ev.get("message"), dict) else {}
+    details = message.get("stop_details") if isinstance(message.get("stop_details"), dict) else {}
+    texts = [b.get("text") for b in _blocks(ev, "text")]
+    out = {"error": str(ev.get("error")), "stop_reason": message.get("stop_reason"), "text": texts[0] if texts else ""}
+    if details.get("type") == "refusal":
+        out["refusal_category"] = details.get("category")
+    return out
+
+
+def classify_failure(text: str, retry_error: str = "", subtype: str = "", error: str = "",
+                     refused: bool = False) -> RunResult:
+    """Turn a failed run into a RunResult, from: the result text, the last api_retry category, the result
+    subtype, the `error` of the CLI's last assistant message for a failed API call, and whether Anthropic
+    refused the request (a stop_reason of "refusal"). Only a fault of the platform's own is platform_fault:
+    that flag gives the user's credits back and tells them it was our fault."""
     low = f"{text} {retry_error}".lower()
     if subtype == "error_max_turns":
         return RunResult("failed", "", text, "max_turns", MSG_MAX_TURNS, platform_fault=False)
+    if refused:
+        # Anthropic's safeguards declined the request (the CLI already retried once on a fallback model).
+        return RunResult("failed", "", text, "refused", MSG_REFUSED, platform_fault=False)
+    reason = _ERROR_REASONS.get(error)
+    if reason == "not_signed_in":
+        return RunResult("failed", "", text, "not_signed_in", MSG_NOT_SIGNED_IN, platform_fault=False)
+    if reason == "account":
+        return RunResult("failed", "", text, "account", MSG_ACCOUNT, platform_fault=False)
+    if reason == "plan_limit" and not any(m in low for m in _LIMIT_MARKERS):
+        return RunResult("failed", "", text, "plan_limit", MSG_LIMIT, platform_fault=False)
     if any(m in low for m in _AUTH_MARKERS):
         return RunResult("failed", "", text, "not_signed_in", MSG_NOT_SIGNED_IN, platform_fault=False)
     if any(m in low for m in _ACCOUNT_MARKERS):
@@ -309,11 +393,23 @@ class ClaudeRunner:
             args += ["--model", self.model]
         if self.max_turns > 0:
             args += ["--max-turns", str(self.max_turns)]
-        args += ["--resume", session_id] if resume else ["--session-id", session_id]
+        # A turn on an existing chat continues a copy of its session ("--fork-session: When resuming, create a
+        # new session ID instead of reusing the original", CLI reference; "Fork ... creates a new session that
+        # starts with a copy of the original's history. The original stays unchanged", agent-sdk/sessions).
+        # run() keeps the copy only when the turn completes. 2.1.283 has the flag (`claude --help`).
+        args += ["--resume", session_id, "--fork-session"] if resume else ["--session-id", session_id]
         return args
 
     def run(self, text: str, instructions: str, session_key: str, idempotency_key: str,
             on_progress: Callable[[str], None], timeout: float = 900) -> RunResult:
+        """One turn. A message whose turn failed is never acted on later: the CLI writes every message into
+        the session before it calls the model, a failed one included, and on --resume the model sees it again
+        (on 2026-10-08 three messages refused for the plan's limit were all carried out 90 minutes later, with
+        the next message). So the turn runs in a copy of the chat's session (--fork-session), and the chat
+        moves on to that copy only when the turn completed. After a failure the chat keeps the session from
+        before it; the copy with the failed message is never resumed (the CLI deletes it after its retention
+        period, 30 days). A first turn that fails leaves the chat with no session, so the next one starts a
+        new session. The copy a completed turn replaced is removed (see _drop_transcript)."""
         if not installed(self.cmd, self.env):
             raise ClaudeError("claude code is not installed")
         pf = self.load_platform()
@@ -325,19 +421,26 @@ class ClaudeRunner:
                                                                    self.with_browser)))
         _write_private(self.settings_path, json.dumps(render_settings()))
         deadline = time.monotonic() + timeout
+        redact = Redactor([pf.mcp_token, pf.bridge_secret, pf.litellm_key, *(s.auth_secret for s in pf.mcp_servers)],
+                          text)
         with self._session_lock(session_key):
             known = self.sessions.get(session_key)
             result, seen = self._run_once(pf, text, instructions, known or str(uuid.uuid4()), bool(known),
-                                          on_progress, deadline)
+                                          on_progress, deadline, idempotency_key, redact)
             if known and result.status != "completed" and \
                     any(m in result.error.lower() for m in _NO_SESSION_MARKERS):
                 # The saved session is gone (e.g. volume restored): start a new one.
                 log.warning("claude session for %s not found; starting a new one", session_key)
                 self.sessions.drop(session_key)
+                known = None
                 result, seen = self._run_once(pf, text, instructions, str(uuid.uuid4()), False,
-                                              on_progress, deadline)
-            if seen:
+                                              on_progress, deadline, idempotency_key, redact)
+            if result.status == "completed" and seen:
                 self.sessions.set(session_key, seen)
+                if known and seen != known:
+                    self._drop_transcript(known, seen)
+            elif known:
+                log.info("claude turn %s failed; the chat goes on from its session before that turn", idempotency_key)
         if self.auth is not None:
             if result.status == "completed":
                 self.auth.set_connected(True)
@@ -345,8 +448,61 @@ class ClaudeRunner:
                 self.auth.set_connected(False)
         return result
 
+    def _transcript(self, session_id: str) -> Optional[str]:
+        """The transcript file of a session: $CLAUDE_CONFIG_DIR/projects/<project>/<session id>.jsonl (the sessions
+        page, "Where transcripts are stored"). None unless exactly one is found. Its content is never read."""
+        if not _SESSION_ID.fullmatch(session_id or ""):
+            return None
+        projects = glob.escape(os.path.join(self.env["CLAUDE_CONFIG_DIR"], "projects"))
+        found = glob.glob(os.path.join(projects, "*", f"{session_id}.jsonl"))
+        return found[0] if len(found) == 1 else None
+
+    def _drop_transcript(self, old: str, new: str) -> None:
+        """Remove the transcript a completed turn replaced: its copy (the fork) holds all of it, so without this
+        every turn would leave a full copy of the chat behind until the CLI's 30-day retention. Only the
+        `<id>.jsonl` file, and only when the copy is next to it; the session's folder (sub-agent transcripts,
+        saved tool output the copy may point to) stays. Checked with 2.1.283: a fork resumes with the
+        original's file gone."""
+        old_path, new_path = self._transcript(old), self._transcript(new)
+        if not old_path or not new_path or os.path.dirname(old_path) != os.path.dirname(new_path):
+            return
+        try:
+            os.remove(old_path)
+        except OSError as exc:
+            log.warning("could not remove a replaced claude transcript: %s", type(exc).__name__)
+
+    def _log_failure(self, redact: "Redactor", delivery: str, reason: str, fault: Optional[bool],
+                     returncode: Optional[int], final: Optional[dict], api_error: Optional[dict], refusal: str,
+                     retry: dict, stderr: bytes) -> None:
+        """One log line per failed run, for `docker logs`: the exit code, how the run ended, the CLI's last error
+        message, the last API retry, a refusal's category and the last lines of stderr. The container's secrets
+        and the user's message are left out (Redactor); so is any answer text."""
+        info: dict[str, Any] = {"delivery": delivery, "reason": reason, "platform_fault": fault,
+                                "exit_code": returncode}
+        if final is not None:
+            info["result"] = {k: final.get(k) for k in ("subtype", "is_error", "terminal_reason", "api_error_status",
+                                                        "stop_reason", "num_turns") if k in final}
+            errors = final.get("errors")
+            if isinstance(errors, list) and errors:
+                info["result"]["errors"] = [redact.line(e, 200) for e in errors[:3]]
+            if api_error is None and final.get("is_error") and isinstance(final.get("result"), str):
+                info["result"]["text"] = redact.line(final["result"], 300)
+        else:
+            info["result"] = None
+        if api_error is not None:
+            info["last_error"] = {**api_error, "text": redact.line(api_error.get("text"), 300)}
+        if refusal:
+            info["refusal_category"] = refusal
+        if retry:
+            info["last_retry"] = retry
+        lines = [ln for ln in stderr.decode("utf-8", "replace").splitlines() if ln.strip()][-STDERR_LINES:]
+        info["stderr"] = [redact.line(ln) for ln in lines]
+        log.warning("claude run failed: %s", json.dumps(info, ensure_ascii=False))
+
     def _run_once(self, pf: PlatformFile, text: str, instructions: str, session_id: str, resume: bool,
-                  on_progress: Callable[[str], None], deadline: float) -> tuple[RunResult, Optional[str]]:
+                  on_progress: Callable[[str], None], deadline: float, delivery: str = "",
+                  redact: Optional["Redactor"] = None) -> tuple[RunResult, Optional[str]]:
+        redact = redact or Redactor([], text)
         args = self._args(pf, instructions, session_id, resume)
         proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 cwd=self.workdir, env=self.env, start_new_session=True)
@@ -381,6 +537,9 @@ class ClaudeRunner:
         seen: Optional[str] = None
         final: Optional[dict] = None
         retry_error = ""
+        retry: dict = {}
+        api_error: Optional[dict] = None  # the CLI's last own message for a failed API call (the lead's)
+        refusal = ""  # the category of a refusal the CLI gave up on (system/model_refusal_no_fallback)
         crew_events = CrewEvents(on_progress)
         try:
             for raw in proc.stdout:
@@ -395,10 +554,15 @@ class ClaudeRunner:
                     seen = ev.get("session_id") or seen
                 elif typ == "system" and sub == "api_retry":
                     retry_error = str(ev.get("error") or "")
+                    retry = {k: ev.get(k) for k in ("error", "error_status", "attempt", "max_retries")}
                     on_progress(f"Claude is retrying ({retry_error or 'error'})")
+                elif typ == "system" and sub == "model_refusal_no_fallback":
+                    refusal = str(ev.get("api_refusal_category") or "unknown")
                 elif typ == "system" and sub in ("task_started", "task_notification"):
                     crew_events.task(ev)
                 elif typ == "assistant":
+                    if not ev.get("parent_tool_use_id"):
+                        api_error = _api_error(ev) or api_error
                     for block in _blocks(ev, "tool_use"):
                         if not crew_events.started(ev, block):
                             on_progress(f"using {_tool_label(block.get('name'))}")
@@ -424,11 +588,21 @@ class ClaudeRunner:
                 except OSError:
                     pass
             crew_events.close(stopped=timed_out.is_set() or final is None)
+        stderr = b"".join(stderr_tail)
+
+        def failed(reason: str, fault: Optional[bool]) -> None:
+            self._log_failure(redact, delivery, reason, fault, proc.returncode, final, api_error, refusal, retry,
+                              stderr)
+
         if timed_out.is_set():
+            failed("timeout", True)
             raise ClaudeError("claude code run timed out")
+        refused = bool(refusal) or (final or {}).get("stop_reason") == "refusal" or \
+            (api_error or {}).get("stop_reason") == "refusal"
+        error = (api_error or {}).get("error", "")
         if final is None:
-            err = b"".join(stderr_tail).decode("utf-8", "replace")
-            res = classify_failure(err, retry_error)
+            res = classify_failure(stderr.decode("utf-8", "replace"), retry_error, error=error, refused=refused)
+            failed(res.reason, res.platform_fault)
             if res.platform_fault:
                 raise ClaudeError(f"claude exited with code {proc.returncode} without a result")
             return res, seen
@@ -439,7 +613,9 @@ class ClaudeRunner:
         errors = final.get("errors")
         if isinstance(errors, list):
             text_err = " ".join([text_err, *[str(e) for e in errors]]).strip()
-        return classify_failure(text_err, retry_error, str(final.get("subtype") or "")), seen
+        res = classify_failure(text_err, retry_error, str(final.get("subtype") or ""), error=error, refused=refused)
+        failed(res.reason, res.platform_fault)
+        return res, seen
 
 
 def _tool_label(name: Any) -> str:

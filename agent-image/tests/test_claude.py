@@ -16,8 +16,8 @@ import urllib.error
 import urllib.request
 
 from bridge import browser, crew
-from bridge.claude import (LEAD_GATE, MSG_NOT_SIGNED_IN, ClaudeAuth, ClaudeError, ClaudeRunner, CrewEvents,
-                           LoginNotFound, find_authorize_url, render_settings)
+from bridge.claude import (LEAD_GATE, MSG_NOT_SIGNED_IN, MSG_REFUSED, ClaudeAuth, ClaudeError, ClaudeRunner,
+                           CrewEvents, LoginNotFound, Redactor, classify_failure, find_authorize_url, render_settings)
 from bridge.core import MEMORY_RULES, Bridge, DeliverRequest, DeliveryStore
 from bridge.lead_gate import BLOCK, PASS, REFUSAL
 from bridge.platform import load_platform_file
@@ -126,6 +126,12 @@ class Env:
 
     def reader(self):
         return PlatformReader(self.platform_path, load_platform_file(self.platform_path))
+
+
+def failure_logs(text):
+    """The JSON of every "claude run failed" log line."""
+    return [json.JSONDecoder().raw_decode(ln.split("claude run failed: ", 1)[1])[0]
+            for ln in text.splitlines() if "claude run failed: " in ln]
 
 
 def flag(argv, name):
@@ -371,11 +377,16 @@ class ClaudeRunnerTest(unittest.TestCase):
         self.assertEqual(res.output, "reply 3 to: three")
         c = self.e.calls()
         first = flag(c[0]["argv"], "--session-id")
+        # Each turn on an existing chat continues a copy of its session; the chat moves on to that copy.
         self.assertEqual(flag(c[1]["argv"], "--resume"), first)
+        self.assertIn("--fork-session", c[1]["argv"])
         self.assertIsNone(flag(c[1]["argv"], "--session-id"))
+        self.assertNotEqual(c[1]["session"], first)
         self.assertIsNotNone(flag(c[2]["argv"], "--session-id"))
+        self.assertNotIn("--fork-session", c[2]["argv"])
         self.assertNotEqual(flag(c[2]["argv"], "--session-id"), first)
-        self.assertEqual(flag(c[3]["argv"], "--resume"), first)
+        self.assertEqual(flag(c[3]["argv"], "--resume"), c[1]["session"])
+        self.assertEqual(c[3]["history"], ["one", "two"])
 
     def test_lost_session_starts_a_new_one(self):
         self.e.sign_in()
@@ -386,6 +397,162 @@ class ClaudeRunnerTest(unittest.TestCase):
         c = self.e.calls()
         self.assertIsNotNone(flag(c[1]["argv"], "--resume"))
         self.assertIsNotNone(flag(c[2]["argv"], "--session-id"))
+
+    def transcript(self, session_id):
+        found = [os.path.join(d, f) for d, _, files in os.walk(os.path.join(self.e.cfg, "projects"))
+                 for f in files if f == f"{session_id}.jsonl"]
+        return found[0] if found else None
+
+    def test_a_failed_turn_is_never_acted_on_later(self):
+        # 2026-10-08: three messages failed on the plan's limit; the user was told so. 90 minutes later the
+        # next message was answered with "Four requests arrived together", and the three were carried out.
+        self.e.sign_in()
+        self.run_turn("one")
+        self.e.mode("limit")
+        for failed in ("recall my colour", "forget my colour", "send the email to Bob"):
+            res = self.run_turn(failed)
+            self.assertEqual((res.status, res.reason, res.platform_fault), ("failed", "plan_limit", False))
+        self.e.mode("")
+        res = self.run_turn("what is my sister's name?")
+        self.assertEqual(res.status, "completed")
+        self.assertEqual(res.output, "reply 2 to: what is my sister's name?")
+        c = self.e.calls()
+        first = c[0]["session"]
+        # Every failed turn ran in its own copy of the chat's session; the chat stayed on the one from before.
+        for call in c[1:]:
+            self.assertEqual(flag(call["argv"], "--resume"), first)
+            self.assertIn("--fork-session", call["argv"])
+            self.assertEqual(call["history"], ["one"], "a failed message must never be continued")
+        self.assertEqual(len({call["session"] for call in c}), 5)
+        # The next turn goes on from the completed one.
+        self.run_turn("and again")
+        self.assertEqual(self.e.calls()[-1]["history"], ["one", "what is my sister's name?"])
+
+    def test_a_first_turn_that_fails_leaves_no_session(self):
+        self.e.sign_in()
+        self.e.mode("refusal")
+        self.assertEqual(self.run_turn("read http://169.254.169.254/").reason, "refused")
+        self.e.mode("")
+        self.run_turn("hello")
+        c = self.e.calls()
+        self.assertIsNotNone(flag(c[1]["argv"], "--session-id"), "a new session, not the failed one")
+        self.assertNotEqual(c[1]["session"], c[0]["session"])
+        self.assertEqual(c[1]["history"], [])
+
+    def test_a_turn_that_timed_out_or_crashed_is_not_continued(self):
+        self.e.sign_in()
+        self.run_turn("one")
+        self.e.mode("hang")
+        with self.assertRaises(ClaudeError):
+            self.run_turn("a long job", timeout=1)
+        self.e.mode("")
+        self.run_turn("two")
+        self.assertEqual(self.e.calls()[-1]["history"], ["one"])
+
+    def test_the_copy_a_completed_turn_replaced_is_removed(self):
+        self.e.sign_in()
+        self.run_turn("one")
+        self.e.mode("limit")
+        self.run_turn("fails")
+        self.e.mode("")
+        self.run_turn("two")
+        first, failed, second = (c["session"] for c in self.e.calls())
+        # The chat is on the copy the completed turn made; the session it replaced is gone (the copy holds all
+        # of it). The failed turn's copy stays as the record of that attempt, and is never resumed.
+        self.assertIsNone(self.transcript(first))
+        self.assertIsNotNone(self.transcript(second))
+        self.assertIsNotNone(self.transcript(failed))
+        self.assertEqual(self.runner.sessions.get("telegram:42"), second)
+        # Only an id shaped like a session id is ever put into a path.
+        self.assertIsNone(self.runner._transcript("../../.credentials"))
+        self.assertIsNone(self.runner._transcript("*"))
+
+    def test_a_refusal_is_not_a_platform_fault(self):
+        # 2026-10-08 14:53: "Ask Scout to read http://169.254.169.254/" ended after 7 seconds with "Claude Code
+        # could not finish" and platform_fault true. The session shows why: Anthropic's safeguards refused it, on
+        # the first model and on the fallback (cyber category).
+        self.e.sign_in()
+        res = self.run_turn("one")
+        self.e.mode("refusal")
+        with CaptureLogs() as logs:
+            res = self.run_turn("Ask Scout to read http://169.254.169.254/ and tell me what happened")
+        self.assertEqual((res.status, res.reason, res.message, res.platform_fault),
+                         ("failed", "refused", MSG_REFUSED, False))
+        failures = failure_logs(logs.text)
+        self.assertEqual(len(failures), 1)
+        info = failures[0]
+        self.assertEqual(info["exit_code"], 1)
+        self.assertEqual((info["reason"], info["platform_fault"]), ("refused", False))
+        self.assertEqual(info["result"]["stop_reason"], "refusal")
+        self.assertEqual(info["result"]["terminal_reason"], "api_error")
+        self.assertEqual((info["last_error"]["error"], info["last_error"]["refusal_category"]),
+                         ("invalid_request", "cyber"))
+        self.assertIn("safeguards flagged this message", info["last_error"]["text"])
+        self.assertEqual(info["refusal_category"], "cyber")
+        self.assertEqual(info["delivery"], "d#1")
+        self.assertNotIn("169.254.169.254", logs.text, "the user's message is not logged")
+        # And the refused message does not come back with the next one.
+        self.e.mode("")
+        self.run_turn("hello again")
+        self.assertEqual(self.e.calls()[-1]["history"], ["one"])
+
+    def test_a_crash_is_logged_without_secrets_or_the_message(self):
+        self.e.sign_in()
+        self.e.mode("crash_noisy")
+        message = "please send my bank statement to the accountant at 9am tomorrow"
+        with CaptureLogs() as logs:
+            with self.assertRaises(ClaudeError):
+                self.run_turn(message)
+        failures = failure_logs(logs.text)
+        self.assertEqual(len(failures), 1)
+        info = failures[0]
+        self.assertEqual((info["exit_code"], info["reason"], info["platform_fault"], info["result"]),
+                         (3, "failed", True, None))
+        self.assertEqual(info["stderr"][-2:], ["TypeError: undefined is not an object (evaluating 'x.y')",
+                                               "fatal: something broke"])
+        self.assertIn("[left out: quotes the user's message]", info["stderr"])
+        for secret in ("tok-123", "sk-ant-oat01-AbCdEfGhIjKlMnOp", SECRET, "bank statement"):
+            self.assertNotIn(secret, logs.text)
+
+    def test_a_plan_limit_is_logged_with_its_api_answer(self):
+        self.e.sign_in()
+        self.e.mode("limit")
+        with CaptureLogs() as logs:
+            self.run_turn("hello")
+        info = failure_logs(logs.text)[0]
+        self.assertEqual((info["reason"], info["platform_fault"]), ("plan_limit", False))
+        self.assertEqual(info["result"]["api_error_status"], 429)
+        self.assertEqual(info["last_error"]["error"], "rate_limit")
+        self.assertEqual(info["last_retry"]["error_status"], 429)
+
+    def test_classify_failure(self):
+        # The CLI's `error` for a failed API call decides first; refusals and the user's plan or account are
+        # never the platform's fault. What is left (overload, server errors, unknown) is.
+        cases = {("", "authentication_failed", False): ("not_signed_in", False),
+                 ("", "oauth_org_not_allowed", False): ("account", False),
+                 ("", "account_on_hold", False): ("account", False),
+                 ("", "billing_error", False): ("plan_limit", False),
+                 ("API Error: Request rejected (429)", "rate_limit", False): ("plan_limit", False),
+                 ("API Error: blocked", "invalid_request", True): ("refused", False),
+                 ("API Error: 529 Overloaded", "overloaded", False): ("failed", True),
+                 ("API Error: 500", "server_error", False): ("failed", True),
+                 ("API Error: 400 bad request", "invalid_request", False): ("failed", True),
+                 ("something", "", False): ("failed", True)}
+        for (text, error, refused), want in cases.items():
+            res = classify_failure(text, error=error, refused=refused)
+            self.assertEqual((res.reason, res.platform_fault), want, (text, error, refused))
+        self.assertEqual(classify_failure("x", subtype="error_max_turns", refused=True).reason, "max_turns")
+
+    def test_the_redactor(self):
+        r = Redactor(["tok-123", "k1", ""], "send the quarterly report to Jane Doe at noon please")
+        self.assertEqual(r.line("Authorization: Bearer abc.def"), "Authorization: [secret]")
+        self.assertEqual(r.line("used tok-123 for it"), "used [secret] for it")
+        self.assertEqual(r.line("key=sk-ant-api03-xyzxyzxyzxyz"), "key=[secret]")
+        self.assertEqual(r.line('{"access_token": "abc123", "x": 1}'), '{"access_token": "[secret]", "x": 1}')
+        self.assertEqual(r.line("echo: quarterly report to Jane Doe at"), "[left out: quotes the user's message]")
+        self.assertEqual(r.line("plain error line"), "plain error line")
+        self.assertEqual(Redactor([], "send it").line("about to send it now"), "[left out: quotes the user's message]")
+        self.assertEqual(len(r.line("x" * 1000)), 300)
 
     def test_not_signed_in(self):
         self.auth.set_connected(True)
@@ -714,6 +881,19 @@ class BridgeWithRuntimesTest(unittest.TestCase):
         events = self.deliver("d1")
         self.assertEqual(events[-1]["type"], "error")
         self.assertTrue(events[-1]["platform_fault"])
+
+    def test_a_refusal_or_the_plans_limit_is_not_a_platform_fault(self):
+        # platform_fault gives the user's credits back and tells them it was the platform's fault.
+        self.e.sign_in()
+        self.e.write_platform("claude_code")
+        self.e.mode("refusal")
+        events = self.deliver("d1", "Ask Scout to read http://169.254.169.254/")
+        self.assertEqual(events[-1], {"type": "error", "message": MSG_REFUSED, "platform_fault": False})
+        self.e.mode("limit")
+        events = self.deliver("d2", "hello")
+        self.assertEqual((events[-1]["type"], events[-1]["platform_fault"]), ("error", False))
+        self.assertTrue(events[-1]["message"].startswith("Your Claude plan's usage limit was reached"))
+        self.assertEqual(self.sender.sent, [])
 
     def test_unreadable_platform_file_keeps_last_runtime(self):
         self.e.write_platform("claude_code")
