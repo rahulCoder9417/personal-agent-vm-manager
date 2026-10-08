@@ -30,6 +30,8 @@ type FakeBridge struct {
 	Block  chan struct{}
 	// onEvent runs after each event is handed out (lets tests look at state mid-turn).
 	OnEvent func(userID string, ev bridge.Event)
+	// OnHealth runs at the start of each /healthz call (lets tests make a health check slow).
+	OnHealth func(userID string)
 
 	// Claude Code sign-in, per user (like the Bridge's `claude auth login | logout`).
 	logins    map[string]string // user -> pending login id
@@ -80,6 +82,9 @@ func (b *FakeBridge) Health(_ context.Context, addr string) (bridge.Health, erro
 		return bridge.Health{}, errors.New("connection refused")
 	}
 	uid := c.Labels[labelUserID]
+	if b.OnHealth != nil {
+		b.OnHealth(uid)
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.unhealthy[uid] {

@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/personal-agent/vm-manager/internal/docker"
@@ -53,9 +54,15 @@ func (m *Manager) ReapOnce(ctx context.Context) {
 		if now.Sub(sb.LastActiveAt) < m.cfg.IdleTimeout || m.inflightCount(sb.UserID) > 0 || m.loginPending(sb.UserID) {
 			continue // a pending Claude sign-in counts as busy: its CLI waits in the container
 		}
+		// Wait a little for the user's lock rather than give up at once. The health checker ticks at the
+		// same moments as the reaper (both loops start together; 30 s and 60 s) and holds the lock while it
+		// asks the Bridge, so a reaper that took only an instant to try lost about every other round, and an
+		// idle container stayed up minutes longer than IdleTimeout (6 to 7 minutes on 2026-10-08). A long
+		// operation (a wake, a snapshot) still makes it skip to the next round.
 		l := m.userLock(sb.UserID)
-		if !l.TryLock() {
-			continue // busy with something else; next round
+		if !tryLockWithin(ctx, l, m.reaperLockWait) {
+			m.log.Info("reaper: sandbox busy with another operation; trying next round", "user_id", sb.UserID)
+			continue
 		}
 		func() {
 			defer l.Unlock()
@@ -76,6 +83,24 @@ func (m *Manager) ReapOnce(ctx context.Context) {
 				m.log.Error("reaper: stop failed", "user_id", cur.UserID, "err", err)
 			}
 		}()
+	}
+}
+
+// tryLockWithin takes l if it becomes free within d (it never waits past ctx).
+func tryLockWithin(ctx context.Context, l *sync.Mutex, d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	for {
+		if l.TryLock() {
+			return true
+		}
+		if !time.Now().Before(deadline) || ctx.Err() != nil {
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(20 * time.Millisecond):
+		}
 	}
 }
 

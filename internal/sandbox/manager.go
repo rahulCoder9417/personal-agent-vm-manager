@@ -89,6 +89,9 @@ type Manager struct {
 
 	// PollInterval is how often Wake polls the Bridge health while starting.
 	PollInterval time.Duration
+	// reaperLockWait is how long the idle reaper waits for a user's lock that another short operation
+	// (a health check, the reconciler) holds, before it leaves that sandbox to its next round.
+	reaperLockWait time.Duration
 
 	locksMu sync.Mutex
 	locks   map[string]*sync.Mutex // per-user lifecycle lock
@@ -109,13 +112,15 @@ func New(cfg *config.Config, st store.Store, eng docker.Engine, br BridgeAPI, eg
 	return &Manager{
 		cfg: cfg, store: st, eng: eng, br: br, eg: eg, clk: clk, log: log,
 		PollInterval: 250 * time.Millisecond,
-		locks:        map[string]*sync.Mutex{},
-		secrets:      map[string]string{},
-		inflight:     map[string]int{},
-		healthFails:  map[string]int{},
-		restarts:     map[string]int{},
-		logins:       map[string]time.Time{},
-		claudeOps:    map[string]int{},
+		// A health check holds the lock for an inspect and one /healthz call (5 s timeout).
+		reaperLockWait: 10 * time.Second,
+		locks:          map[string]*sync.Mutex{},
+		secrets:        map[string]string{},
+		inflight:       map[string]int{},
+		healthFails:    map[string]int{},
+		restarts:       map[string]int{},
+		logins:         map[string]time.Time{},
+		claudeOps:      map[string]int{},
 	}
 }
 
