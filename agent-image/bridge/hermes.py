@@ -9,6 +9,7 @@ to its crew, see HermesClient.run). Hermes keeps one conversation per
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -46,6 +47,54 @@ class HermesError(Exception):
     """Hermes could not run the turn (not the user's fault)."""
 
 
+class Conversations:
+    """session_key -> the X-Hermes-Session-Key of the chat's current Hermes conversation, persisted in /data.
+
+    A message whose turn failed is never acted on later. Hermes saves a turn to its session on every exit path, a
+    failed one included (agent/session_persistence.py `_persist_session`: "Save to SQLite on any exit path";
+    agent/turn_recovery.py persists before it returns a failed result, at the pinned commit), and the next run
+    with the same key loads that session again (api_server_runs.py: a declared X-Hermes-Session-Key conversation
+    loads its transcript). Its API has no documented way to take a turn back (`/undo` is a chat command of its
+    messaging platforms, not of the API server). So after a failed turn the chat starts a new conversation: the
+    key gets a suffix (`#1`, `#2`, ...), and a key Hermes has not seen starts a fresh session (the API server
+    docs: "A request without any continuation starts a fresh session"). What carries over: the platform's
+    memory (remember / recall) and Hermes's session_search over earlier conversations."""
+
+    def __init__(self, path: Optional[str]):
+        self.path = path
+        self._lock = threading.Lock()
+        self._data: dict[str, int] = {}
+        if path and os.path.exists(path):
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    loaded = json.load(fh)
+                if isinstance(loaded, dict):
+                    self._data = {k: v for k, v in loaded.items() if isinstance(v, int) and v > 0}
+            except (OSError, json.JSONDecodeError):
+                log.warning("could not read %s; starting empty", path)
+
+    def key(self, session_key: str) -> str:
+        with self._lock:
+            generation = self._data.get(session_key, 0)
+        if not generation:
+            return session_key
+        suffix = f"#{generation}"
+        if len(session_key) + len(suffix) <= 256:  # Hermes takes at most 256 characters
+            return session_key + suffix
+        return f"{session_key[:200]}~{hashlib.sha256(session_key.encode()).hexdigest()[:16]}{suffix}"
+
+    def failed(self, session_key: str) -> None:
+        """The chat's turn failed: its next turn starts a new conversation."""
+        with self._lock:
+            self._data[session_key] = self._data.get(session_key, 0) + 1
+            if self.path:
+                tmp = f"{self.path}.{secrets.token_hex(4)}.tmp"
+                fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    json.dump(self._data, fh)
+                os.replace(tmp, self.path)
+
+
 @dataclass
 class RunResult:
     status: str  # completed | failed | cancelled | interrupted
@@ -58,8 +107,9 @@ class HermesClient:
     """Minimal client for Hermes's local API server (no proxy: loopback only)."""
 
     def __init__(self, base_url: str, api_key: str, approval_choice: str = "deny", poll_interval: float = 2.0,
-                 with_browser: bool = False):
+                 with_browser: bool = False, conversations_path: Optional[str] = None):
         self.with_browser = with_browser  # Scout's browser is turned on for this user: the briefs say so
+        self.conversations = Conversations(conversations_path)
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.approval_choice = approval_choice
@@ -166,22 +216,41 @@ class HermesClient:
         instructions = f"{instructions}\n\n{crew.hermes_handoff(self.with_browser)}"
         deadline = time.monotonic() + timeout
         progress = crew.Progress(on_progress)
-        result, handed_over = self._run_once(text, instructions, session_key, idempotency_key, on_progress,
-                                             progress, deadline)
-        rounds = 0
-        while result.status == "completed" and handed_over and rounds < MAX_CREW_ROUNDS:
-            if not self._wait_for_crew(deadline):
-                break  # Hermes does not say whether they are done: keep the lead's status as the answer
-            progress.finish_all()
-            rounds += 1
-            result, handed_over = self._run_once(CREW_FOLLOW_UP, instructions, session_key,
-                                                 f"{idempotency_key}/crew{rounds}", on_progress, progress, deadline)
+        # The chat's current Hermes conversation; after a failed turn, a new one (Conversations).
+        key = self.conversations.key(session_key)
+        started: list[str] = []
+        try:
+            result, handed_over = self._run_once(text, instructions, key, idempotency_key, on_progress,
+                                                 progress, deadline, started)
+            rounds = 0
+            while result.status == "completed" and handed_over and rounds < MAX_CREW_ROUNDS:
+                if not self._wait_for_crew(deadline):
+                    break  # Hermes does not say whether they are done: keep the lead's status as the answer
+                progress.finish_all()
+                rounds += 1
+                result, handed_over = self._run_once(CREW_FOLLOW_UP, instructions, key,
+                                                     f"{idempotency_key}/crew{rounds}", on_progress, progress,
+                                                     deadline, started)
+        except Exception:
+            if started:  # Hermes has the turn's message in its session: never continue that conversation
+                self._turn_failed(session_key, idempotency_key)
+            raise
+        if result.status != "completed":
+            self._turn_failed(session_key, idempotency_key)
         return result
 
+    def _turn_failed(self, session_key: str, idempotency_key: str) -> None:
+        self.conversations.failed(session_key)
+        log.info("hermes turn %s failed; the chat's next turn starts a new conversation", idempotency_key)
+
     def _run_once(self, text: str, instructions: str, session_key: str, idempotency_key: str, on_progress,
-                  progress: crew.Progress, deadline: float) -> tuple[RunResult, bool]:
-        """One Hermes run. Returns (result, whether specialists are still working in the background)."""
+                  progress: crew.Progress, deadline: float,
+                  started: Optional[list] = None) -> tuple[RunResult, bool]:
+        """One Hermes run. Returns (result, whether specialists are still working in the background).
+        `session_key` is the conversation's X-Hermes-Session-Key; `started` gets the run id once Hermes has it."""
         run_id = self.start_run(text, instructions, session_key, idempotency_key)
+        if started is not None:
+            started.append(run_id)
         children: set[str] = set()  # started and not yet finished
         detached = False
         try:
