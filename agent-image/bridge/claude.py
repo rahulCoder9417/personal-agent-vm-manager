@@ -6,9 +6,11 @@ Two parts:
   Each chat (session_key) keeps its own Claude Code session (session_key -> session id,
   stored in /data); a turn runs in a copy of it (--fork-session) that the chat keeps only when
   the turn completed, so a failed message is never acted on later (ClaudeRunner.run). The user's
-  "New chat" (a higher `chat_epoch` in the delivery's metadata) starts a new session for the chat.
-  A failed run is logged without secrets or the user's message (_log_failure); a refusal by Anthropic or
-  the user's plan or account is never a platform fault (classify_failure).
+  "New chat" (a higher `chat_epoch` in the delivery's metadata) starts a new session for the chat,
+  and the model and effort the user chose go to the CLI as --model and --effort. A failed
+  run is logged without secrets or the user's message (_log_failure); a refusal by Anthropic or
+  the user's plan or account, or of the model or effort the user chose, is never a platform fault
+  (classify_failure).
   The Platform MCP is passed with --mcp-config (this container's bearer
   token, the same as Hermes gets). Permissions: dontAsk mode with an allow list (file and
   shell work inside the sandbox, our MCP tools), so nothing ever waits for a prompt; risky
@@ -70,6 +72,7 @@ STRIPPED_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL
                 "ANTHROPIC_PROFILE", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY")
 
 AUTO_MEMORY_ENV = "CLAUDE_CODE_DISABLE_AUTO_MEMORY"
+EFFORT_ENV = "CLAUDE_CODE_EFFORT_LEVEL"
 
 # The lead's built-in tools, allowed without a prompt (everything else is denied in dontAsk mode). No web
 # tool: the web is Scout's (crew.py).
@@ -82,6 +85,7 @@ MSG_LIMIT = "Your Claude plan's usage limit was reached"
 MSG_ACCOUNT = "Your Claude account can't be used right now"
 MSG_MAX_TURNS = "the agent hit its step limit before finishing"
 MSG_REFUSED = "Claude declined this request under Anthropic's usage policy"
+MSG_CHOICE = "Claude Code could not use the model or thinking effort chosen in Settings"
 MSG_FAILED = "Claude Code could not finish"
 
 # The `error` of the CLI's own assistant message for a failed API call (Agent SDK, SDKAssistantMessageError:
@@ -111,7 +115,7 @@ class RunResult:
     status: str  # completed | failed
     output: str
     error: str = ""
-    reason: str = ""  # not_signed_in | plan_limit | account | max_turns | failed
+    reason: str = ""  # not_signed_in | plan_limit | account | refused | model_choice | max_turns | failed
     message: str = ""  # safe to show the user
     platform_fault: Optional[bool] = None
 
@@ -132,6 +136,10 @@ def child_env(env: dict[str, str]) -> dict[str, str]:
     # never taken from the container's env ("0" would force it on). Session transcripts, and so --resume, are
     # not part of it.
     out[AUTO_MEMORY_ENV] = "1"
+    # The effort is the user's choice, passed per turn with --effort. This variable would win over that flag and
+    # over a specialist's own level (code.claude.com/docs/en/model-config "Adjust effort level"; seen with 2.1.283:
+    # CLAUDE_CODE_EFFORT_LEVEL=low and --effort xhigh sent effort "low"), so the CLI never gets it.
+    out.pop(EFFORT_ENV, None)
     return out
 
 
@@ -203,18 +211,36 @@ def _api_error(ev: dict) -> Optional[dict]:
     return out
 
 
+def _refuses_choice(text: str, error: str, status: Any, model: str, effort: str) -> bool:
+    """Whether a failed API call refused the model or the effort the user chose for this turn. 2.1.283 against a
+    fake API: a 404 for the model ends with the CLI's error code `model_not_found` and "There's an issue with the
+    selected model (<id>). It may not exist or you may not have access to it. ..."; a 400 ends with `unknown` and
+    "API Error: 400 <the API's message>", which names the model or the effort it is about."""
+    low = text.lower()
+    if model and (error == "model_not_found" or (status in (400, 404) and model.lower() in low)):
+        return True
+    return bool(effort) and status == 400 and "effort" in low
+
+
 def classify_failure(text: str, retry_error: str = "", subtype: str = "", error: str = "",
-                     refused: bool = False) -> RunResult:
+                     refused: bool = False, status: Any = None, model: str = "", effort: str = "") -> RunResult:
     """Turn a failed run into a RunResult, from: the result text, the last api_retry category, the result
-    subtype, the `error` of the CLI's last assistant message for a failed API call, and whether Anthropic
-    refused the request (a stop_reason of "refusal"). Only a fault of the platform's own is platform_fault:
-    that flag gives the user's credits back and tells them it was our fault."""
+    subtype, the `error` of the CLI's last assistant message for a failed API call, whether Anthropic
+    refused the request (a stop_reason of "refusal"), the API's status (`api_error_status` of the result) and the
+    model and effort the user chose for this turn ("" when the turn runs on the defaults). Only a fault of the
+    platform's own is platform_fault: that flag gives the user's credits back and tells them it was our fault."""
     low = f"{text} {retry_error}".lower()
     if subtype == "error_max_turns":
         return RunResult("failed", "", text, "max_turns", MSG_MAX_TURNS, platform_fault=False)
     if refused:
         # Anthropic's safeguards declined the request (the CLI already retried once on a fallback model).
         return RunResult("failed", "", text, "refused", MSG_REFUSED, platform_fault=False)
+    if _refuses_choice(text, error, status, model, effort):
+        # The user's plan or Anthropic does not take the model or effort the user chose: their choice, not ours.
+        # The CLI's own message says which.
+        detail = _one_line(text, 300)
+        return RunResult("failed", "", text, "model_choice", f"{MSG_CHOICE}: {detail}" if detail else MSG_CHOICE,
+                         platform_fault=False)
     reason = _ERROR_REASONS.get(error)
     if reason == "not_signed_in":
         return RunResult("failed", "", text, "not_signed_in", MSG_NOT_SIGNED_IN, platform_fault=False)
@@ -400,7 +426,8 @@ class ClaudeRunner:
                 lock = self._session_locks[session_key] = threading.Lock()
             return lock
 
-    def _args(self, pf: PlatformFile, instructions: str, session_id: str, resume: bool) -> list[str]:
+    def _args(self, pf: PlatformFile, instructions: str, session_id: str, resume: bool, model: str = "",
+              effort: str = "") -> list[str]:
         # Permission rules are the session's: the lead's and every specialist's calls are checked against
         # them. So the allow list also names what only Scout uses (its built-in web search and, when the
         # browser is turned on for the user, the browser tools by name), and the deny list only what nobody
@@ -420,8 +447,15 @@ class ClaudeRunner:
                 # The crew as sub-agents of this (lead) session; each has its own tool list.
                 "--agents", json.dumps(crew.claude_agents(PLATFORM_SERVER_NAME, self.crew_model, self.with_browser)),
                 "--append-system-prompt", f"{instructions}\n\n{crew.CLAUDE_HANDOFF}"]
-        if self.model:
-            args += ["--model", self.model]
+        # The model and effort: the user's choice for this turn, else the Bridge's default model and the CLI's
+        # default effort. 2.1.283 (`claude --help`): "--model <model> ... an alias for the latest model (e.g.
+        # 'fable', 'opus', or 'sonnet') or a model's full name"; "--effort <level> Effort level for the current
+        # session (low, medium, high, xhigh, max)". Both apply to the lead; a specialist whose definition says
+        # `inherit` runs on the lead's model at the session's effort (crew.claude_agents).
+        if model:
+            args += ["--model", model]
+        if effort:
+            args += ["--effort", effort]
         if self.max_turns > 0:
             args += ["--max-turns", str(self.max_turns)]
         # A turn on an existing chat continues a copy of its session ("--fork-session: When resuming, create a
@@ -444,10 +478,15 @@ class ClaudeRunner:
 
         `options` (core.TurnOptions, from the delivery's metadata): a `chat_epoch` higher than the one kept for the
         chat means the user started a new chat, so the chat leaves its session and this turn starts a new one (not
-        resumed)."""
+        resumed). `claude_model` / `claude_effort` are passed as --model / --effort; the model wins over the
+        Bridge's default (BRIDGE_CLAUDE_MODEL)."""
         if not installed(self.cmd, self.env):
             raise ClaudeError("claude code is not installed")
         epoch = getattr(options, "chat_epoch", 0) or 0
+        model = getattr(options, "claude_model", "") or ""
+        effort = getattr(options, "claude_effort", "") or ""
+        choice = {"model": model, "effort": effort}  # the user's own choice, for classify_failure
+        model = model or self.model
         pf = self.load_platform()
         os.makedirs(self.workdir, mode=0o700, exist_ok=True)
         os.makedirs(self.env["CLAUDE_CONFIG_DIR"], mode=0o700, exist_ok=True)
@@ -459,6 +498,7 @@ class ClaudeRunner:
         deadline = time.monotonic() + timeout
         redact = Redactor([pf.mcp_token, pf.bridge_secret, pf.litellm_key, *(s.auth_secret for s in pf.mcp_servers)],
                           text)
+        how = {"model": model, "effort": effort, "choice": choice}
         with self._session_lock(session_key):
             if epoch and self.sessions.new_chat(session_key, epoch):
                 # The user started a new chat: this turn starts a new session; the old one is never resumed (its
@@ -466,7 +506,7 @@ class ClaudeRunner:
                 log.info("claude turn %s: a new chat (chat %d); it starts a new session", idempotency_key, epoch)
             known = self.sessions.get(session_key)
             result, seen = self._run_once(pf, text, instructions, known or str(uuid.uuid4()), bool(known),
-                                          on_progress, deadline, idempotency_key, redact)
+                                          on_progress, deadline, idempotency_key, redact, **how)
             if known and result.status != "completed" and \
                     any(m in result.error.lower() for m in _NO_SESSION_MARKERS):
                 # The saved session is gone (e.g. volume restored): start a new one.
@@ -474,7 +514,7 @@ class ClaudeRunner:
                 self.sessions.drop(session_key)
                 known = None
                 result, seen = self._run_once(pf, text, instructions, str(uuid.uuid4()), False,
-                                              on_progress, deadline, idempotency_key, redact)
+                                              on_progress, deadline, idempotency_key, redact, **how)
             if result.status == "completed" and seen:
                 self.sessions.set(session_key, seen)
                 if known and seen != known:
@@ -513,12 +553,13 @@ class ClaudeRunner:
 
     def _log_failure(self, redact: "Redactor", delivery: str, reason: str, fault: Optional[bool],
                      returncode: Optional[int], final: Optional[dict], api_error: Optional[dict], refusal: str,
-                     retry: dict, stderr: bytes) -> None:
+                     retry: dict, stderr: bytes, model: str = "", effort: str = "") -> None:
         """One log line per failed run, for `docker logs`: the exit code, how the run ended, the CLI's last error
-        message, the last API retry, a refusal's category and the last lines of stderr. The container's secrets
-        and the user's message are left out (Redactor); so is any answer text."""
+        message, the last API retry, a refusal's category, the last lines of stderr, and the model and effort the
+        run was given ("" = the default). The container's secrets and the user's message are left out (Redactor);
+        so is any answer text."""
         info: dict[str, Any] = {"delivery": delivery, "reason": reason, "platform_fault": fault,
-                                "exit_code": returncode}
+                                "exit_code": returncode, "model": model, "effort": effort}
         if final is not None:
             info["result"] = {k: final.get(k) for k in ("subtype", "is_error", "terminal_reason", "api_error_status",
                                                         "stop_reason", "num_turns") if k in final}
@@ -541,9 +582,13 @@ class ClaudeRunner:
 
     def _run_once(self, pf: PlatformFile, text: str, instructions: str, session_id: str, resume: bool,
                   on_progress: Callable[[str], None], deadline: float, delivery: str = "",
-                  redact: Optional["Redactor"] = None) -> tuple[RunResult, Optional[str]]:
+                  redact: Optional["Redactor"] = None, model: str = "", effort: str = "",
+                  choice: Optional[dict] = None) -> tuple[RunResult, Optional[str]]:
+        """One CLI run. `model` / `effort` go on the command line; `choice` is what of them the user chose
+        ({"model", "effort"}), so a refusal of it is not a platform fault."""
         redact = redact or Redactor([], text)
-        args = self._args(pf, instructions, session_id, resume)
+        choice = choice or {}
+        args = self._args(pf, instructions, session_id, resume, model, effort)
         proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 cwd=self.workdir, env=self.env, start_new_session=True)
         timed_out = threading.Event()
@@ -632,7 +677,7 @@ class ClaudeRunner:
 
         def failed(reason: str, fault: Optional[bool]) -> None:
             self._log_failure(redact, delivery, reason, fault, proc.returncode, final, api_error, refusal, retry,
-                              stderr)
+                              stderr, model, effort)
 
         if timed_out.is_set():
             failed("timeout", True)
@@ -653,7 +698,9 @@ class ClaudeRunner:
         errors = final.get("errors")
         if isinstance(errors, list):
             text_err = " ".join([text_err, *[str(e) for e in errors]]).strip()
-        res = classify_failure(text_err, retry_error, str(final.get("subtype") or ""), error=error, refused=refused)
+        res = classify_failure(text_err, retry_error, str(final.get("subtype") or ""), error=error, refused=refused,
+                               status=final.get("api_error_status"), model=choice.get("model", ""),
+                               effort=choice.get("effort", ""))
         failed(res.reason, res.platform_fault)
         return res, seen
 

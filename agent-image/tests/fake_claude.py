@@ -3,6 +3,7 @@
 State lives in $CLAUDE_CONFIG_DIR:
   .credentials.json   present = signed in (written by `auth login`, removed by `auth logout`)
   fake_mode           optional behaviour switch: limit | refusal | crash | crash_noisy | hang | max_turns |
+                      model_not_found (the API's 404 for --model) | effort_refused (a 400 about --effort) |
                       login_hang | login_no_url |
                       crew (the lead starts specialists in the foreground) | crew_background |
                       crew_unreported (a background specialist whose end the stream never reports) |
@@ -120,7 +121,7 @@ def print_mode(args) -> int:
                                                    "HTTPS_PROXY", "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH",
                                                    "CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS",
                                                    "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS",
-                                                   "CLAUDE_CODE_DISABLE_AUTO_MEMORY")},
+                                                   "CLAUDE_CODE_DISABLE_AUTO_MEMORY", "CLAUDE_CODE_EFFORT_LEVEL")},
             "mcp": mcp, "mcp_mode": oct(os.stat(mcp_path).st_mode & 0o777) if mcp_path else None,
             "agents": agents, "settings": settings,
             "settings_mode": oct(os.stat(settings_path).st_mode & 0o777) if settings is not None else None}
@@ -203,6 +204,21 @@ def print_mode(args) -> int:
         out({"type": "result", "subtype": "success", "is_error": True, "terminal_reason": "api_error",
              "api_error_status": None, "stop_reason": "refusal", "num_turns": 2, "result": text,
              "session_id": sid})
+        return 1
+    if m in ("model_not_found", "effort_refused"):
+        # As 2.1.283 reports the API's 404 for the model (its own error code and text) and a 400 about the effort
+        # (its error code `unknown`, "API Error: 400 " and the API's message), seen against a fake API.
+        model = flag(args, "--model") or "claude-default"
+        if m == "model_not_found":
+            error, status = "model_not_found", 404
+            text = (f"There's an issue with the selected model ({model}). It may not exist or you may not have "
+                    "access to it. Run --model to pick a different model.")
+        else:
+            error, status = "unknown", 400
+            text = f"API Error: 400 output_config.effort: {flag(args, '--effort')} is not available for this model"
+        msg(sid, "assistant", [{"type": "text", "text": text}], error=error)
+        out({"type": "result", "subtype": "success", "is_error": True, "terminal_reason": "api_error",
+             "api_error_status": status, "result": text, "session_id": sid})
         return 1
     if m == "max_turns":
         out({"type": "result", "subtype": "error_max_turns", "is_error": True, "session_id": sid})
