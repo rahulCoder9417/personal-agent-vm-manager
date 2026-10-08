@@ -16,9 +16,9 @@ import urllib.error
 import urllib.request
 
 from bridge import browser, crew
-from bridge.claude import (LEAD_GATE, MSG_NOT_SIGNED_IN, MSG_REFUSED, ClaudeAuth, ClaudeError, ClaudeRunner,
-                           CrewEvents, LoginNotFound, Redactor, SessionMap, classify_failure, find_authorize_url,
-                           render_settings)
+from bridge.claude import (LEAD_GATE, MSG_CHOICE, MSG_NOT_SIGNED_IN, MSG_REFUSED, ClaudeAuth, ClaudeError,
+                           ClaudeRunner, CrewEvents, LoginNotFound, Redactor, SessionMap, classify_failure,
+                           find_authorize_url, render_settings)
 from bridge.core import MEMORY_RULES, Bridge, DeliverRequest, DeliveryStore, TurnOptions
 from bridge.lead_gate import BLOCK, PASS, REFUSAL
 from bridge.platform import load_platform_file
@@ -450,6 +450,60 @@ class ClaudeRunnerTest(unittest.TestCase):
         self.assertTrue(sessions.new_chat("web", 1), "a chat this engine never saw")
         self.assertEqual(oct(os.stat(path).st_mode & 0o777), oct(0o600))
 
+    def test_the_model_and_effort_of_the_turn(self):
+        # Shared spec "Claude Code model and effort": --model and --effort (2.1.283 `claude --help`). The turn's
+        # model wins over the Bridge's default; the specialists inherit the lead's model and the session's effort.
+        self.e.sign_in()
+        runner = ClaudeRunner([self.e.cli], {**self.e.env, "CLAUDE_CODE_EFFORT_LEVEL": "low"}, self.e.data,
+                              self.e.reader().load, model="sonnet")
+        self.run_turn("one", options=TurnOptions(claude_model="claude-opus-5-5", claude_effort="xhigh"), runner=runner)
+        self.run_turn("two", options=TurnOptions(claude_effort="max"), runner=runner)
+        self.run_turn("three", runner=runner)
+        self.run_turn("four", options=TurnOptions(claude_model="claude-fable-5-1"), runner=self.runner)
+        c = self.e.calls()
+        self.assertEqual([(flag(x["argv"], "--model"), flag(x["argv"], "--effort")) for x in c],
+                         [("claude-opus-5-5", "xhigh"), ("sonnet", "max"), ("sonnet", None), ("claude-fable-5-1", None)])
+        self.assertNotIn("--effort", self.e.calls()[3]["argv"])
+        for call in c:
+            self.assertEqual({a["model"] for a in call["agents"].values()}, {"inherit"})
+            self.assertFalse([a for a in call["agents"].values() if "effort" in a])
+            # The variable would beat --effort (seen with 2.1.283): the CLI never gets it.
+            self.assertIsNone(call["env"]["CLAUDE_CODE_EFFORT_LEVEL"])
+        # A turn on an existing chat on another model still continues a copy of the chat's session.
+        self.assertEqual(c[1]["history"], ["one"])
+        self.assertIn("--fork-session", c[1]["argv"])
+        # A pinned crew model stays pinned.
+        crew_runner = ClaudeRunner([self.e.cli], self.e.env, self.e.data, self.e.reader().load, crew_model="haiku")
+        self.run_turn("five", options=TurnOptions(claude_model="claude-opus-5-5"), runner=crew_runner)
+        self.assertEqual({a["model"] for a in self.e.calls()[-1]["agents"].values()}, {"haiku"})
+
+    def test_a_refused_model_or_effort_is_the_users_choice(self):
+        # Shared spec: if the user's plan or Anthropic refuses the chosen model or effort, the turn ends with the
+        # CLI's message, not a platform fault. The same refusal of the Bridge's own default model is ours.
+        self.e.sign_in()
+        self.e.mode("model_not_found")
+        with CaptureLogs() as logs:
+            res = self.run_turn("hello", options=TurnOptions(claude_model="claude-sonnet-5-5", claude_effort="high"))
+        self.assertEqual((res.status, res.reason, res.platform_fault), ("failed", "model_choice", False))
+        self.assertEqual(res.message, f"{MSG_CHOICE}: There's an issue with the selected model (claude-sonnet-5-5). "
+                                      "It may not exist or you may not have access to it. Run --model to pick a "
+                                      "different model.")
+        info = failure_logs(logs.text)[0]
+        self.assertEqual((info["reason"], info["platform_fault"], info["model"], info["effort"]),
+                         ("model_choice", False, "claude-sonnet-5-5", "high"))
+        self.assertEqual((info["result"]["api_error_status"], info["last_error"]["error"]), (404, "model_not_found"))
+        self.e.mode("effort_refused")
+        res = self.run_turn("hello", options=TurnOptions(claude_effort="max"))
+        self.assertEqual((res.reason, res.platform_fault), ("model_choice", False))
+        self.assertIn("output_config.effort: max is not available", res.message)
+        # Not the user's choice: the Bridge's default model, or no choice at all.
+        self.e.mode("model_not_found")
+        runner = ClaudeRunner([self.e.cli], self.e.env, self.e.data, self.e.reader().load, model="claude-opus-9")
+        res = self.run_turn("hello", runner=runner)
+        self.assertEqual((res.reason, res.platform_fault), ("failed", True))
+        self.e.mode("effort_refused")
+        self.assertEqual(self.run_turn("hello").platform_fault, True)
+
     def test_lost_session_starts_a_new_one(self):
         self.e.sign_in()
         self.run_turn("one")
@@ -604,6 +658,22 @@ class ClaudeRunnerTest(unittest.TestCase):
             res = classify_failure(text, error=error, refused=refused)
             self.assertEqual((res.reason, res.platform_fault), want, (text, error, refused))
         self.assertEqual(classify_failure("x", subtype="error_max_turns", refused=True).reason, "max_turns")
+        # The model or effort the user chose, refused (texts as 2.1.283 prints them): the user's choice. The same
+        # answers without a choice of the user's stay ours; other errors with a choice are judged as before.
+        chosen = {("There's an issue with the selected model (claude-x). It may not exist", "model_not_found", 404,
+                   "claude-x", ""): ("model_choice", False),
+                  ("API Error: 400 model: claude-x", "unknown", 400, "claude-x", ""): ("model_choice", False),
+                  ("API Error: 400 output_config.effort: max is not supported", "unknown", 400, "", "max"):
+                      ("model_choice", False),
+                  ("API Error: 400 model: claude-x", "unknown", 400, "", ""): ("failed", True),
+                  ("There's an issue with the selected model (claude-x).", "model_not_found", 404, "", "high"):
+                      ("failed", True),
+                  ("API Error: 400 prompt is too long", "unknown", 400, "claude-x", "high"): ("failed", True),
+                  ("API Error: 500 claude-x", "server_error", 500, "claude-x", ""): ("failed", True),
+                  ("You've hit your limit", "rate_limit", 429, "claude-x", "max"): ("plan_limit", False)}
+        for (text, error, status, model, effort), want in chosen.items():
+            res = classify_failure(text, error=error, status=status, model=model, effort=effort)
+            self.assertEqual((res.reason, res.platform_fault), want, (text, model, effort))
 
     def test_the_redactor(self):
         r = Redactor(["tok-123", "k1", ""], "send the quarterly report to Jane Doe at noon please")
@@ -903,10 +973,30 @@ class BridgeWithRuntimesTest(unittest.TestCase):
         self.bridge = Bridge(SECRET, self.runtime, self.sender,
                              DeliveryStore(os.path.join(self.e.data, ".platform", "deliveries.json")), retry_delay=0)
 
-    def deliver(self, did, text="hello"):
+    def deliver(self, did, text="hello", metadata=None):
         return list(self.bridge.deliver(DeliverRequest.from_json(
             {"delivery_id": did, "kind": "message", "session_key": "telegram:42", "channel": "telegram",
-             "text": text})))
+             "text": text, "metadata": metadata or {}})))
+
+    def test_the_deliverys_metadata_reaches_the_engine(self):
+        # The vm-manager passes DeliverRequest.metadata_json through as the body's "metadata" (no proto change).
+        self.e.sign_in()
+        meta = {"chat_epoch": 2, "claude": {"model": "claude-opus-5-5", "effort": "xhigh"}, "other": "kept"}
+        self.deliver("d1", "on hermes", meta)
+        self.assertEqual(self.hermes.calls[0]["options"],
+                         TurnOptions(chat_epoch=2, claude_model="claude-opus-5-5", claude_effort="xhigh"))
+        self.e.write_platform("claude_code")
+        self.assertEqual(types(self.deliver("d2", "on claude", meta)), ["accepted", "working", "turn_done"])
+        argv = self.e.calls()[0]["argv"]
+        self.assertEqual((flag(argv, "--model"), flag(argv, "--effort")), ("claude-opus-5-5", "xhigh"))
+        self.assertEqual(self.claude.sessions.epoch("telegram:42"), 2)
+        # The user's plan does not have the model they chose: an error event, not the platform's fault.
+        self.e.mode("model_not_found")
+        events = self.deliver("d3", "again", {"chat_epoch": 2, "claude": {"model": "claude-fable-5-1"}})
+        self.assertEqual((events[-1]["type"], events[-1]["platform_fault"]), ("error", False))
+        self.assertTrue(events[-1]["message"].startswith(MSG_CHOICE + ": There's an issue with the selected model "
+                                                         "(claude-fable-5-1)."))
+        self.assertEqual(self.sender.sent, [("hermes says hi", "telegram:42"), ("reply 1 to: on claude", "telegram:42")])
 
     def test_runtime_switch_without_restart(self):
         self.e.sign_in()

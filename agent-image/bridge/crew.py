@@ -397,7 +397,11 @@ def claude_agents(platform_server: str = "platform", model: str = "", browser: b
     for everyone but Scout, the web and browser tools away, and names the built-in tools the member must
     not have. No `mcpServers`: a specialist shares the lead's MCP connections, narrowed by `tools`. No
     `permissionMode`: a specialist runs in the lead's mode. `model` is the lead's (`inherit`) unless a
-    cheaper one is set. `browser`: the browser is turned on for this user, so Scout's list and brief have it.
+    cheaper one is set (BRIDGE_CLAUDE_CREW_MODEL). So a specialist runs on the model the user chose for the turn
+    (the lead's `--model`), at the session's `--effort`: no `effort` field (the docs allow one per sub-agent; seen
+    with 2.1.283 against a fake API: `inherit` and no `effort` sent the lead's model and effort for the
+    specialist; a pinned model without effort levels, such as Haiku 4.5, got none). `browser`: the browser is
+    turned on for this user, so Scout's list and brief have it.
     """
     return {
         m.id: {
