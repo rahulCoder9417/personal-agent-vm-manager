@@ -7,7 +7,7 @@
 - Phase 2 is **coded, committed and unit tested**: every gRPC RPC, the container spec, the five background loops, the egress writer, the agent image (Hermes + Bridge).
 - **Nothing has run against real Docker.** Docker and gVisor aren't installed on the dev machine, so the Docker parts were tested against a fake daemon, and the Bridge against a fake Hermes.
 - The proto (`proto/vm/v1/vm.proto`) got additive RPCs and fields for the agent runtime and the Claude Code sign-in (section 6); no existing field changed.
-- Later additions, each in its own section: the Claude Code runtime (6), git through the platform's git gateway (7), the crew of specialists (8), Scout's browser (9), and what the second server run of 2026-10-08 found (10: failed messages acted on later, failed runs without a logged cause, a refusal counted as our fault, the idle stop coming late). The crew is unit tested against fakes only; the image build and a real turn with either runtime are untested. The browser was run for real on the development machine (the real server, a real Chromium, gVisor, a real Squid), but not in the image and not by an engine.
+- Later additions, each in its own section: the Claude Code runtime (6), git through the platform's git gateway (7), the crew of specialists (8), Scout's browser (9), and what the second server run of 2026-10-08 found (10: failed messages acted on later, failed runs without a logged cause, a refusal counted as our fault, the idle stop coming late), and the Bridge's part of "New chat" and of the Claude Code model and effort (11). The crew is unit tested against fakes only; the image build and a real turn with either runtime are untested. The browser was run for real on the development machine (the real server, a real Chromium, gVisor, a real Squid), but not in the image and not by an engine.
 
 ## 1. Initial design vs what we built
 
@@ -519,3 +519,95 @@ What is left: the reaper runs every minute at :56 past (the vm-manager started a
 | Hermes no longer probes LiteLLM at start | Wake any user, then `docker logs --since 2m personal-agent-litellm-1 2>&1 \| grep 'models/agent-default'`: nothing; `docker logs pa-sbx-<user> 2>&1 \| grep 'context length'`: nothing |
 | A failed Hermes turn is not carried out later (needs a model key with balance, then none) | A Hermes user out of credits sends "Remember that my code word is kiwi" (fails), gets credits back, sends "hello": no `using remember` line; `docker exec pa-sbx-<user> cat /data/.platform/hermes-conversations.json` has the chat at 1 |
 | The `install out of sync` warning in the test user's container | Only when the founder wants it gone: `docker exec pa-sbx-usr_01m3sk0g2wwgm7wj60822scjtp rm -rf /data/hermes/tools` while it is awake, then on the next wake no such line in `docker logs` |
+
+## 11. New chat, and Claude Code's model and effort (2026-10-08)
+
+**Date:** 2026-10-08 · **Branch:** `mvp-build`. The agent image's part of two features built at the same time in three repositories, from one shared spec (the backend and the web app build theirs). Built and tested on the development machine; the image was not built and nothing on the server was changed. No change to `proto/vm/v1/vm.proto` and no Go change: the vm-manager already passes `DeliverRequest.metadata_json` to the Bridge as the body's `metadata`, untouched (`internal/sandbox/deliver.go`, `internal/bridge/client.go`).
+
+### Asked for vs built
+
+| Asked for (shared spec) | Built |
+|---|---|
+| Every delivery carries the chat's `"chat_epoch": <int>` in its metadata; missing means 0 | `core.TurnOptions.from_metadata`, passed to the engine with each turn. A value that is not a whole number of 0 or more is taken as 0, with a warning |
+| The Bridge keeps, per session key, the last epoch it saw; a higher one starts a fresh engine conversation before the turn; a lower one is ignored | Kept per engine, not once for the Bridge (below). Claude Code: the chat leaves its session and the turn starts a new one with `--session-id`. Hermes: the chat moves to its next conversation key (`telegram:42#n`), the same as after a failed turn |
+| `"claude": {"model", "effort"}` when the turn's engine is Claude Code; omitted means the CLI's default | `--model` and `--effort` on the command line. The turn's model wins over `BRIDGE_CLAUDE_MODEL`. Hermes ignores both |
+| Verify the model ids and how effort is set at 2.1.283 | Done; see "What 2.1.283 accepts". All four ids are kept; two notes for the backend |
+| The specialists use the same model unless the crew definition pins one | Kept as it was: `model: inherit`, no `effort`, so they get the user's model and the session's effort. `BRIDGE_CLAUDE_CREW_MODEL` still pins one |
+| A refusal of the chosen model or effort ends the turn with the CLI's message, not our fault | New in `classify_failure`: reason `model_choice`, `platform_fault: false`, "Claude Code could not use the model or thinking effort chosen in Settings: <the CLI's message>" |
+
+### What 2.1.283 accepts
+
+Checked three ways: the binary's own `--help`; the model table built into it (the binary is a JavaScript bundle, so the table is readable with `strings`); and the binary run against a small fake Messages API that logs each request's `model`, `output_config` and `thinking`. The binary is the one of section 10 (from Anthropic's release store, sha256 `1859583c…5e804ae2`, as in its signed manifest). The docs (https://code.claude.com/docs/en/model-config, /sub-agents) were read on the same day; they describe the latest release, so where they and the binary differ, the binary is what counts.
+
+- **`--model`** takes an alias or a full id ("Provide an alias for the latest model (e.g. 'fable', 'opus', or 'sonnet') or a model's full name (e.g. 'claude-fable-5')"). The CLI sends the id it is given.
+  - `claude-opus-5-5` (Opus 5.5), `claude-fable-5-1` (Fable 5.1) and `claude-haiku-4-5` (Haiku 4.5) are in the binary's table.
+  - `claude-sonnet-5-5` is **not**: Sonnet 5.5 came with 2.1.284 (the docs' version history: "v2.1.284 `sonnet` resolves to Sonnet 5.5 on the Anthropic API"). 2.1.283 still sends it as given, with the effort, and writes `[claude-code:unrecognized_model] {"model":"claude-sonnet-5-5",...}` on stderr. Whether Anthropic serves Sonnet 5.5 to a plan sign-in from 2.1.283 could not be checked here (no real account). Kept in the list; a newer pin (2.1.284 or later) would make it a known model.
+  - Aliases at 2.1.283: `opus` = Opus 5.5, `sonnet` = Sonnet 5 (`claude-sonnet-5`), `haiku` = Haiku 4.5 (`claude-haiku-4-5-20251001`).
+  - A model the account cannot use: the API's 404 becomes the CLI's error `model_not_found`, "There's an issue with the selected model (<id>). It may not exist or you may not have access to it. Run --model to pick a different model." (`api_error_status: 404`). A 400 becomes error `unknown`, "API Error: 400 <the API's message>".
+- **Effort is the flag `--effort <level>`**: "Effort level for the current session (low, medium, high, xhigh, max)". It reaches the API as `output_config.effort`, with the beta header `effort-2025-11-24`. An unknown level: "Warning: Unknown --effort value 'extreme' — ignoring it and using the default effort." The other documented ways, not used:
+  - the environment variable `CLAUDE_CODE_EFFORT_LEVEL` wins over the flag (run: `CLAUDE_CODE_EFFORT_LEVEL=low` with `--effort xhigh` sent `low`), and the docs say it also wins over a sub-agent's own `effort`. So the Bridge now removes it from the CLI's environment;
+  - the settings keys `effortLevel` and `modelSettings` do not take `max` ("`max` isn't accepted as a level in either key").
+- **`xhigh` and `max` by model** (the table's `capabilities` and `default_effort`; the docs' table says the same):
+
+| Model | Levels | Default | Seen in a run |
+|---|---|---|---|
+| Opus 5.5 | low, medium, high, xhigh, max | medium | `xhigh`, `max`, `low` sent as given; none given: `medium` |
+| Fable 5.1 | low, medium, high, xhigh, max | high | `xhigh`, `max` sent as given |
+| Sonnet 5.5 | not in 2.1.283's table | (Sonnet 5's: high) | `xhigh` sent as given; none given: `high` |
+| Haiku 4.5 | **none** | none | no effort sent at all, whatever was asked; `thinking: {type: enabled, budget_tokens: 31999}` instead |
+
+  A level a model does not take falls back to the highest it does (Sonnet 4.6 with `xhigh` sent `high`). So **the user's effort does nothing on Haiku 4.5**; the web app could say so, or grey the effort out for it.
+- **Sub-agents** (`--agents`): `model` takes `sonnet`, `opus`, `haiku`, `fable`, a full id or `inherit`; `effort` takes the same five levels and is one of the fields `--agents` accepts. Runs with the lead on `claude-opus-5-5 --effort xhigh` and the lead's first answer starting Scout:
+
+| Scout's definition | Scout's request |
+|---|---|
+| `model: inherit`, no `effort` (the crew as it is) | `claude-opus-5-5`, effort `xhigh` |
+| no `model`, no `effort` | `claude-opus-5-5`, `xhigh` |
+| `inherit`, `effort: low` | `claude-opus-5-5`, `low` |
+| `model: claude-fable-5-1` | `claude-fable-5-1`, `xhigh` |
+| `model: haiku` | `claude-haiku-4-5-20251001`, no effort |
+
+### Where we filled in or changed the spec
+
+- **One epoch record per engine, not one for the Bridge.** The spec says "the Bridge keeps, per session key, the last epoch it saw". With one record a chat started anew while it ran on Hermes would, after a switch back, resume the Claude Code session from before the new chat: the number would already have been seen. So each engine keeps its own: Claude Code in `claude-sessions.json` (`{"session_id", "epoch", "at"}`), Hermes in `hermes-conversations.json` (`{"generation", "epoch"}`). The behaviour the spec asks for is the same on one engine.
+- **A new chat is written to /data before the turn.** If the first turn of a new chat fails, the chat does not go back to the old session (Claude Code) or key (Hermes). A lost session (`No conversation found`) keeps the chat's epoch.
+- **The old transcript is not deleted** on Claude Code. It is never resumed, and the CLI removes it after 30 days, like the failed copies of section 10.
+- **A bad value is left out, not refused.** A `400` would stop the user's message for a field the user never typed. The checks: `chat_epoch` an integer of 0 or more; `model` 1 to 100 characters of letters, digits, `.`, `_`, `-`, `[`, `]`, starting with a letter or a digit (so it can never be read as a flag of its own; ids are not limited to the four, so the backend's list can grow without a new image); `effort` one of the five levels.
+- **Only the user's choice makes a refusal "not our fault".** The same 404 for `BRIDGE_CLAUDE_MODEL`, the platform's own setting, stays `platform_fault: true`. A 400 counts as the user's choice only when its text names the chosen model, or "effort" when an effort was chosen.
+- **The message keeps the CLI's own text**, including its "Run --model to pick a different model.", which does not apply to the user. The backend may want to show only the first part.
+
+### Tests (real runs, 2026-10-08)
+
+- `cd agent-image && python3 -m unittest discover -s tests -t .`: **179 tests, OK** (1 skipped: the real-browser test). 169 before.
+- `go vet ./...`: clean. `go test -count=1 ./...`: all packages with tests pass (no Go change).
+- New tests: the metadata read (good values, each kind of bad value, missing fields); the Bridge passes it to the engine; Claude Code: a new chat starts a new session, then goes on as usual, a lower number changes nothing, another chat keeps its session, a Bridge restart keeps the number, a new chat whose first turn fails does not go back, an old `claude-sessions.json` reads as epoch 0; `--model` / `--effort` on the command line, the turn's model over the Bridge's, the crew on `inherit` with no `effort`, a pinned crew model stays, `CLAUDE_CODE_EFFORT_LEVEL` never reaches the CLI; a refused choice is `model_choice` and not our fault, the same refusal of the Bridge's model is; Hermes: the key moves on a higher number, not on a lower one, a failure after it moves it again, a restart keeps it, an old file of bare numbers reads as epoch 0. The fake CLI answers a 404 for the model and a 400 for the effort the way 2.1.283 printed them.
+- **End to end with the real 2.1.283 binary**: the Bridge (`core.Bridge` and `ClaudeRunner`, wired as in `__main__`, with `CLAUDE_CODE_EFFORT_LEVEL=low` in its environment on purpose) and seven deliveries to one chat, against the logging fake API:
+
+| Delivery's metadata | Request(s) the API got | Result |
+|---|---|---|
+| epoch 0, `claude-opus-5-5` / `xhigh` | `claude-opus-5-5`, `xhigh`; message 1 | done |
+| epoch 0, `claude-fable-5-1` / `max` | `claude-fable-5-1`, `max`; messages 1, 2 | done |
+| epoch 1, no `claude` | the CLI's default (`claude-opus-5-5`, `medium`); message 3 only | done, a new session |
+| epoch 0, `claude-sonnet-5-5` / `high` | `claude-sonnet-5-5`, `high`; messages 3, 4 | done, no reset |
+| epoch 1, `claude-haiku-4-5` / `low`, the API answers 404 | `claude-haiku-4-5`, no effort | `error`, `platform_fault: false`, the CLI's message |
+| epoch 1, `claude-opus-5-5` / `xhigh`, the lead starts Scout | the lead and Scout both `claude-opus-5-5`, `xhigh`; messages 3, 4, 6 (not 5) | done |
+| epoch 1, `claude-haiku-4-5` / `xhigh` | `claude-haiku-4-5`, no effort | done |
+
+  Left in the chat's folder: the current transcript, the failed copy of the fifth, and the last transcript of the chat before the new chat.
+
+### Not verified yet (after the next deploy)
+
+| What | How to check |
+|---|---|
+| A new chat on Claude Code | For a Claude Code user: "My code word is kiwi", then New chat, then "What is my code word? One line." It must not know it (unless it was saved with `remember`). `docker exec pa-sbx-<user> cat /data/.platform/claude-sessions.json`: the chat's `epoch` went up and its `session_id` changed |
+| A new chat on Hermes | The same for a Hermes user; `docker exec pa-sbx-<user> cat /data/.platform/hermes-conversations.json`: the chat's `generation` and `epoch` went up |
+| The chosen model and effort reach Anthropic | Choose Opus 5.5 and `xhigh`, send a message; the newest `/data/claude/projects/-data-workspace/<id>.jsonl` has `"model":"claude-opus-5-5"` on the answer. The effort is not in the transcript; the CLI's `/status` is not available in `-p` |
+| Sonnet 5.5 on a real plan with 2.1.283 | Choose Sonnet 5.5 and send a message. If the turn ends with "Claude Code could not use the model ...", bump `CLAUDE_CODE_VERSION` to 2.1.284 or later (a deliberate image change) |
+| A refused model is not our fault | Choose a model the plan does not have (if any); the backend's activity shows the turn as the user's, not refunded as a platform fault |
+
+### For the backend (`../beckend`, not edited from here)
+
+- The Bridge reads exactly `metadata.chat_epoch` (an integer) and `metadata.claude.model` / `metadata.claude.effort` (strings; leave a key out for the default). It needs `chat_epoch` on every delivery, on both engines.
+- **Haiku 4.5 has no effort levels at 2.1.283**: with it, `claudeEffort` has no effect. Worth a line in Settings, or keep the effort select but say it does not apply to Haiku 4.5.
+- **Sonnet 5.5 is unknown to the pinned 2.1.283** (sent as given; whether Anthropic serves it to this version is unchecked). If it fails on the server, the fix is a newer CLI pin in this image, not a change in the backend's list.
+- A refused choice comes back as an `error` event with `platform_fault: false` and a message that starts "Claude Code could not use the model or thinking effort chosen in Settings: ".
