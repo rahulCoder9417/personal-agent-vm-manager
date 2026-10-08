@@ -11,7 +11,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from bridge import crew
-from bridge.core import MEMORY_RULES, DeliverRequest, build_instructions
+from bridge.core import MEMORY_RULES, DeliverRequest, TurnOptions, build_instructions
 from bridge.hermes import CREW_FOLLOW_UP, MAX_CREW_ROUNDS, Conversations, HermesClient, HermesError, HermesProcess
 from bridge.mcp_client import MCPError, PlatformMCP
 
@@ -367,6 +367,48 @@ class HermesClientTest(unittest.TestCase):
         with self.assertRaises(HermesError):
             down.run("hello", "be brief", "telegram:42", "evt-2#1", self.progress.append, timeout=1)
         self.assertEqual(down.conversations.key("telegram:42"), "telegram:42")
+
+    def test_a_new_chat_starts_a_new_conversation(self):
+        # Shared spec "New chat": a chat_epoch higher than the last one Hermes saw for the chat moves the chat to a
+        # new conversation key before the turn, the same way a failed turn does. Lower or equal: nothing. Missing: 0.
+        path = os.path.join(self.tmp, "hermes-conversations.json")
+        failed = frames({"event": "run.failed", "error": "budget exceeded"})
+        done = frames({"event": "run.completed", "output": "ok"})
+        FakeHermes.runs = [done, done, done, done, failed, done, done, done]
+        c = HermesClient(self.url, "local-key", poll_interval=0.01, conversations_path=path)
+
+        def turn(client, n, epoch=None, session_key="telegram:42"):
+            options = None if epoch is None else TurnOptions(chat_epoch=epoch, claude_model="claude-opus-5-5")
+            return client.run(f"message {n}", "be brief", session_key, f"evt-{n}#1", self.progress.append, 10,
+                              options=options)
+
+        turn(c, 1)
+        turn(c, 2, epoch=1)
+        turn(c, 3, epoch=1)
+        turn(c, 4, epoch=0)
+        self.assertEqual(turn(c, 5, epoch=1).status, "failed")
+        again = HermesClient(self.url, "local-key", poll_interval=0.01, conversations_path=path)  # a Bridge restart
+        turn(again, 6, epoch=1)
+        turn(again, 7, epoch=2)
+        turn(again, 8, epoch=0, session_key="web")
+        keys = [headers["X-Hermes-Session-Key"] for headers, _ in self.run_posts()]
+        self.assertEqual(keys, ["telegram:42", "telegram:42#1", "telegram:42#1", "telegram:42#1", "telegram:42#1",
+                                "telegram:42#2", "telegram:42#3", "web"])
+        with open(path) as fh:
+            self.assertEqual(json.load(fh), {"telegram:42": {"generation": 3, "epoch": 2}})
+        self.assertEqual(oct(os.stat(path).st_mode & 0o777), oct(0o600))
+
+    def test_the_conversations_file_of_an_older_bridge(self):
+        path = os.path.join(self.tmp, "hermes-conversations.json")
+        with open(path, "w") as fh:
+            json.dump({"telegram:42": 2, "web": 0, "bad": "x"}, fh)
+        conversations = Conversations(path)
+        self.assertEqual((conversations.key("telegram:42"), conversations.key("web")), ("telegram:42#2", "web"))
+        self.assertFalse(conversations.new_chat("telegram:42", 0))
+        self.assertTrue(conversations.new_chat("telegram:42", 1))
+        self.assertEqual(Conversations(path).key("telegram:42"), "telegram:42#3")
+        self.assertTrue(conversations.new_chat("never-seen", 1), "a chat this engine never ran: its old key is left")
+        self.assertEqual(conversations.key("never-seen"), "never-seen#1")
 
     def test_a_long_session_key_stays_within_what_hermes_takes(self):
         conversations = Conversations(None)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 from typing import Callable
 
-from bridge.core import RunResult
+from bridge.core import RunResult, TurnOptions
 
 
 class FakeRunner:
@@ -24,10 +24,10 @@ class FakeRunner:
         return self.is_healthy
 
     def run(self, text: str, instructions: str, session_key: str, idempotency_key: str,
-            on_progress: Callable[[str], None], timeout: float) -> RunResult:
+            on_progress: Callable[[str], None], timeout: float, options: TurnOptions | None = None) -> RunResult:
         with self._lock:
             self.calls.append({"text": text, "instructions": instructions, "session_key": session_key,
-                               "idempotency_key": idempotency_key})
+                               "idempotency_key": idempotency_key, "options": options})
         self.started.set()
         on_progress("using web_search")
         if self.block is not None:

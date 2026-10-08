@@ -4,7 +4,8 @@ import threading
 import time
 import unittest
 
-from bridge.core import (MEMORY_RULES, Bridge, DeliverRequest, DeliveryStore, build_input, build_instructions)
+from bridge.core import (CLAUDE_EFFORTS, MEMORY_RULES, Bridge, DeliverRequest, DeliveryStore, TurnOptions,
+                         build_input, build_instructions)
 
 from tests.fakes import FakeRunner, FakeSender
 
@@ -172,6 +173,35 @@ class RequestTest(unittest.TestCase):
                 DeliverRequest.from_json(body)
         ok = DeliverRequest.from_json({"delivery_id": "x", "kind": "message"})
         self.assertEqual(ok.session_key, "default")
+
+    def test_the_metadata_of_a_turn(self):
+        # Shared spec: "chat_epoch": <int> (missing = 0) and "claude": {"model", "effort"} (omitted = the default).
+        self.assertEqual(req().options(), TurnOptions(0, "", ""))
+        self.assertEqual(req(metadata={"chat_epoch": 3, "claude": {"model": "claude-opus-5-5", "effort": "xhigh"},
+                                       "source": "telegram"}).options(),
+                         TurnOptions(chat_epoch=3, claude_model="claude-opus-5-5", claude_effort="xhigh"))
+        for model in ("claude-sonnet-5-5", "claude-haiku-4-5", "claude-fable-5-1", "opus", "claude-opus-4-8[1m]"):
+            self.assertEqual(req(metadata={"claude": {"model": model}}).options().claude_model, model)
+        for effort in CLAUDE_EFFORTS:
+            self.assertEqual(req(metadata={"claude": {"effort": effort}}).options().claude_effort, effort)
+        self.assertEqual(CLAUDE_EFFORTS, ("low", "medium", "high", "xhigh", "max"))
+        # A value that is not what the spec says is left out; the message still runs.
+        with self.assertLogs("bridge.core", "WARNING"):
+            for epoch in (-1, "3", 1.5, True, [1]):
+                self.assertEqual(req(metadata={"chat_epoch": epoch}).options().chat_epoch, 0, epoch)
+            for model in ("--dangerously-skip-permissions", "-p", "", "a b", "x" * 101, 5, "claude\nopus"):
+                self.assertEqual(req(metadata={"claude": {"model": model}}).options().claude_model, "", model)
+            for effort in ("XHIGH", "ultra", "auto", "", 3):
+                self.assertEqual(req(metadata={"claude": {"effort": effort}}).options().claude_effort, "", effort)
+            self.assertEqual(req(metadata={"chat_epoch": 2, "claude": "opus"}).options(), TurnOptions(chat_epoch=2))
+        self.assertEqual(req(metadata={"chat_epoch": None, "claude": None}).options(), TurnOptions())
+        self.assertEqual(req(metadata=["not", "an", "object"]).options(), TurnOptions())
+
+    def test_the_bridge_passes_them_to_the_runner(self):
+        runner = FakeRunner()
+        bridge = Bridge(SECRET, runner, FakeSender(), DeliveryStore(None), retry_delay=0)
+        list(bridge.deliver(req(metadata={"chat_epoch": 1, "claude": {"model": "claude-haiku-4-5"}})))
+        self.assertEqual(runner.calls[0]["options"], TurnOptions(chat_epoch=1, claude_model="claude-haiku-4-5"))
 
     def test_build_input(self):
         r = DeliverRequest.from_json({"delivery_id": "x", "kind": "approval_answer", "approval_id": "ap_1",
