@@ -57,7 +57,7 @@ class CrewDefinitionTest(unittest.TestCase):
         self.assertEqual(crew.tool_groups(crew.BYTE, browser=True), crew.BYTE.tools)
 
     def test_role_prompts(self):
-        byte, patch, scout = (crew.role_prompt(m) for m in crew.CREW)
+        byte, patch, scout = (crew.role_prompt(m, engine=crew.HERMES) for m in crew.CREW)
         for text in ("new branch", "push", "pull request", "GitHub app action", "default branch",
                      "goes through the platform", "never need a token"):
             self.assertIn(text, byte)
@@ -76,16 +76,15 @@ class CrewDefinitionTest(unittest.TestCase):
         for text in ("Search with your built-in web search when you have one. Use the platform tool web_search only "
                      "when you have no built-in search",
                      "it is a paid feature of the Max plan, and it says so when it is not available to the user",
-                     "say in your report that the search was not available",
-                     "Open a plain page with the platform tool read_page", "It refuses every other address",
-                     "do not try again and do not change the address"):
+                     "say in your report that the search was not available"):
             self.assertIn(text, scout)
         self.assertNotIn("read files", scout.replace("you cannot read files", ""))
         self.assertNotIn("You have no web search", scout)
         self.assertNotIn("{browser}", scout, "the place for the browser text must be filled in")
         # Byte and Patch: the platform tools without the web tools, and told in words that they have no web
         # tool and no browser (on Hermes the brief is all that keeps them off both).
-        for prompt in (byte, patch, crew.role_prompt(crew.BYTE, browser=True), crew.role_prompt(crew.PATCH, browser=True)):
+        for prompt in (byte, patch, crew.role_prompt(crew.BYTE, browser=True, engine=crew.HERMES),
+                       crew.role_prompt(crew.PATCH, browser=True, engine=crew.HERMES)):
             self.assertIn("the platform tools (not web_search or read_page). Use no other tool, even when one is "
                           "available. You have no web search, no page reading and no browser: do not use "
                           "web_search, read_page, a browser tool or any other web tool.", prompt)
@@ -93,14 +92,55 @@ class CrewDefinitionTest(unittest.TestCase):
                           prompt)
             self.assertNotIn("the browser tools (browser_navigate", prompt)
             self.assertNotIn("browser_snapshot", prompt)
-        self.assertEqual(crew.role_prompt(crew.BYTE, browser=True), byte, "only Scout's brief knows the browser")
-        for prompt in (byte, patch, scout, crew.role_prompt(crew.SCOUT, browser=True)):
+        self.assertEqual(crew.role_prompt(crew.BYTE, browser=True, engine=crew.HERMES), byte,
+                         "only Scout's brief knows the browser")
+        for prompt in (byte, patch, scout, crew.role_prompt(crew.SCOUT, browser=True, engine=crew.CLAUDE_CODE)):
             self.assertIn("do not call send_message", prompt, "the Bridge sends the final answer")
             self.assertIn("You cannot hand work to anyone else", prompt)
             self.assertIn("needs the user's approval", prompt)
 
+    def test_scouts_read_page_per_engine(self):
+        # The platform's read_page opens any public address on a Claude Code turn (only Scout can call it
+        # there), and on Hermes only an address already seen for the user. Scout's brief says which, per engine.
+        for browser in (False, True):
+            claude = crew.role_prompt(crew.SCOUT, browser, engine=crew.CLAUDE_CODE)
+            hermes = crew.role_prompt(crew.SCOUT, browser, engine=crew.HERMES)
+            self.assertIn("Open a plain page with the platform tool read_page. It opens any public address, the "
+                          "results of your built-in search included. It does not run a page's scripts and cannot "
+                          "sign in.", claude)
+            for gone in ("It refuses every other address", "opens only an address", "do not change the address"):
+                self.assertNotIn(gone, claude)
+            for part in ("Open a plain page with the platform tool read_page. It opens only an address that came "
+                         "from the user's own messages, from a web_search result, or from a link on a page you "
+                         "already read with it. It refuses every other address.",
+                         "When it refuses, do not try again and do not change the address: find the page with "
+                         "web_search, or say in your report that you need the link."):
+                self.assertIn(part, hermes)
+            self.assertNotIn("built-in search included", hermes)
+            for text in (claude, hermes):
+                self.assertNotIn("{read_page}", text, "the place for the read_page text must be filled in")
+                self.assertEqual(text.count("the platform tool read_page"), 1)
+        # Only Scout's brief differs between the engines.
+        for m in (crew.BYTE, crew.PATCH):
+            for browser in (False, True):
+                self.assertEqual(crew.role_prompt(m, browser, engine=crew.CLAUDE_CODE),
+                                 crew.role_prompt(m, browser, engine=crew.HERMES), m.id)
+        # The engine must be named, and be one of the two.
+        with self.assertRaises(TypeError):
+            crew.role_prompt(crew.SCOUT)
+        with self.assertRaises(ValueError):
+            crew.role_prompt(crew.SCOUT, engine="codex")
+        # Each engine gets its own: the sub-agents of Claude Code, and the briefs the Hermes lead copies.
+        for browser in (False, True):
+            on_claude = crew.claude_agents("platform", browser=browser)["scout"]["prompt"]
+            on_hermes = crew.hermes_handoff(browser)
+            self.assertIn("built-in search included", on_claude)
+            self.assertNotIn("It refuses every other address", on_claude)
+            self.assertIn("It refuses every other address", on_hermes)
+            self.assertNotIn("built-in search included", on_hermes)
+
     def test_scout_and_the_browser(self):
-        scout = crew.role_prompt(crew.SCOUT, browser=True)
+        scout = crew.role_prompt(crew.SCOUT, browser=True, engine=crew.CLAUDE_CODE)
         for text in (
                 # The cheapest tool first.
                 "Use the cheapest tool that does the job, in this order: search, then read_page for a plain page, "
@@ -140,7 +180,7 @@ class CrewDefinitionTest(unittest.TestCase):
     def test_scout_without_the_browser(self):
         # The browser is not turned on for the user (not on the Max plan): Scout is told so, and what to
         # report. Nothing in its brief tells it how to use one.
-        scout = crew.role_prompt(crew.SCOUT)
+        scout = crew.role_prompt(crew.SCOUT, engine=crew.HERMES)
         for text in ("You have no browser here: it is part of the Max plan and is not turned on for this user",
                      "do not look for another way: say in your report that the job needs the browser, which is "
                      "part of the Max plan",
@@ -151,7 +191,7 @@ class CrewDefinitionTest(unittest.TestCase):
             self.assertIn(text, scout)
         for text in ("browser_navigate", "browser_snapshot", "browser_close", "the browser tools ("):
             self.assertNotIn(text, scout)
-        self.assertEqual(scout, crew.role_prompt(crew.SCOUT, browser=False))
+        self.assertEqual(scout, crew.role_prompt(crew.SCOUT, browser=False, engine=crew.HERMES))
 
     def test_lead_instructions(self):
         text = crew.lead_instructions()
@@ -195,7 +235,7 @@ class CrewDefinitionTest(unittest.TestCase):
         # The cancelled design: no platform browser tools, no sign-in link.
         for gone in ("browser_open", "browser_login", "give the user the link"):
             self.assertNotIn(gone, text)
-            self.assertNotIn(gone, crew.role_prompt(crew.SCOUT, browser=True))
+            self.assertNotIn(gone, crew.role_prompt(crew.SCOUT, browser=True, engine=crew.CLAUDE_CODE))
 
     def test_max_parallel(self):
         self.assertEqual(crew.max_parallel({}), 3)
@@ -212,7 +252,7 @@ class ClaudeAgentsTest(unittest.TestCase):
             for agent_id, a in agents.items():
                 self.assertEqual(set(a), {"description", "prompt", "tools", "disallowedTools", "model"}, agent_id)
                 self.assertEqual(a["description"], crew.BY_ID[agent_id].description)
-                self.assertEqual(a["prompt"], crew.role_prompt(crew.BY_ID[agent_id], browser))
+                self.assertEqual(a["prompt"], crew.role_prompt(crew.BY_ID[agent_id], browser, engine=crew.CLAUDE_CODE))
                 self.assertEqual(a["model"], "inherit", "a specialist uses the lead's model by default")
                 self.assertEqual(a["disallowedTools"][:2], ["Agent", "mcp__platform__send_message"])
                 for t in ("Agent", "Task", "mcp__platform__send_message"):
@@ -308,7 +348,7 @@ class HermesCrewTest(unittest.TestCase):
         self.assertIn("into a single delegate_task call", text)
         self.assertIn('"Scout: compare flight options to Goa"', text)
         for m in crew.CREW:
-            self.assertIn(crew.role_prompt(m), text, m.id)
+            self.assertIn(crew.role_prompt(m, engine=crew.HERMES), text, m.id)
         # Hermes cannot narrow a child's tools, so the briefs carry the web rule: Byte and Patch are told
         # they have no web tool and no browser, Scout which search to use.
         self.assertEqual(text.count("You have no web search, no page reading and no browser"), 2)
@@ -318,7 +358,7 @@ class HermesCrewTest(unittest.TestCase):
         self.assertNotIn("browser_close", text)
         on = crew.hermes_handoff(browser=True)
         for m in crew.CREW:
-            self.assertIn(crew.role_prompt(m, browser=True), on, m.id)
+            self.assertIn(crew.role_prompt(m, browser=True, engine=crew.HERMES), on, m.id)
         self.assertIn("call browser_close as soon as you are done, also when the job failed", on)
         self.assertIn("Never type a password, a one-time code", on)
         self.assertNotIn("You have no browser here", on)

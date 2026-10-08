@@ -31,6 +31,9 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 LEAD_NAME = "Tex"
+# The two engines, by the names the platform uses for them (platform.json "runtime").
+CLAUDE_CODE, HERMES = "claude_code", "hermes"
+ENGINES = (CLAUDE_CODE, HERMES)
 MAX_PER_JOB = 3  # specialists the lead may use for one job
 DEFAULT_MAX_PARALLEL = 3  # specialists running at the same time (BRIDGE_CREW_MAX_PARALLEL)
 
@@ -140,6 +143,7 @@ PATCH = Member(
 )
 
 _BROWSER_MARK = "{browser}"  # where Scout's brief says what holds for the browser (role_prompt fills it in)
+_READ_PAGE_MARK = "{read_page}"  # ... and what read_page opens, which depends on the engine
 
 SCOUT = Member(
     id="scout",
@@ -160,10 +164,7 @@ SCOUT = Member(
         "- Search with your built-in web search when you have one. Use the platform tool web_search only when you "
         "have no built-in search: it is a paid feature of the Max plan, and it says so when it is not available to "
         "the user. When it says that, do not try it again: say in your report that the search was not available.\n"
-        "- Open a plain page with the platform tool read_page. It opens only an address that came from web_search, "
-        "from the user's own messages, or from a page you already read with it. It refuses every other address, "
-        "results of your built-in search included. When it refuses, do not try again and do not change the "
-        "address: work from what the search itself returned.\n"
+        f"{_READ_PAGE_MARK}"
         f"{_BROWSER_MARK}"
         "- These are the only tools you have, and your only way to the web. You have no access to files, the "
         "shell or the user's apps. You work only from the task Tex gave you and from the web. If the task leaves "
@@ -212,6 +213,23 @@ _SCOUT_BROWSER_OFF = (
     "Max plan.\n"
 )
 
+# What Scout's brief says about read_page. The platform decides which addresses it opens, by the engine the
+# turn runs on (the backend's read_page tool): on Claude Code any public address, because there only Scout can
+# call it and Scout has no files, no shell and no app tools; on Hermes, where nothing keeps the other agents
+# off it, only an address already seen for the user.
+_SCOUT_READ_PAGE = {
+    CLAUDE_CODE: (
+        "- Open a plain page with the platform tool read_page. It opens any public address, the results of your "
+        "built-in search included. It does not run a page's scripts and cannot sign in.\n"
+    ),
+    HERMES: (
+        "- Open a plain page with the platform tool read_page. It opens only an address that came from the user's "
+        "own messages, from a web_search result, or from a link on a page you already read with it. It refuses "
+        "every other address. When it refuses, do not try again and do not change the address: find the page with "
+        "web_search, or say in your report that you need the link.\n"
+    ),
+}
+
 CREW: tuple[Member, ...] = (BYTE, PATCH, SCOUT)
 BY_ID = {m.id: m for m in CREW}
 
@@ -241,11 +259,15 @@ def tool_groups(member: Member, browser: bool = False) -> tuple[str, ...]:
     return tuple(group for group in member.tools if browser or group != BROWSER)
 
 
-def role_prompt(member: Member, browser: bool = False) -> str:
+def role_prompt(member: Member, browser: bool = False, *, engine: str) -> str:
     """The full brief of a specialist: its role, the tools it may use (for everyone but Scout: no web tool
     and no browser), and the rules all of them share. `browser`: whether the browser is turned on for this
-    user; Scout's brief says how to use it, or that there is none."""
+    user; Scout's brief says how to use it, or that there is none. `engine`: CLAUDE_CODE or HERMES, the engine
+    the brief is for; Scout's brief says which addresses read_page opens there."""
+    if engine not in ENGINES:
+        raise ValueError(f"unknown engine {engine!r}")
     prompt = member.prompt.replace(_BROWSER_MARK, _SCOUT_BROWSER_ON if browser else _SCOUT_BROWSER_OFF)
+    prompt = prompt.replace(_READ_PAGE_MARK, _SCOUT_READ_PAGE[engine])
     tools = ", ".join(_TOOL_WORDS[group] for group in tool_groups(member, browser))
     no_web = "" if has_web(member) else f" {_NO_WEB}"
     return (f"{prompt}\n\nTools you may use: {tools}. Use no other tool, even when one is available."
@@ -301,7 +323,7 @@ CLAUDE_HANDOFF = ("To hand work to a specialist, use the Agent tool with subagen
 _CLAUDE_TOOLS = {READ: ("Read",), WRITE: ("Edit", "Write", "NotebookEdit"), SEARCH: ("Glob", "Grep"),
                  SHELL: ("Bash",), WEB: ("WebSearch",)}
 # Fetching a page from inside the container is never a specialist's tool: pages are read through the
-# platform (read_page), which only opens addresses already seen.
+# platform (read_page), which fetches them outside the container and logs each one for the user.
 _CLAUDE_NEVER = ("WebFetch",)
 
 
@@ -380,7 +402,7 @@ def claude_agents(platform_server: str = "platform", model: str = "", browser: b
     return {
         m.id: {
             "description": m.description,
-            "prompt": role_prompt(m, browser),
+            "prompt": role_prompt(m, browser, engine=CLAUDE_CODE),
             "tools": claude_tools(m, platform_server, browser),
             "disallowedTools": claude_denied(m, platform_server),
             "model": model or "inherit",
@@ -463,7 +485,8 @@ def hermes_handoff(browser: bool = False) -> str:
     """How the Hermes lead hands work over: delegate_task has no named agents, so the lead passes the brief.
     `browser`: the browser is turned on for this user (Scout's brief says how to use it, or that there is
     none)."""
-    briefs = "\n\n".join(f"--- Brief for {m.name} ({m.description}) ---\n{role_prompt(m, browser)}" for m in CREW)
+    briefs = "\n\n".join(f"--- Brief for {m.name} ({m.description}) ---\n{role_prompt(m, browser, engine=HERMES)}"
+                         for m in CREW)
     return (
         "To hand work to a specialist, use delegate_task with one task per specialist. Put the specialists you "
         "want for one step into a single delegate_task call. Start the task's goal with the specialist's name and "
