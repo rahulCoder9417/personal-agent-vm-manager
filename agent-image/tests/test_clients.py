@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from bridge import crew
 from bridge.core import MEMORY_RULES, DeliverRequest, build_instructions
-from bridge.hermes import CREW_FOLLOW_UP, MAX_CREW_ROUNDS, HermesClient, HermesError, HermesProcess
+from bridge.hermes import CREW_FOLLOW_UP, MAX_CREW_ROUNDS, Conversations, HermesClient, HermesError, HermesProcess
 from bridge.mcp_client import MCPError, PlatformMCP
 
 
@@ -177,10 +177,12 @@ class HermesClientTest(unittest.TestCase):
         FakeHermes.health_calls = 0
         self.srv, self.url = serve(FakeHermes)
         self.progress = []
+        self.tmp = tempfile.mkdtemp()
 
     def tearDown(self):
         self.srv.shutdown()
         self.srv.server_close()
+        shutil.rmtree(self.tmp, ignore_errors=True)
 
     def run_turn(self, timeout=10):
         c = HermesClient(self.url, "local-key", poll_interval=0.01)
@@ -323,6 +325,57 @@ class HermesClientTest(unittest.TestCase):
         with self.assertRaises(HermesError):
             self.run_turn(timeout=0.3)
         self.assertEqual(len(self.run_posts()), 1)
+
+    def test_a_failed_turn_is_never_continued(self):
+        # Hermes keeps a failed turn's message in its session, and the next run with the same key would load it.
+        # After a failure the chat goes on in a new conversation (a new X-Hermes-Session-Key), kept across restarts.
+        path = os.path.join(self.tmp, "hermes-conversations.json")
+        failed = frames({"event": "run.failed", "error": "budget exceeded"})
+        done = frames({"event": "run.completed", "output": "ok"})
+        FakeHermes.runs = [done, failed, done, done, failed, done]
+        c = HermesClient(self.url, "local-key", poll_interval=0.01, conversations_path=path)
+
+        def turn(client, n):
+            return client.run(f"message {n}", "be brief", "telegram:42", f"evt-{n}#1", self.progress.append, 10)
+
+        self.assertEqual(turn(c, 1).status, "completed")
+        self.assertEqual(turn(c, 2).status, "failed")
+        self.assertEqual(turn(c, 3).status, "completed")
+        again = HermesClient(self.url, "local-key", poll_interval=0.01, conversations_path=path)  # a Bridge restart
+        self.assertEqual(turn(again, 4).status, "completed")
+        self.assertEqual(turn(again, 5).status, "failed")
+        self.assertEqual(turn(again, 6).status, "completed")
+        keys = [headers["X-Hermes-Session-Key"] for headers, _ in self.run_posts()]
+        self.assertEqual(keys, ["telegram:42", "telegram:42", "telegram:42#1", "telegram:42#1", "telegram:42#1",
+                                "telegram:42#2"])
+        self.assertEqual(oct(os.stat(path).st_mode & 0o777), oct(0o600))
+        # Another chat keeps its conversation.
+        FakeHermes.runs.append(done)
+        c.run("hi", "be brief", "web", "evt-7#1", self.progress.append, timeout=10)
+        self.assertEqual(self.run_posts()[-1][0]["X-Hermes-Session-Key"], "web")
+
+    def test_a_turn_that_broke_after_it_started_is_not_continued(self):
+        FakeHermes.runs = [frames({"event": "subagent.start", "subagent_id": "sa-1", "goal": "Byte: a long job"},
+                                  {"event": "run.completed", "output": "Byte is on it."})]
+        FakeHermes.health = [1]
+        c = HermesClient(self.url, "local-key", poll_interval=0.01)
+        with self.assertRaises(HermesError):
+            c.run("hello", "be brief", "telegram:42", "evt-1#1", self.progress.append, timeout=0.3)
+        self.assertEqual(c.conversations.key("telegram:42"), "telegram:42#1")
+        # Hermes could not be reached at all: nothing reached its session, so the conversation is kept.
+        down = HermesClient("http://127.0.0.1:9", "local-key")
+        with self.assertRaises(HermesError):
+            down.run("hello", "be brief", "telegram:42", "evt-2#1", self.progress.append, timeout=1)
+        self.assertEqual(down.conversations.key("telegram:42"), "telegram:42")
+
+    def test_a_long_session_key_stays_within_what_hermes_takes(self):
+        conversations = Conversations(None)
+        a, b = "x" * 256, "x" * 255 + "y"
+        conversations.failed(a)
+        conversations.failed(b)
+        self.assertLessEqual(len(conversations.key(a)), 256)
+        self.assertTrue(conversations.key(a).endswith("#1"))
+        self.assertNotEqual(conversations.key(a), conversations.key(b))
 
     def test_follow_up_turns_are_bounded(self):
         again = frames({"event": "subagent.start", "subagent_id": "sa-1", "goal": "Scout: once more"},

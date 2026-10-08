@@ -66,7 +66,8 @@ def main() -> int:
     hermes = HermesProcess(cmd, env, HERMES_API_PORT)
     hermes.start()
     client = HermesClient(f"http://127.0.0.1:{HERMES_API_PORT}", hermes.api_key,
-                          approval_choice=env.get("BRIDGE_HERMES_APPROVAL", "deny"), with_browser=with_browser)
+                          approval_choice=env.get("BRIDGE_HERMES_APPROVAL", "deny"), with_browser=with_browser,
+                          conversations_path=os.path.join(data, ".platform", "hermes-conversations.json"))
     reader = PlatformReader(platform_path, pf)
     claude_cmd = shlex.split(env.get("CLAUDE_CMD", "claude"))
     claude_auth = ClaudeAuth(claude_cmd, env)
