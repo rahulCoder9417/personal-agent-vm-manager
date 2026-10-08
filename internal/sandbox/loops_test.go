@@ -77,6 +77,73 @@ func TestTouchPostponesIdleStop(t *testing.T) {
 	}
 }
 
+// 2026-10-08: the health checker and the reaper tick at the same moments (both loops start together,
+// every 30 s and every 60 s), the health check holds the user's lock while it asks the Bridge, and the
+// reaper gave up as soon as it found the lock taken. An idle container stayed up 6 to 7 minutes.
+func TestReaperAndHealthCheckerAtTheSameMoment(t *testing.T) {
+	e := newEnv(t)
+	e.create(t, "u1")
+	e.wake(t, "u1")
+	e.clk.Advance(3 * time.Minute)
+	checking := make(chan struct{}, 1)
+	e.br.OnHealth = func(string) {
+		select {
+		case checking <- struct{}{}:
+		default:
+		}
+		time.Sleep(150 * time.Millisecond) // a /healthz answer that takes a moment
+	}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); e.m.HealthOnce(context.Background()) }()
+	<-checking // the health check holds the lock now
+	go func() { defer wg.Done(); e.m.ReapOnce(context.Background()) }()
+	wg.Wait()
+	if e.state(t, "u1") != store.StateStopped {
+		t.Fatal("the reaper must wait for the health check, not skip the round")
+	}
+}
+
+func TestReaperLeavesALongOperationToTheNextRound(t *testing.T) {
+	e := newEnv(t)
+	e.create(t, "u1")
+	e.wake(t, "u1")
+	e.clk.Advance(3 * time.Minute)
+	e.m.reaperLockWait = 50 * time.Millisecond
+	l := e.m.userLock("u1")
+	l.Lock() // e.g. a snapshot of the volume
+	e.m.ReapOnce(context.Background())
+	if e.state(t, "u1") != store.StateAwake {
+		t.Fatal("the reaper must not wait for a long operation")
+	}
+	l.Unlock()
+	e.m.ReapOnce(context.Background())
+	if e.state(t, "u1") != store.StateStopped {
+		t.Fatal("the next round must stop it")
+	}
+}
+
+func TestTryLockWithin(t *testing.T) {
+	var l sync.Mutex
+	l.Lock()
+	go func() { time.Sleep(30 * time.Millisecond); l.Unlock() }()
+	if !tryLockWithin(context.Background(), &l, time.Second) {
+		t.Fatal("must take a lock freed within the wait")
+	}
+	start := time.Now()
+	if tryLockWithin(context.Background(), &l, 60*time.Millisecond) {
+		t.Fatal("must give up on a lock held past the wait")
+	}
+	if d := time.Since(start); d < 60*time.Millisecond || d > time.Second {
+		t.Fatalf("waited %s", d)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if tryLockWithin(ctx, &l, time.Second) {
+		t.Fatal("must not wait past ctx")
+	}
+}
+
 // Never stop a container in the middle of a turn.
 func TestReaperNeverStopsMidTurn(t *testing.T) {
 	e := newEnv(t)
