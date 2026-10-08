@@ -90,6 +90,8 @@ def render_hermes_config(pf: PlatformFile, env: dict[str, str], data_dir: str = 
       turned on for the user
     - delegation (the crew): children cannot delegate, BRIDGE_CREW_MAX_PARALLEL at a time (default 3)
     - Hermes's own memory off: the user's memory is the platform's (remember / recall / forget)
+    - no runtime installs and no model catalog: Hermes fetches nothing from GitHub, PyPI, Nous or
+      OpenRouter when it starts
     - skills and sessions under HERMES_HOME (= /data/hermes)
     """
     base = env.get("LITELLM_BASE_URL", "http://litellm:4000").rstrip("/")
@@ -139,6 +141,20 @@ def render_hermes_config(pf: PlatformFile, env: dict[str, str], data_dir: str = 
         # Nor does Hermes offer, on a first message, to build a profile of the user in that memory
         # (agent/onboarding.py: "off" never offers).
         "onboarding": {"profile_build": "off"},
+        # Hermes downloads and installs nothing at runtime: only what the image pins runs. Without this, the
+        # gateway's start-up check (GatewayRunner._init_startup_checks -> tirith_security.ensure_installed) has
+        # Hermes's package manager fetch a standalone Python, uv and the tirith command scanner from GitHub and
+        # packages from PyPI into HERMES_HOME (about 480 MB, seen in a container with the open web). With it,
+        # nothing is fetched: the shell still works (tirith fails open, its default), and a tool that would
+        # need an install on first use is refused or left out (likely text_to_speech, whose default engine is
+        # an extra this image does not install). Hermes's own Docker image documents the same switch. The Bridge also sets HERMES_DISABLE_LAZY_INSTALLS (hermes.HermesProcess).
+        "security": {"allow_lazy_installs": False},
+        # No model catalog: the gateway would fetch it 30 s after start and every 20 minutes
+        # (hermes-agent.nousresearch.com, redirected to nousresearch.github.io; OpenRouter's model list;
+        # Nous Portal's recommended models; hermes_cli/model_catalog.refresh_catalogs). It feeds the /model
+        # picker only; the model here is fixed (LiteLLM, the name above), and the context size comes from
+        # LiteLLM.
+        "model_catalog": {"enabled": False},
         # The only "platform" Hermes runs: its local API server, loopback only.
         "gateway": {
             "api_server": {

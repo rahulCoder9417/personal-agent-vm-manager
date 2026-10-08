@@ -273,6 +273,11 @@ class HermesProcess:
             "API_SERVER_PORT": str(port),
             "API_SERVER_KEY": self.api_key,
             "HERMES_GATEWAY_NO_SUPERVISE": "1",
+            # Hermes installs nothing at runtime (also security.allow_lazy_installs: false in config.yaml, see
+            # platform.render_hermes_config). Read before the config file (pm/install.py lazy_installs_allowed)
+            # and inherited by Hermes's own child processes; unlike config.yaml, which Hermes reads again on every
+            # check and the agent can write, the running gateway's environment cannot be changed from a turn.
+            "HERMES_DISABLE_LAZY_INSTALLS": "1",
         })
         self._proc: Optional[subprocess.Popen] = None
         self._stopping = threading.Event()

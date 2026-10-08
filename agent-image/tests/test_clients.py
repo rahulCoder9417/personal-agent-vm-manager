@@ -1,13 +1,18 @@
 """HTTP-level tests for the Platform MCP client and the Hermes Runs API client."""
 
 import json
+import os
+import shutil
+import sys
+import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from bridge import crew
 from bridge.core import MEMORY_RULES, DeliverRequest, build_instructions
-from bridge.hermes import CREW_FOLLOW_UP, MAX_CREW_ROUNDS, HermesClient, HermesError
+from bridge.hermes import CREW_FOLLOW_UP, MAX_CREW_ROUNDS, HermesClient, HermesError, HermesProcess
 from bridge.mcp_client import MCPError, PlatformMCP
 
 
@@ -326,6 +331,30 @@ class HermesClientTest(unittest.TestCase):
         res = self.run_turn()
         self.assertEqual(res.output, "still working")
         self.assertEqual(len(self.run_posts()), MAX_CREW_ROUNDS + 1)
+
+
+class HermesProcessTest(unittest.TestCase):
+    def test_the_gateway_installs_nothing_at_runtime(self):
+        # The gateway is started with HERMES_DISABLE_LAZY_INSTALLS=1, next to security.allow_lazy_installs:
+        # false in config.yaml, whatever the container's environment says; the API server settings as before.
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        out = os.path.join(tmp, "env.json")
+        script = "import json, os, sys; json.dump(dict(os.environ), open(sys.argv[1], 'w'))"
+        proc = HermesProcess([sys.executable, "-c", script, out], {"PATH": os.environ.get("PATH", ""),
+                                                                    "HERMES_DISABLE_LAZY_INSTALLS": "0"}, 8642)
+        proc.start()
+        self.addCleanup(proc.stop, 1)
+        deadline = time.monotonic() + 10
+        while not os.path.exists(out) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        time.sleep(0.1)
+        with open(out) as fh:
+            env = json.load(fh)
+        self.assertEqual(env["HERMES_DISABLE_LAZY_INSTALLS"], "1")
+        self.assertEqual((env["API_SERVER_ENABLED"], env["API_SERVER_HOST"], env["API_SERVER_PORT"]),
+                         ("true", "127.0.0.1", "8642"))
+        self.assertEqual(env["API_SERVER_KEY"], proc.api_key)
 
 
 if __name__ == "__main__":

@@ -141,6 +141,21 @@ class PlatformTest(unittest.TestCase):
         self.assertNotIn("memory", cfg["agent"]["disabled_toolsets"])
         self.assertNotIn("session_search", cfg["agent"]["disabled_toolsets"])
 
+    def test_render_hermes_fetches_nothing_at_runtime(self):
+        # Seen in a container with the open web: at its first start the gateway fetched a standalone Python,
+        # uv and tirith from GitHub and packages from PyPI (480 MB), and on every start it fetched the model
+        # catalog from Nous, Nous Portal and OpenRouter. The two settings of the pinned Hermes that stop both.
+        for browser_on in (False, True):
+            cfg = render_hermes_config(load_platform_file(self.path), {"BROWSER_ROOT": "/nowhere"} if browser_on else {})
+            self.assertEqual(cfg["security"], {"allow_lazy_installs": False})
+            self.assertEqual(cfg["model_catalog"], {"enabled": False})
+        # Only the switch: tirith's own settings keep Hermes's defaults (enabled, fail open), so the shell
+        # works without the scanner instead of refusing every command.
+        self.assertNotIn("tirith_fail_open", cfg["security"])
+        self.assertNotIn("tirith_enabled", cfg["security"])
+        # The model stays the fixed LiteLLM one, which needs no catalog.
+        self.assertEqual(cfg["model"]["provider"], "custom")
+
     def test_write_is_private_json(self):
         pf = load_platform_file(self.path)
         home = os.path.join(self.tmp, "hermes")
