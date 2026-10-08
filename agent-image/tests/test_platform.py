@@ -39,8 +39,12 @@ class PlatformTest(unittest.TestCase):
         pf = load_platform_file(self.path)
         cfg = render_hermes_config(pf, {"LITELLM_BASE_URL": "http://litellm:4000/", "LITELLM_MODEL": "cheap",
                                         "PLATFORM_MCP_URL": "http://api:8080/mcp"})
+        # The context size is given, so Hermes does not probe LiteLLM's admin-only /v1/models/<name> at start.
         self.assertEqual(cfg["model"], {"provider": "custom", "base_url": "http://litellm:4000/v1",
-                                        "api_key": "sk-1", "default": "cheap"})
+                                        "api_key": "sk-1", "default": "cheap", "context_length": 128_000})
+        for raw, want in (("200000", 200_000), ("64000", 64_000), ("1000", 128_000), ("lots", 128_000), ("", 128_000)):
+            self.assertEqual(render_hermes_config(pf, {"BRIDGE_HERMES_CONTEXT_LENGTH": raw})["model"]["context_length"],
+                             want, raw)
         platform = cfg["mcp_servers"]["platform"]
         self.assertEqual(platform["url"], "http://api:8080/mcp")
         self.assertEqual(platform["headers"], {"Authorization": "Bearer tok-123"})
