@@ -167,11 +167,23 @@ Header `X-Bridge-Secret: <secret>` on every call except health.
 | Call | Behaviour |
 |---|---|
 | `GET /healthz` | `200 {"ok":true,"busy":N,"runtime":"hermes\|claude_code","claude_connected":bool\|null,"claude_login_pending":bool,"browser":bool}` when the current runtime answers (Hermes API / `claude` installed), else `503`. `busy` = turns in progress; `claude_connected` is `null` until `claude auth status` has answered once; `browser` = Scout's browser is turned on in this container |
-| `POST /deliver` | Body `{"delivery_id","kind","session_key","channel","text","attachments":[{"id","name","mime_type","url"}],"approval_id","approved","metadata":{}}`, `kind` = `message` / `approval_answer` / `automation` / `app_event`. `200` with `Content-Type: application/x-ndjson`, one line per event: `{"type":"accepted\|working\|turn_done\|error","message":"...","platform_fault":bool}`, ending with `turn_done` or `error`. A `working` message is `using <tool>`, or a crew line that starts with the member's name and a colon (`Scout: researching flight options`, `Scout: done`; see "The crew"). The last event also has `"browser_seconds":N,"browser_report_id":"<delivery_id>#<n>"` when Scout's browser was open: whole seconds since the Bridge's last report, and an id under which the vm-manager stores the report once (both are left out when the browser never started). `401` bad secret, `400` bad body |
+| `POST /deliver` | Body `{"delivery_id","kind","session_key","channel","text","attachments":[{"id","name","mime_type","url"}],"approval_id","approved","metadata":{}}`, `kind` = `message` / `approval_answer` / `automation` / `app_event`. `200` with `Content-Type: application/x-ndjson`, one line per event: `{"type":"accepted\|working\|turn_done\|error","message":"...","platform_fault":bool}`, ending with `turn_done` or `error`. A `working` message is `using <tool>`, or a crew line that starts with the member's name and a colon (`Scout: researching flight options`, `Scout: done`; see "The crew"). The last event also has `"browser_seconds":N,"browser_report_id":"<delivery_id>#<n>"` when Scout's browser was open: whole seconds since the Bridge's last report, and an id under which the vm-manager stores the report once (both are left out when the browser never started). `metadata` is `DeliverRequest.metadata_json` as the backend sent it; the Bridge reads two fields of it, see "What the Bridge reads in `metadata`". `401` bad secret, `400` bad body |
 | `POST /shutdown` | Stop taking work, stop Hermes (it saves to /data), `200` when done (< 20 s) |
 | `POST /claude/login/start` | Starts `claude auth login` (in a pty). `200 {"login_id","authorize_url","expires_at"}` (unix ms, +10 min). One pending sign-in per container; a new start replaces it. `502` no link shown, `503` Claude Code not installed |
 | `POST /claude/login/complete` | Body `{"login_id","code"}`. Types the code into the waiting CLI, waits (<= 60 s) and asks `claude auth status`. `200 {"connected":bool,"message":"..."}`; `409` unknown / expired / used; `400` missing or multi-line code. Bodies are never logged |
 | `POST /claude/logout` | Runs `claude auth logout`. `200 {"ok":true,"claude_connected":false}` |
+
+**What the Bridge reads in `metadata`** (shared spec of 2026-10-08, "New chat" and "Claude Code model and
+effort"; no proto or Go change: the vm-manager passes `metadata_json` through as it is):
+
+| Field | What the Bridge does |
+|---|---|
+| `"chat_epoch": <int>` | The chat's count of the user's "New chat" (the chat is the `session_key`). Missing means 0. Each engine keeps, per chat, the last number it saw. When a delivery's number is higher, that engine starts a fresh conversation for the chat before the turn runs: on Claude Code a new session (not resumed), on Hermes a new conversation key, the same way as after a failed turn. A lower or equal number changes nothing. Each engine keeps its own number, so a chat started anew while it ran on Hermes also starts anew on Claude Code the next time it runs there. The platform's memory (`remember`) is not part of a chat and stays |
+| `"claude": {"model": "<id>", "effort": "<level>"}` | Claude Code only (Hermes ignores it). `model` goes to the CLI as `--model`, and wins over `BRIDGE_CLAUDE_MODEL`; `effort` as `--effort`. Either may be left out: the Bridge's default model, the CLI's default effort. See "Model and effort" under "Claude Code runtime" for what 2.1.283 accepts |
+
+A value that is not what the spec says (a negative or non-integer `chat_epoch`, a `model` that is not a model
+name, an `effort` not in `low`, `medium`, `high`, `xhigh`, `max`) is left out with a warning in the log; the
+message still runs. A `model` must start with a letter or a digit, so it can never be read as another flag.
 
 Dedupe by `delivery_id`: a repeat of a finished delivery returns `accepted` +
 `turn_done` without running again; a repeat while it runs attaches to the same turn; a
@@ -189,13 +201,18 @@ spend limit -> `"Your Claude plan's usage limit was reached: <the CLI's message>
 `platform_fault=false`; account on hold or organisation not allowed -> `"Your Claude account can't be
 used right now"`, `platform_fault=false`; Anthropic's safeguards refused the request (on the first model
 and on the CLI's fallback) -> `"Claude declined this request under Anthropic's usage policy"`,
-`platform_fault=false`; step limit (`error_max_turns`) -> `platform_fault=false`; crash,
+`platform_fault=false`; the model or effort the user chose for the turn (`metadata.claude`) refused (the CLI's
+error code `model_not_found`, an API 404, or an API 400 that names that model or the effort) -> `"Claude Code
+could not use the model or thinking effort chosen in Settings: <the CLI's message>"`, `platform_fault=false` (the
+same answer for the Bridge's own default model stays a platform fault); step limit (`error_max_turns`) ->
+`platform_fault=false`; crash,
 timeout, overload, anything else -> `platform_fault=true`. The Bridge decides from the CLI's own error code
 for a failed API call (the `error` of its assistant message: `authentication_failed`, `billing_error`,
 `rate_limit`, ...), a `stop_reason` of `refusal`, then the error text.
 
 Every failed Claude Code run is logged once in `docker logs` (`bridge.claude WARNING claude run failed: {...}`):
-the delivery, the reason, `platform_fault`, the exit code, how the run ended (`subtype`, `is_error`,
+the delivery, the reason, `platform_fault`, the exit code, the model and effort it was given (`""` = the
+default), how the run ended (`subtype`, `is_error`,
 `terminal_reason`, `api_error_status`, `stop_reason`), the CLI's last API error (its code, text and a refusal's
 category), the last API retry and the last 10 lines of stderr. The container's secrets are replaced with
 `[secret]`, and a line that quotes the user's message is left out.
@@ -217,7 +234,10 @@ session on every exit path, a failed one included, and has no documented way ove
 back, so after a turn that reached Hermes and failed, the chat goes on in a new Hermes conversation: the key
 gets a suffix (`telegram:42#1`, then `#2`, ...; `/data/.platform/hermes-conversations.json`). The failed
 message is never continued; the cost is that Hermes starts that chat afresh. What carries over is the
-platform's memory (`recall`) and Hermes's `session_search` over earlier conversations. Hermes's own
+platform's memory (`recall`) and Hermes's `session_search` over earlier conversations. The user's "New chat"
+(a higher `chat_epoch`, see "What the Bridge reads in `metadata`") moves the chat to the next suffix the same
+way, before the turn runs; each record in that file is now `{"generation": n, "epoch": e}` (the bare number an
+older Bridge wrote is read as epoch 0). Hermes's own
 approval prompts are denied by policy (`BRIDGE_HERMES_APPROVAL`); risky real-world
 actions go through the platform's `request_approval` tool.
 
@@ -301,13 +321,17 @@ Anthropic's page, copies the code -> `CompleteClaudeLogin` -> if connected,
 Bash,Read,Edit,Write,Glob,Grep,NotebookEdit,TodoWrite,WebSearch,mcp__platform,mcp__user_<id>...,Agent
 --disallowedTools mcp__platform__send_message WebFetch --setting-sources user
 --settings /data/.platform/claude-settings.json --agents <the crew as JSON>
---append-system-prompt <channel and crew instructions> (--session-id <new uuid> | --resume <id> --fork-session)`
-with the message on stdin. The MCP
+--append-system-prompt <channel and crew instructions> [--model <model>] [--effort <level>]
+(--session-id <new uuid> | --resume <id> --fork-session)`
+with the message on stdin (`--model` / `--effort`: see "Model and effort" below). The MCP
 config (0600, rewritten every turn) has the Platform MCP with the container's bearer token and
 the user's own MCP servers. The settings file (0600, rewritten every turn) has one hook, which
 keeps the lead off the web tools; `WebSearch` is in the allow list for Scout, not for the lead
 (see "The crew"). Each `session_key` maps to one Claude session
-(`/data/.platform/claude-sessions.json`); a lost session starts a new one. Turns of the same
+(`/data/.platform/claude-sessions.json`, with the chat's last `chat_epoch`); a lost session starts a new one, and
+so does a new chat: the chat leaves its session before the turn, and that is written to /data first, so a new
+chat whose first turn fails never goes back to the old session (the old transcript stays until the CLI's 30-day
+clean-up; it is never resumed). Turns of the same
 chat run one at a time. **A failed turn is never continued.** The CLI writes the message into the session
 before it calls the model, a failed one included, and on `--resume` the model sees it again (2026-10-08: three
 messages refused for the plan's limit were carried out 90 minutes later, with the next message). So a turn on an
@@ -323,8 +347,42 @@ transcript once more (about 0.7 MB for the test user's main chat).
 `system/init` and `result` give the session id, `tool_use` blocks
 become `working` events, `system/api_retry` becomes "Claude is retrying (...)", the `result`
 text is the answer the Bridge sends with `send_message`. `BRIDGE_CLAUDE_MODEL` and
-`BRIDGE_CLAUDE_MAX_TURNS` are optional (default: the plan's default model, no turn limit);
-so are the crew's `BRIDGE_CLAUDE_CREW_MODEL` and `BRIDGE_CREW_MAX_PARALLEL` (see "The crew").
+`BRIDGE_CLAUDE_MAX_TURNS` are optional (default: the plan's default model, no turn limit; a model the user chose
+for the turn wins over `BRIDGE_CLAUDE_MODEL`); so are the crew's `BRIDGE_CLAUDE_CREW_MODEL` and
+`BRIDGE_CREW_MAX_PARALLEL` (see "The crew").
+
+**Model and effort** (the user's choice, `metadata.claude`; shared spec "Claude Code model and effort").
+What the pinned 2.1.283 accepts, checked on 2026-10-08 in its `--help`, in the model table built into the binary,
+and by running it against a fake Messages API that logs what it is sent (`docs/build-report.md` section 11):
+- **`--model <model>`**: "Provide an alias for the latest model (e.g. 'fable', 'opus', or 'sonnet') or a model's
+  full name (e.g. 'claude-fable-5')". Full ids work, not only aliases. The four ids of the spec:
+  `claude-opus-5-5` (Opus 5.5), `claude-fable-5-1` (Fable 5.1) and `claude-haiku-4-5` (Haiku 4.5) are in the
+  binary's model table; `claude-sonnet-5-5` is not (Sonnet 5.5 came with 2.1.284, the docs' version history:
+  "v2.1.284 `sonnet` resolves to Sonnet 5.5"). 2.1.283 still sends it as given, with the effort, and prints
+  `[claude-code:unrecognized_model]` on stderr; the alias `sonnet` is Sonnet 5 (`claude-sonnet-5`) there, and
+  `haiku` is Haiku 4.5. An id the account cannot use comes back from the API as a 404, which the CLI turns into
+  its error `model_not_found`: "There's an issue with the selected model (<id>). It may not exist or you may not
+  have access to it."
+- **Effort: the flag `--effort <level>`**, "Effort level for the current session (low, medium, high, xhigh,
+  max)". It is sent to the API as `output_config.effort`. Also documented, not used: the environment variable
+  `CLAUDE_CODE_EFFORT_LEVEL`, which wins over the flag (seen: `CLAUDE_CODE_EFFORT_LEVEL=low` with `--effort xhigh`
+  sent `low`), so the Bridge never passes it to the CLI; and the settings keys `effortLevel` / `modelSettings`,
+  which do not take `max` (model-config page). An unknown level is ignored with a warning ("Unknown --effort
+  value 'extreme' ... using the default effort").
+- **Which models take which levels** (the binary's table; the same as the model-config page): Opus 5.5 and
+  Fable 5.1 take all five, `xhigh` and `max` included (default effort: Opus 5.5 `medium`, Fable 5.1 `high`).
+  Sonnet 5.5 is not in 2.1.283's table; it was sent the effort it was given, and `high` when none was given.
+  **Haiku 4.5 has no effort levels**: the CLI leaves the effort out of the request (it sends extended thinking
+  with a fixed budget instead), so the user's effort has no effect with Haiku 4.5. A level a model does not
+  take falls back to the highest it does (seen: Sonnet 4.6 with `xhigh` sent `high`).
+- **The crew**: a sub-agent's `model` (`--agents`, and the sub-agents page) takes `sonnet`, `opus`, `haiku`,
+  `fable`, a full model id, or `inherit`; a sub-agent can have its own `effort` (same five levels; the docs list
+  `effort` among the fields `--agents` takes, and 2.1.283 sent a specialist's `"effort": "low"`). The crew has
+  `model: inherit` and no `effort`, so Byte, Patch and Scout run on the model the user chose at the session's
+  effort (seen: Scout's request had `claude-opus-5-5` and `xhigh`), unless `BRIDGE_CLAUDE_CREW_MODEL` pins a
+  model for them; a pinned model without effort levels (Haiku 4.5) gets none.
+- A turn on an existing chat on another model than the chat's last turn resumes the chat's session as usual (seen:
+  a Fable 5.1 turn after an Opus 5.5 one carried the earlier messages).
 
 **Compliance** (https://code.claude.com/docs/en/legal-and-compliance): the binary is installed
 and run as published, and no built-in auth method is removed or disabled (we only choose, per
@@ -438,7 +496,8 @@ https://code.claude.com/docs/en/cli-reference, https://code.claude.com/docs/en/e
   sub-agents), on top of the missing `Agent` tool. `CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1`
   removes the built-in types (Explore, Plan, general-purpose), so a call without `subagent_type`
   fails. `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS` caps how many run at once.
-- **Model:** `inherit` (the lead's) unless `BRIDGE_CLAUDE_CREW_MODEL` names another.
+- **Model:** `inherit` (the lead's, which is the model the user chose for the turn) unless
+  `BRIDGE_CLAUDE_CREW_MODEL` names another. No `effort` field: a specialist runs at the session's `--effort`.
 - **Background:** in `claude -p` a sub-agent runs in the background unless the lead needs its
   result first. The CLI stays open until background sub-agents are done (it gives up after 10
   idle minutes). The Bridge takes the last `result` event as the answer.
@@ -717,4 +776,7 @@ nothing, the browser's switches) are tested against fakes, the pinned browser an
 not yet in an image on the server; the checks to run are in that section's "Not verified yet". So is the
 second round of 2026-10-08 (a failed turn never continued, failed runs logged, refusals not a platform fault,
 the reaper's wait, Hermes's context size), also run with the real 2.1.283 binary against a fake API; the
-checks are in `docs/build-report.md` section 10.
+checks are in `docs/build-report.md` section 10. So is the third (a new chat, and the Claude Code model and effort
+from the delivery's metadata): tested against fakes and run through the Bridge with the real 2.1.283 binary against
+a fake API, not against Anthropic's API with a real plan and not in an image on the server; the checks are in
+`docs/build-report.md` section 11.
