@@ -2,22 +2,30 @@
 
 State lives in $CLAUDE_CONFIG_DIR:
   .credentials.json   present = signed in (written by `auth login`, removed by `auth logout`)
-  fake_mode           optional behaviour switch: limit | crash | hang | max_turns | login_hang | login_no_url |
+  fake_mode           optional behaviour switch: limit | refusal | crash | crash_noisy | hang | max_turns |
+                      login_hang | login_no_url |
                       crew (the lead starts specialists in the foreground) | crew_background |
                       crew_unreported (a background specialist whose end the stream never reports) |
                       crew_hang (a specialist starts, then the CLI hangs) |
                       web (the lead calls the web and browser tools itself, then Scout calls them; the
                       PreToolUse hooks of --settings are run for each call)
   fake_calls.jsonl    one line per -p run: argv, prompt (stdin), cwd, selected env, the MCP config, --agents,
-                      the --settings file
-  fake_sessions.json  known session ids -> number of turns
+                      the --settings file, and `history`: the messages of the session this run continues
+  fake_sessions.json  known session ids -> the messages written into each, in order
+  projects/<cwd>/<session id>.jsonl   a transcript file per session, like the real CLI's (one line per message)
+
+Like the real CLI (2.1.283, checked against a fake API): every message is written into the session before the
+model is called, a failed one included; `--resume <id> --fork-session` continues a copy of the session under a
+new id (the init event names it) and leaves the original unchanged.
 """
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
+import uuid
 
 CFG = os.environ.get("CLAUDE_CONFIG_DIR", "")
 CREDS = os.path.join(CFG, ".credentials.json")
@@ -130,9 +138,15 @@ def print_mode(args) -> int:
     if m == "crash":
         sys.stderr.write("fatal: something broke\n")
         return 3
-    if m == "hang":
-        time.sleep(60)
-        return 1
+    if m == "crash_noisy":
+        # stderr that holds what must never reach the Bridge's log: a token, a key and the user's message.
+        sys.stderr.write("connecting to http://api:8080/mcp with Authorization: Bearer tok-123\n")
+        sys.stderr.write("oauth refresh used sk-ant-oat01-AbCdEfGhIjKlMnOp\n")
+        sys.stderr.write(f"while handling the prompt: {prompt.strip()}\n")
+        sys.stderr.write("\n" * 3)
+        sys.stderr.write("TypeError: undefined is not an object (evaluating 'x.y')\n")
+        sys.stderr.write("fatal: something broke\n")
+        return 3
     if not os.path.exists(CREDS):
         out({"type": "result", "subtype": "success", "is_error": True, "result": "Not logged in · Please run /login",
              "session_id": sid})
@@ -141,16 +155,54 @@ def print_mode(args) -> int:
         out({"type": "result", "subtype": "error_during_execution", "is_error": True,
              "result": f"No conversation found with session ID: {resume}", "session_id": resume})
         return 1
+    history = list(sessions.get(sid, []))
+    if resume and "--fork-session" in args:
+        sid = str(uuid.uuid4())  # a copy of the session under a new id; the original is left as it was
     out({"type": "system", "subtype": "init", "session_id": sid, "model": "claude-fake",
          "mcp_servers": [{"name": n, "status": "connected"} for n in ((mcp or {}).get("mcpServers") or {})]})
-    sessions[sid] = sessions.get(sid, 0) + 1
+    sessions[sid] = history + [prompt]  # written before the model is called: a failed turn's message too
     with open(sessions_path, "w") as fh:
         json.dump(sessions, fh)
+    project = os.path.join(CFG, "projects", re.sub(r"[^A-Za-z0-9]", "-", os.getcwd()))
+    os.makedirs(project, exist_ok=True)
+    with open(os.path.join(project, f"{sid}.jsonl"), "w") as fh:
+        fh.writelines(json.dumps({"type": "user", "sessionId": sid, "message": p}) + "\n" for p in sessions[sid])
+    with open(os.path.join(CFG, "fake_calls.jsonl")) as fh:
+        lines = fh.readlines()
+    lines[-1] = json.dumps({**json.loads(lines[-1]), "history": history, "session": sid}) + "\n"
+    with open(os.path.join(CFG, "fake_calls.jsonl"), "w") as fh:
+        fh.writelines(lines)
+    if m == "hang":
+        time.sleep(60)
+        return 1
     if m == "limit":
+        # As 2.1.283 reports the plan's limit (a 429 with the subscription's limit headers).
         out({"type": "system", "subtype": "api_retry", "attempt": 1, "max_retries": 3, "retry_delay_ms": 10,
              "error_status": 429, "error": "rate_limit", "session_id": sid})
-        out({"type": "result", "subtype": "success", "is_error": True,
+        msg(sid, "assistant", [{"type": "text", "text": "You've hit your session limit · resets 3:45pm"}],
+            error="rate_limit")
+        out({"type": "result", "subtype": "success", "is_error": True, "terminal_reason": "api_error",
+             "api_error_status": 429, "stop_reason": "stop_sequence",
              "result": "You've hit your session limit · resets 3:45pm", "session_id": sid})
+        return 1
+    if m == "refusal":
+        # As 2.1.283 reports a request Anthropic's safeguards refused, on the first model and on the fallback.
+        out({"type": "system", "subtype": "informational", "level": "notice", "session_id": sid,
+             "content": "Opus 5.5's safeguards stopped the response above · continuing once with that noted"})
+        out({"type": "system", "subtype": "model_refusal_fallback", "trigger": "refusal", "direction": "retry",
+             "scope": "session", "original_model": "claude-opus-5-5", "fallback_model": "claude-opus-5",
+             "api_refusal_category": "cyber", "session_id": sid})
+        out({"type": "system", "subtype": "model_refusal_no_fallback", "original_model": "claude-opus-5",
+             "api_refusal_category": "cyber", "session_id": sid, "content": ""})
+        text = ("API Error: Opus 5's safeguards flagged this message (https://www.anthropic.com/legal/aup). "
+                "Try rephrasing the request in a new session or change your model.")
+        out({"type": "assistant", "session_id": sid, "parent_tool_use_id": None, "error": "invalid_request",
+             "message": {"model": "<synthetic>", "role": "assistant", "stop_reason": "refusal",
+                         "stop_details": {"type": "refusal", "category": "cyber", "explanation": "blocked"},
+                         "content": [{"type": "text", "text": text}]}})
+        out({"type": "result", "subtype": "success", "is_error": True, "terminal_reason": "api_error",
+             "api_error_status": None, "stop_reason": "refusal", "num_turns": 2, "result": text,
+             "session_id": sid})
         return 1
     if m == "max_turns":
         out({"type": "result", "subtype": "error_max_turns", "is_error": True, "session_id": sid})
@@ -174,7 +226,7 @@ def print_mode(args) -> int:
         {"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}})
     out({"type": "assistant", "session_id": sid, "message": {"content": [{"type": "text", "text": "done"}]}})
     out({"type": "result", "subtype": "success", "is_error": False,
-         "result": f"reply {sessions[sid]} to: {prompt.strip().splitlines()[-1] if prompt.strip() else ''}",
+         "result": f"reply {len(sessions[sid])} to: {prompt.strip().splitlines()[-1] if prompt.strip() else ''}",
          "session_id": sid, "total_cost_usd": 0.01})
     return 0
 
