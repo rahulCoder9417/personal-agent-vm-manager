@@ -18,7 +18,7 @@ import urllib.request
 from bridge import browser, crew
 from bridge.claude import (LEAD_GATE, MSG_NOT_SIGNED_IN, ClaudeAuth, ClaudeError, ClaudeRunner, CrewEvents,
                            LoginNotFound, find_authorize_url, render_settings)
-from bridge.core import Bridge, DeliverRequest, DeliveryStore
+from bridge.core import MEMORY_RULES, Bridge, DeliverRequest, DeliveryStore
 from bridge.lead_gate import BLOCK, PASS, REFUSAL
 from bridge.platform import load_platform_file
 from bridge.runtime import PlatformReader, RuntimeRunner
@@ -186,6 +186,8 @@ class ClaudeRunnerTest(unittest.TestCase):
         self.assertIsNone(call["env"]["ANTHROPIC_API_KEY"], "platform keys must never reach the CLI")
         self.assertEqual(call["env"]["CLAUDE_CONFIG_DIR"], self.e.cfg)
         self.assertEqual(call["env"]["DISABLE_AUTOUPDATER"], "1")
+        # One memory, the platform's: Claude Code's own auto memory is off.
+        self.assertEqual(call["env"]["CLAUDE_CODE_DISABLE_AUTO_MEMORY"], "1")
         self.assertEqual(call["env"]["HTTPS_PROXY"], "http://proxy:3128")
         # MCP config: Platform MCP with the container token + the user's own server; private file.
         servers = call["mcp"]["mcpServers"]
@@ -727,6 +729,29 @@ class BridgeWithRuntimesTest(unittest.TestCase):
         self.assertFalse(self.bridge.healthy())
         self.e.write_platform("claude_code")
         self.assertTrue(self.bridge.healthy())
+
+    def test_one_memory_the_platforms(self):
+        # The lead on Claude Code is told to keep the user's facts in the platform's memory, and the CLI's own
+        # auto memory is off, whatever the container's environment says ("0" would force it on).
+        self.e.sign_in()
+        self.e.write_platform("claude_code")
+        claude = ClaudeRunner([self.e.cli], {**self.e.env, "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "0"}, self.e.data,
+                              self.e.reader().load)
+        self.runtime = RuntimeRunner(self.e.reader().load, {"hermes": self.hermes, "claude_code": claude})
+        self.bridge = Bridge(SECRET, self.runtime, self.sender,
+                             DeliveryStore(os.path.join(self.e.data, ".platform", "deliveries.json")), retry_delay=0)
+        self.assertEqual(types(self.deliver("d1", "remember that I take my coffee black")),
+                         ["accepted", "working", "turn_done"])
+        call = self.e.calls()[0]
+        self.assertEqual(call["env"]["CLAUDE_CODE_DISABLE_AUTO_MEMORY"], "1")
+        prompt = flag(call["argv"], "--append-system-prompt")
+        self.assertIn(MEMORY_RULES, prompt)
+        for part in ("save it with the platform tool remember", "use recall", "use forget",
+                     "Do not keep facts about the user in a memory of your own"):
+            self.assertIn(part, prompt)
+        # The chat still resumes its own session the next time: auto memory is not the transcript.
+        self.deliver("d2", "and what do I drink?")
+        self.assertEqual(flag(self.e.calls()[1]["argv"], "--resume"), flag(call["argv"], "--session-id"))
 
 
 class ClaudeAuthTest(unittest.TestCase):

@@ -63,6 +63,8 @@ RUNTIMES = (RUNTIME_HERMES, RUNTIME_CLAUDE)
 STRIPPED_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN",
                 "ANTHROPIC_PROFILE", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY")
 
+AUTO_MEMORY_ENV = "CLAUDE_CODE_DISABLE_AUTO_MEMORY"
+
 # The lead's built-in tools, allowed without a prompt (everything else is denied in dontAsk mode). No web
 # tool: the web is Scout's (crew.py).
 DEFAULT_ALLOWED_TOOLS = ("Bash", "Read", "Edit", "Write", "Glob", "Grep", "NotebookEdit", "TodoWrite")
@@ -108,6 +110,13 @@ def child_env(env: dict[str, str]) -> dict[str, str]:
     out.setdefault("DISABLE_ERROR_REPORTING", "1")
     # claude.ai connectors would go through mcp-proxy.anthropic.com (not on the egress allowlist).
     out.setdefault("ENABLE_CLAUDEAI_MCP_SERVERS", "false")
+    # One memory, the platform's (remember / recall / forget; core.MEMORY_RULES). Claude Code's own auto memory
+    # (notes it writes under $CLAUDE_CONFIG_DIR/projects/<project>/memory/ and loads into every session) is off:
+    # "Set to 1 to disable auto memory ... When disabled, Claude does not create or load auto memory files"
+    # (code.claude.com/docs/en/env-vars; /memory "Enable or disable auto memory"; read by 2.1.283). Always set,
+    # never taken from the container's env ("0" would force it on). Session transcripts, and so --resume, are
+    # not part of it.
+    out[AUTO_MEMORY_ENV] = "1"
     return out
 
 

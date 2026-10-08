@@ -6,7 +6,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from bridge import crew
-from bridge.core import DeliverRequest, build_instructions
+from bridge.core import MEMORY_RULES, DeliverRequest, build_instructions
 from bridge.hermes import CREW_FOLLOW_UP, MAX_CREW_ROUNDS, HermesClient, HermesError
 from bridge.mcp_client import MCPError, PlatformMCP
 
@@ -220,6 +220,8 @@ class HermesClientTest(unittest.TestCase):
             self.assertIn(part, sent)
         self.assertEqual(sent.count("You have no web search, no page reading and no browser"), 2,
                          "Byte's and Patch's briefs")
+        # One memory, the platform's: the Hermes lead is told so too (its own memory tool is off in config.yaml).
+        self.assertIn(MEMORY_RULES, sent)
 
     def test_the_hermes_lead_is_told_the_browser_is_scouts(self):
         # The same for the browser: on Hermes the browser tools are in everyone's list, so the lead's

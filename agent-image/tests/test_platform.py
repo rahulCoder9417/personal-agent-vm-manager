@@ -131,6 +131,16 @@ class PlatformTest(unittest.TestCase):
         # The lead keeps delegate_task: only scheduling, messaging and Hermes's own browser tools are off.
         self.assertEqual(cfg["agent"]["disabled_toolsets"], ["cronjob", "messaging", "browser"])
 
+    def test_render_without_hermes_own_memory(self):
+        # One memory, the platform's: both of Hermes's own stores off (no MEMORY.md / USER.md in the prompt, no
+        # `memory` tool), and no first-message offer to build a profile in them. Sessions are not touched:
+        # session_search (chat history) is not among the disabled toolsets.
+        cfg = render_hermes_config(load_platform_file(self.path), {})
+        self.assertEqual(cfg["memory"], {"memory_enabled": False, "user_profile_enabled": False})
+        self.assertEqual(cfg["onboarding"], {"profile_build": "off"})
+        self.assertNotIn("memory", cfg["agent"]["disabled_toolsets"])
+        self.assertNotIn("session_search", cfg["agent"]["disabled_toolsets"])
+
     def test_write_is_private_json(self):
         pf = load_platform_file(self.path)
         home = os.path.join(self.tmp, "hermes")

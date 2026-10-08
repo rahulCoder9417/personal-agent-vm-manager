@@ -89,7 +89,8 @@ def render_hermes_config(pf: PlatformFile, env: dict[str, str], data_dir: str = 
       built-in browser tools off: the only browser is Scout's, behind the guard, and only when it is
       turned on for the user
     - delegation (the crew): children cannot delegate, BRIDGE_CREW_MAX_PARALLEL at a time (default 3)
-    - memory, skills and sessions under HERMES_HOME (= /data/hermes)
+    - Hermes's own memory off: the user's memory is the platform's (remember / recall / forget)
+    - skills and sessions under HERMES_HOME (= /data/hermes)
     """
     base = env.get("LITELLM_BASE_URL", "http://litellm:4000").rstrip("/")
     if not base.endswith("/v1"):
@@ -129,7 +130,15 @@ def render_hermes_config(pf: PlatformFile, env: dict[str, str], data_dir: str = 
         # The crew: the lead hands work over with delegate_task, one level deep, a few at a time.
         "delegation": crew.hermes_delegation(crew.max_parallel(env)),
         "terminal": {"backend": "local", "cwd": os.path.join(data_dir, "workspace"), "timeout": 180},
-        "memory": {"memory_enabled": True, "user_profile_enabled": True},
+        # One memory, the platform's (remember / recall / forget; core.MEMORY_RULES). Hermes's own (MEMORY.md
+        # and USER.md under HERMES_HOME/memories, its `memory` tool) is off: with both stores off no store is
+        # built, nothing is loaded into the prompt and the tool is left out of the tool list (memory_tool.py
+        # check_memory_requirements, agent_init._init_memory at the pinned commit). Sessions, chat history and
+        # session_search are separate and unchanged.
+        "memory": {"memory_enabled": False, "user_profile_enabled": False},
+        # Nor does Hermes offer, on a first message, to build a profile of the user in that memory
+        # (agent/onboarding.py: "off" never offers).
+        "onboarding": {"profile_build": "off"},
         # The only "platform" Hermes runs: its local API server, loopback only.
         "gateway": {
             "api_server": {
