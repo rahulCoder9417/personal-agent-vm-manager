@@ -191,7 +191,8 @@ MEMORY_RULES = (
 # Each engine has a notion of its own about that, which is why both texts end by setting it aside: Claude Code's
 # system prompt says its output is "rendered in a monospace font" as "Github-flavored markdown" (2.1.283), and
 # Hermes's hint for its API server says "assume plain text. No markdown formatting" (the pinned commit,
-# agent/prompt_builder.py PLATFORM_HINTS["api_server"]).
+# agent/prompt_builder.py PLATFORM_HINTS["api_server"]). That hint is replaced in config.yaml
+# (platform.HERMES_API_HINT), but a Hermes conversation that started before keeps it in its stored prompt.
 WEB_CHANNEL = "web"
 FORMAT_WEB = (
     "Formatting: the user reads your final answer in the web app, which shows Markdown as formatted text. So use "
