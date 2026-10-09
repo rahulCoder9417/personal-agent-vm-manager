@@ -4,7 +4,8 @@ Hermes runs as `hermes gateway run` with only its API server enabled, bound to
 127.0.0.1 and protected by a random per-boot key that never leaves this process
 tree. One Hermes run = one delivered message (plus follow-up runs when the lead handed work
 to its crew, see HermesClient.run). Hermes keeps one conversation per
-`X-Hermes-Session-Key` (we pass the platform's session key, e.g. "telegram:42").
+`X-Hermes-Session-Key`: we pass the platform's session key (e.g. "telegram:42"), with a suffix
+that tells the chat's conversations apart (Conversations).
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import signal
 import subprocess
@@ -26,6 +28,9 @@ from typing import Any, Iterator, Optional
 from . import crew
 
 log = logging.getLogger("bridge.hermes")
+
+# A conversation's number (`chat_epoch`) as a key of hermes-conversations.json.
+_EPOCH_KEY = re.compile(r"[0-9]{1,18}")
 
 TERMINAL_EVENTS = {"run.completed", "run.failed", "run.cancelled", "run.interrupted"}
 
@@ -48,70 +53,91 @@ class HermesError(Exception):
 
 
 class Conversations:
-    """session_key -> the X-Hermes-Session-Key of the chat's current Hermes conversation, persisted in /data.
+    """The X-Hermes-Session-Key of each conversation of each chat, persisted in /data.
+
+    A chat is a session_key. Its conversations are numbered by the backend (`chat_epoch`: 0, then one more at
+    each "New chat"), and each has its own Hermes conversation, so its own key. A key is the session key with a
+    suffix: none for the chat's first key, then `#1`, `#2`, ... in the order the keys were handed out; a key
+    Hermes has not seen starts a fresh session (the API server docs: "A request without any continuation starts
+    a fresh session"). One record per chat:
+
+        {"generation": n, "epoch": e, "epochs": {"<epoch>": suffix number, ...}}
+
+    `generation` is the highest suffix handed out so far (a key is never handed out twice), `epoch` the
+    conversation of the chat's last turn on this engine (a delivery that names no conversation goes on in it),
+    and `epochs` the suffix of each conversation Hermes has run. A chat with no record has run conversation 0
+    under the bare session key, or nothing.
+
+    A turn of a conversation Hermes has no key for (the user started a new chat, or the conversation never ran
+    on this engine) gets the next key, before the turn runs. A turn of a conversation that has a key goes on
+    under it, whether it is the chat's latest or an earlier one the user opened again.
 
     A message whose turn failed is never acted on later. Hermes saves a turn to its session on every exit path, a
     failed one included (agent/session_persistence.py `_persist_session`: "Save to SQLite on any exit path";
     agent/turn_recovery.py persists before it returns a failed result, at the pinned commit), and the next run
     with the same key loads that session again (api_server_runs.py: a declared X-Hermes-Session-Key conversation
     loads its transcript). Its API has no documented way to take a turn back (`/undo` is a chat command of its
-    messaging platforms, not of the API server). So after a failed turn the chat starts a new conversation: the
-    key gets a suffix (`#1`, `#2`, ...), and a key Hermes has not seen starts a fresh session (the API server
-    docs: "A request without any continuation starts a fresh session"). What carries over: the platform's
-    memory (remember / recall) and Hermes's session_search over earlier conversations.
+    messaging platforms, not of the API server). So after a failed turn that conversation gets the next key
+    (failed): it starts afresh on Hermes, and the chat's other conversations keep theirs. What carries over: the
+    platform's memory (remember / recall) and Hermes's session_search over earlier conversations.
 
-    The user's "New chat" moves the chat on the same way (new_chat): the backend counts each chat's new starts
-    (the delivery's `chat_epoch`), and when a delivery's number is higher than the last one Hermes saw for the
-    chat, the chat gets a new key before the turn runs. Each record: {"generation": n, "epoch": e}. The file of an
-    older Bridge holds the bare generation; it is read as epoch 0."""
+    An older Bridge kept one key per chat: {"generation": n, "epoch": e}, and before that the bare number n
+    (epoch 0). That key is the one of that epoch, so the record is read with "epochs": {"<e>": n} and the chat's
+    current conversation goes on. The earlier conversations of such a chat have no key: the older Bridge did not
+    keep which suffix was whose."""
 
     def __init__(self, path: Optional[str]):
         self.path = path
         self._lock = threading.Lock()
-        self._data: dict[str, dict[str, int]] = {}
+        self._data: dict[str, dict[str, Any]] = {}
         if path and os.path.exists(path):
             try:
                 with open(path, encoding="utf-8") as fh:
                     loaded = json.load(fh)
                 if isinstance(loaded, dict):
                     for k, v in loaded.items():
-                        if isinstance(v, dict):
-                            rec = {"generation": _count(v.get("generation")), "epoch": _count(v.get("epoch"))}
-                        else:
-                            rec = {"generation": _count(v), "epoch": 0}
-                        if rec["generation"] or rec["epoch"]:
+                        rec = _chat_record(v)
+                        if rec != _first_record():
                             self._data[k] = rec
             except (OSError, json.JSONDecodeError):
                 log.warning("could not read %s; starting empty", path)
 
+    def enter(self, session_key: str, epoch: Optional[int]) -> tuple[int, str, str]:
+        """The conversation a turn runs in. `epoch` is the delivery's `chat_epoch`; None (the delivery names
+        none) is the conversation of the chat's last turn. Returns (epoch, its X-Hermes-Session-Key, "same" |
+        "new" | "reopened"): the conversation of the last turn, one that had no key and got the next one, or
+        another one that has a key. Written to /data before the turn runs."""
+        with self._lock:
+            rec = self._data.get(session_key) or _first_record()
+            if epoch is None:
+                epoch = rec["epoch"]
+            moved = "same"
+            if str(epoch) not in rec["epochs"]:
+                rec["generation"] += 1
+                rec["epochs"][str(epoch)] = rec["generation"]
+                moved = "new"
+            elif epoch != rec["epoch"]:
+                moved = "reopened"
+            if moved != "same":
+                rec["epoch"] = epoch
+                self._data[session_key] = rec
+                self._save()
+            return epoch, _key(session_key, rec["epochs"][str(epoch)]), moved
+
     def key(self, session_key: str) -> str:
+        """The key of the conversation of the chat's last turn."""
         with self._lock:
-            generation = self._data.get(session_key, {}).get("generation", 0)
-        if not generation:
-            return session_key
-        suffix = f"#{generation}"
-        if len(session_key) + len(suffix) <= 256:  # Hermes takes at most 256 characters
-            return session_key + suffix
-        return f"{session_key[:200]}~{hashlib.sha256(session_key.encode()).hexdigest()[:16]}{suffix}"
+            rec = self._data.get(session_key) or _first_record()
+            return _key(session_key, rec["epochs"][str(rec["epoch"])])
 
-    def failed(self, session_key: str) -> None:
-        """The chat's turn failed: its next turn starts a new conversation."""
+    def failed(self, session_key: str, epoch: Optional[int] = None) -> None:
+        """A turn of this conversation failed (None: the one of the chat's last turn): its next turn starts a new
+        Hermes conversation. The chat's other conversations keep theirs."""
         with self._lock:
-            rec = self._data.setdefault(session_key, {"generation": 0, "epoch": 0})
+            rec = self._data.setdefault(session_key, _first_record())
             rec["generation"] += 1
+            rec["epochs"][str(rec["epoch"] if epoch is None else epoch)] = rec["generation"]
             self._save()
-
-    def new_chat(self, session_key: str, epoch: int) -> bool:
-        """The user started a new chat (`chat_epoch` higher than the last one seen for this chat): the chat's turns
-        go on in a new conversation, as after a failed turn. A lower or equal number changes nothing. True when the
-        chat moved on."""
-        with self._lock:
-            rec = self._data.get(session_key, {"generation": 0, "epoch": 0})
-            if epoch <= rec["epoch"]:
-                return False
-            self._data[session_key] = {"generation": rec["generation"] + 1, "epoch": epoch}
-            self._save()
-        return True
 
     def _save(self) -> None:
         if not self.path:
@@ -125,6 +151,43 @@ class Conversations:
 
 def _count(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
+def _first_record() -> dict[str, Any]:
+    """A chat Hermes has run under the bare session key only, or not at all: conversation 0, no suffix."""
+    return {"generation": 0, "epoch": 0, "epochs": {"0": 0}}
+
+
+def _chat_record(raw: Any) -> dict[str, Any]:
+    """One chat's record of hermes-conversations.json as Conversations keeps it, from what is in the file: this
+    layout, an older Bridge's {"generation", "epoch"} (one key, the one of that epoch), or the bare generation
+    of the Bridge before that (epoch 0)."""
+    if not isinstance(raw, dict):
+        return {"generation": _count(raw), "epoch": 0, "epochs": {"0": _count(raw)}}
+    generation, epoch = _count(raw.get("generation")), _count(raw.get("epoch"))
+    if not isinstance(raw.get("epochs"), dict):
+        return {"generation": generation, "epoch": epoch, "epochs": {str(epoch): generation}}
+    epochs: dict[str, int] = {}
+    for number, suffix in raw["epochs"].items():
+        if isinstance(number, str) and _EPOCH_KEY.fullmatch(number) and isinstance(suffix, int) \
+                and not isinstance(suffix, bool) and suffix >= 0:
+            epochs[str(int(number))] = suffix
+    # A key is never handed out twice: the next one comes after every suffix in the file.
+    generation = max([generation, *epochs.values()])
+    if str(epoch) not in epochs:  # the file does not say which key the last conversation has: it gets a new one
+        generation += 1
+        epochs[str(epoch)] = generation
+    return {"generation": generation, "epoch": epoch, "epochs": epochs}
+
+
+def _key(session_key: str, generation: int) -> str:
+    """The X-Hermes-Session-Key for a chat's suffix number (0: the session key itself)."""
+    if not generation:
+        return session_key
+    suffix = f"#{generation}"
+    if len(session_key) + len(suffix) <= 256:  # Hermes takes at most 256 characters
+        return session_key + suffix
+    return f"{session_key[:200]}~{hashlib.sha256(session_key.encode()).hexdigest()[:16]}{suffix}"
 
 
 @dataclass
@@ -245,17 +308,22 @@ class HermesClient:
         wait for the specialists and run again in the same session; the last run's answer is the
         turn's answer.
 
-        `options` (core.TurnOptions): only `chat_epoch` is used here; a higher one than the chat's last starts a
-        new conversation first. The Claude Code model and effort are not Hermes's.
+        `options` (core.TurnOptions): only `chat_epoch` is used here. It names the conversation of the chat this
+        turn belongs to, and each has its own Hermes conversation (Conversations): a new chat starts one, an
+        earlier conversation the user opened again goes on in its own. The Claude Code model and effort are not
+        Hermes's.
         """
         instructions = f"{instructions}\n\n{crew.hermes_handoff(self.with_browser)}"
         deadline = time.monotonic() + timeout
         progress = crew.Progress(on_progress)
-        epoch = getattr(options, "chat_epoch", 0) or 0
-        if epoch and self.conversations.new_chat(session_key, epoch):
+        # The Hermes conversation of this turn's conversation of the chat; a new one for a new chat, and for a
+        # conversation whose last turn failed (Conversations).
+        epoch, key, moved = self.conversations.enter(session_key, getattr(options, "chat_epoch", None))
+        if moved == "new":
             log.info("hermes: a new chat for this session (chat %d); it starts a new conversation", epoch)
-        # The chat's current Hermes conversation; after a failed turn or a new chat, a new one (Conversations).
-        key = self.conversations.key(session_key)
+        elif moved == "reopened":
+            log.info("hermes: back in another chat of this session (chat %d); it goes on in that chat's own "
+                     "conversation", epoch)
         started: list[str] = []
         try:
             result, handed_over = self._run_once(text, instructions, key, idempotency_key, on_progress,
@@ -271,15 +339,16 @@ class HermesClient:
                                                      deadline, started)
         except Exception:
             if started:  # Hermes has the turn's message in its session: never continue that conversation
-                self._turn_failed(session_key, idempotency_key)
+                self._turn_failed(session_key, epoch, idempotency_key)
             raise
         if result.status != "completed":
-            self._turn_failed(session_key, idempotency_key)
+            self._turn_failed(session_key, epoch, idempotency_key)
         return result
 
-    def _turn_failed(self, session_key: str, idempotency_key: str) -> None:
-        self.conversations.failed(session_key)
-        log.info("hermes turn %s failed; the chat's next turn starts a new conversation", idempotency_key)
+    def _turn_failed(self, session_key: str, epoch: int, idempotency_key: str) -> None:
+        self.conversations.failed(session_key, epoch)
+        log.info("hermes turn %s failed; the next turn of that chat (chat %d) starts a new conversation",
+                 idempotency_key, epoch)
 
     def _run_once(self, text: str, instructions: str, session_key: str, idempotency_key: str, on_progress,
                   progress: crew.Progress, deadline: float,

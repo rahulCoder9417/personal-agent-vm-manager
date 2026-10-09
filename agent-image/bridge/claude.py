@@ -3,11 +3,13 @@
 Two parts:
 
 - ClaudeRunner: one delivered message = one `claude -p --output-format stream-json` run.
-  Each chat (session_key) keeps its own Claude Code session (session_key -> session id,
-  stored in /data); a turn runs in a copy of it (--fork-session) that the chat keeps only when
-  the turn completed, so a failed message is never acted on later (ClaudeRunner.run). The user's
-  "New chat" (a higher `chat_epoch` in the delivery's metadata) starts a new session for the chat,
-  and the model and effort the user chose go to the CLI as --model and --effort. A failed
+  Each conversation of a chat (the session_key, and the `chat_epoch` in the delivery's metadata)
+  keeps its own Claude Code session (SessionMap, stored in /data); a turn runs in a copy of it
+  (--fork-session) that the conversation keeps only when the turn completed, so a failed message
+  is never acted on later (ClaudeRunner.run). The user's "New chat" is a `chat_epoch` with no
+  session yet: the turn starts one. An earlier `chat_epoch` is a conversation the user opened
+  again: the turn goes on in that conversation's own session. The model and effort the user
+  chose go to the CLI as --model and --effort. A failed
   run is logged without secrets or the user's message (_log_failure); a refusal by Anthropic or
   the user's plan or account, or of the model or effort the user chose, is never a platform fault
   (classify_failure).
@@ -95,6 +97,8 @@ _ERROR_REASONS = {"authentication_failed": "not_signed_in", "oauth_org_not_allow
                   "account_on_hold": "account", "billing_error": "plan_limit", "rate_limit": "plan_limit"}
 # A Claude Code session id (a UUID): the only thing ever put into a transcript path.
 _SESSION_ID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+# A conversation's number (`chat_epoch`) as a key of claude-sessions.json.
+_EPOCH_KEY = re.compile(r"[0-9]{1,18}")
 
 _AUTH_MARKERS = ("not logged in", "please run /login", "login expired", "oauth token revoked",
                  "oauth token has expired", "invalid api key", "authentication required", "sign in again",
@@ -261,11 +265,22 @@ def classify_failure(text: str, retry_error: str = "", subtype: str = "", error:
 
 
 class SessionMap:
-    """session_key -> Claude Code session id, persisted in /data.
+    """The Claude Code session of each conversation of each chat, persisted in /data.
 
-    Each record also keeps the chat's `chat_epoch` (the backend's count of the user's "New chat" for that chat)
-    as Claude Code last saw it: {"session_id": id or None, "epoch": n, "at": time}. A record of an older Bridge
-    has no epoch: 0."""
+    A chat is a session_key. Its conversations are numbered by the backend (`chat_epoch`: 0, then one more at
+    each "New chat"), and each conversation has its own session. One record per chat:
+
+        {"epoch": n, "sessions": {"<epoch>": "<session id>", ...}, "at": time}
+
+    `epoch` is the conversation of the chat's last turn on this engine; a delivery that names no conversation
+    goes on in it. `sessions` has an entry for each conversation that has a session; one with no entry starts a
+    new session with its next turn (a new chat, a conversation this engine never ran, a first turn that failed,
+    a session that was lost).
+
+    An older Bridge kept one session per chat: {"session_id": id or None, "epoch": n, "at": time}, and before
+    that no epoch (0). That session is the one of that epoch, so the record is read as
+    {"epoch": n, "sessions": {"<n>": id}} and the chat's current conversation goes on. The earlier conversations
+    of such a chat have no entry: the older Bridge did not keep their session ids."""
 
     def __init__(self, path: Optional[str], max_entries: int = 2000):
         self.path = path
@@ -277,42 +292,49 @@ class SessionMap:
                 with open(path, encoding="utf-8") as fh:
                     loaded = json.load(fh)
                 if isinstance(loaded, dict):
-                    self._data = loaded
+                    self._data = {k: _chat_record(v) for k, v in loaded.items() if isinstance(v, dict)}
             except (OSError, json.JSONDecodeError):
                 log.warning("could not read %s; starting empty", path)
 
-    def get(self, session_key: str) -> Optional[str]:
-        with self._lock:
-            rec = self._data.get(session_key)
-            return rec.get("session_id") if rec else None
-
     def epoch(self, session_key: str) -> int:
+        """The conversation of the chat's last turn on this engine (0 for a chat it never ran)."""
         with self._lock:
-            return _epoch((self._data.get(session_key) or {}).get("epoch"))
+            return (self._data.get(session_key) or {}).get("epoch", 0)
 
-    def set(self, session_key: str, session_id: str) -> None:
-        with self._lock:
-            epoch = _epoch((self._data.get(session_key) or {}).get("epoch"))
-            self._put(session_key, {"session_id": session_id, "epoch": epoch, "at": time.time()})
-
-    def drop(self, session_key: str) -> None:
-        """The chat has no session any more (the next turn starts one). Its epoch is kept."""
+    def enter(self, session_key: str, epoch: Optional[int]) -> tuple[int, str]:
+        """The conversation a turn runs in, and how the chat got there. `epoch` is the delivery's `chat_epoch`;
+        None (the delivery names none) is the conversation of the chat's last turn. Returns (epoch, "same" |
+        "new" | "reopened"): the conversation of the last turn, one with no session yet, or another one that has
+        a session. Written to /data before the turn runs, so a new chat whose first turn fails stays the chat's
+        conversation."""
         with self._lock:
             rec = self._data.get(session_key)
-            if rec is not None and rec.get("session_id") is not None:
-                rec["session_id"] = None
-                self._save()
+            current = rec["epoch"] if rec else 0
+            if epoch is None or epoch == current:
+                return current, "same"
+            rec = rec or {"epoch": 0, "sessions": {}, "at": 0}
+            self._put(session_key, {**rec, "epoch": epoch, "at": time.time()})
+            return epoch, "reopened" if str(epoch) in rec["sessions"] else "new"
 
-    def new_chat(self, session_key: str, epoch: int) -> bool:
-        """The user started a new chat: when `epoch` is higher than the one kept for this chat, the chat leaves its
-        session (the next turn starts a new one, not resumed) and keeps the new epoch. A lower or equal number
-        changes nothing. True when the chat moved on. Written to /data before the turn runs, so a first turn that
-        fails does not bring the old session back."""
+    def get(self, session_key: str, epoch: int) -> Optional[str]:
         with self._lock:
-            if epoch <= _epoch((self._data.get(session_key) or {}).get("epoch")):
-                return False
-            self._put(session_key, {"session_id": None, "epoch": epoch, "at": time.time()})
-        return True
+            rec = self._data.get(session_key)
+            return rec["sessions"].get(str(epoch)) if rec else None
+
+    def set(self, session_key: str, epoch: int, session_id: str) -> None:
+        """The conversation's session is now `session_id` (a turn in it completed)."""
+        with self._lock:
+            rec = self._data.get(session_key) or {"epoch": epoch, "sessions": {}}
+            self._put(session_key, {"epoch": rec["epoch"], "sessions": {**rec["sessions"], str(epoch): session_id},
+                                    "at": time.time()})
+
+    def drop(self, session_key: str, epoch: int) -> None:
+        """The conversation has no session any more (its next turn starts one). The chat's other conversations
+        keep theirs."""
+        with self._lock:
+            rec = self._data.get(session_key)
+            if rec is not None and rec["sessions"].pop(str(epoch), None) is not None:
+                self._save()
 
     def _put(self, session_key: str, rec: dict) -> None:
         self._data[session_key] = rec
@@ -330,6 +352,22 @@ class SessionMap:
 
 def _epoch(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
+def _chat_record(raw: dict) -> dict:
+    """One chat's record of claude-sessions.json as SessionMap keeps it, from what is in the file: this layout,
+    or an older Bridge's {"session_id", "epoch", "at"} (one session, the one of that epoch)."""
+    epoch = _epoch(raw.get("epoch"))
+    sessions: dict[str, str] = {}
+    if isinstance(raw.get("sessions"), dict):
+        for number, session_id in raw["sessions"].items():
+            if isinstance(number, str) and _EPOCH_KEY.fullmatch(number) and isinstance(session_id, str) and session_id:
+                sessions[str(int(number))] = session_id
+    elif isinstance(raw.get("session_id"), str) and raw["session_id"]:
+        sessions[str(epoch)] = raw["session_id"]
+    at = raw.get("at")
+    return {"epoch": epoch, "sessions": sessions,
+            "at": at if isinstance(at, (int, float)) and not isinstance(at, bool) else 0}
 
 
 def _write_private(path: str, content: str) -> None:
@@ -476,13 +514,17 @@ class ClaudeRunner:
         period, 30 days). A first turn that fails leaves the chat with no session, so the next one starts a
         new session. The copy a completed turn replaced is removed (see _drop_transcript).
 
-        `options` (core.TurnOptions, from the delivery's metadata): a `chat_epoch` higher than the one kept for the
-        chat means the user started a new chat, so the chat leaves its session and this turn starts a new one (not
-        resumed). `claude_model` / `claude_effort` are passed as --model / --effort; the model wins over the
-        Bridge's default (BRIDGE_CLAUDE_MODEL)."""
+        All of that is per conversation. `options` (core.TurnOptions, from the delivery's metadata): `chat_epoch`
+        names the conversation of the chat this turn belongs to, and each has its own session (SessionMap). One
+        with no session yet (the user started a new chat) starts a new session, not resumed. One that has a
+        session is continued in a copy of it, whether it is the chat's latest or an earlier one the user opened
+        again. A failed turn leaves that conversation where it was and touches no other. The Bridge removes no
+        session of another conversation, so an earlier one can be opened again later.
+        `claude_model` / `claude_effort` are passed as --model / --effort; the model wins over the Bridge's
+        default (BRIDGE_CLAUDE_MODEL)."""
         if not installed(self.cmd, self.env):
             raise ClaudeError("claude code is not installed")
-        epoch = getattr(options, "chat_epoch", 0) or 0
+        chat_epoch = getattr(options, "chat_epoch", None)
         model = getattr(options, "claude_model", "") or ""
         effort = getattr(options, "claude_effort", "") or ""
         choice = {"model": model, "effort": effort}  # the user's own choice, for classify_failure
@@ -500,23 +542,29 @@ class ClaudeRunner:
                           text)
         how = {"model": model, "effort": effort, "choice": choice}
         with self._session_lock(session_key):
-            if epoch and self.sessions.new_chat(session_key, epoch):
-                # The user started a new chat: this turn starts a new session; the old one is never resumed (its
-                # transcript stays until the CLI's 30-day clean-up). The platform's memory is not part of a chat.
+            # Which conversation of the chat this turn is in. The platform's memory is not part of a conversation.
+            epoch, moved = self.sessions.enter(session_key, chat_epoch)
+            known = self.sessions.get(session_key, epoch)
+            if moved == "new":
+                # The user started a new chat (or this engine never ran this conversation): the turn starts a new
+                # session. The sessions of the chat's other conversations stay as they are.
                 log.info("claude turn %s: a new chat (chat %d); it starts a new session", idempotency_key, epoch)
-            known = self.sessions.get(session_key)
+            elif moved == "reopened":
+                log.info("claude turn %s: back in another chat (chat %d); it goes on in that chat's own session",
+                         idempotency_key, epoch)
             result, seen = self._run_once(pf, text, instructions, known or str(uuid.uuid4()), bool(known),
                                           on_progress, deadline, idempotency_key, redact, **how)
             if known and result.status != "completed" and \
                     any(m in result.error.lower() for m in _NO_SESSION_MARKERS):
-                # The saved session is gone (e.g. volume restored): start a new one.
-                log.warning("claude session for %s not found; starting a new one", session_key)
-                self.sessions.drop(session_key)
+                # The conversation's saved session is gone (e.g. volume restored, or removed by the CLI's own
+                # clean-up of old transcripts, 30 days by default): start a new one for it.
+                log.warning("claude session for %s (chat %d) not found; starting a new one", session_key, epoch)
+                self.sessions.drop(session_key, epoch)
                 known = None
                 result, seen = self._run_once(pf, text, instructions, str(uuid.uuid4()), False,
                                               on_progress, deadline, idempotency_key, redact, **how)
             if result.status == "completed" and seen:
-                self.sessions.set(session_key, seen)
+                self.sessions.set(session_key, epoch, seen)
                 if known and seen != known:
                     self._drop_transcript(known, seen)
             elif known:
