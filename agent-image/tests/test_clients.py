@@ -11,7 +11,8 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from bridge import crew
-from bridge.core import MEMORY_RULES, DeliverRequest, TurnOptions, build_instructions
+from bridge.core import (FORMAT_PLAIN, FORMAT_WEB, MEMORY_RULES, DeliverRequest, TurnOptions,
+                         build_instructions)
 from bridge.hermes import CREW_FOLLOW_UP, MAX_CREW_ROUNDS, Conversations, HermesClient, HermesError, HermesProcess
 from bridge.mcp_client import MCPError, PlatformMCP
 
@@ -229,6 +230,27 @@ class HermesClientTest(unittest.TestCase):
                          "Byte's and Patch's briefs")
         # One memory, the platform's: the Hermes lead is told so too (its own memory tool is off in config.yaml).
         self.assertIn(MEMORY_RULES, sent)
+
+    def test_the_hermes_lead_is_told_how_to_format_for_the_channel(self):
+        # The run's instructions carry the formatting rules of the delivery's channel: Markdown for the web app,
+        # plain text for a messaging app.
+        FakeHermes.runs = [DEFAULT_RUN, DEFAULT_RUN]
+        c = HermesClient(self.url, "local-key")
+        for n, (channel, session_key) in enumerate((("web", "web"), ("telegram", "telegram:42")), start=1):
+            c.run("compare tea and coffee", build_instructions(DeliverRequest.from_json(
+                {"delivery_id": f"d{n}", "kind": "message", "channel": channel, "session_key": session_key})),
+                session_key, f"evt-{n}#1", self.progress.append, timeout=10)
+        web, telegram = (body["instructions"] for _, body in self.run_posts())
+        self.assertIn(FORMAT_WEB, web)
+        self.assertNotIn(FORMAT_PLAIN, web)
+        self.assertIn(FORMAT_PLAIN, telegram)
+        self.assertNotIn(FORMAT_WEB, telegram)
+        # The briefs the lead copies for the specialists say nothing about the user's formatting: a specialist
+        # reports to Tex, and Tex writes the answer.
+        for text in (web, telegram):
+            briefs = text[text.index(crew.hermes_handoff()):]
+            self.assertNotIn("Markdown", briefs)
+            self.assertNotIn("plain text", briefs)
 
     def test_the_hermes_lead_is_told_the_browser_is_scouts(self):
         # The same for the browser: on Hermes the browser tools are in everyone's list, so the lead's
