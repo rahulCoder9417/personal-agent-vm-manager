@@ -181,6 +181,45 @@ MEMORY_RULES = (
 )
 
 
+# How the lead formats its final answer, by the delivery's channel (shared spec of 2026-10-09, "how Tex's replies
+# are formatted per channel"). The web app draws the agent's text as Markdown; a messaging app (Telegram,
+# WhatsApp, iMessage) shows the text as it was typed. The backend sends exactly `web`, `telegram`, `whatsapp` or
+# `imessage` (its `Channel` type), on every kind of delivery: a message's own channel, and for an approval's
+# answer, an automation or an app event the channel of the chat the answer goes to. So the channel always says
+# where the answer is read.
+#
+# Each engine has a notion of its own about that, which is why both texts end by setting it aside: Claude Code's
+# system prompt says its output is "rendered in a monospace font" as "Github-flavored markdown" (2.1.283), and
+# Hermes's hint for its API server says "assume plain text. No markdown formatting" (the pinned commit,
+# agent/prompt_builder.py PLATFORM_HINTS["api_server"]).
+WEB_CHANNEL = "web"
+FORMAT_WEB = (
+    "Formatting: the user reads your final answer in the web app, which shows Markdown as formatted text. So use "
+    "Markdown where it helps the reader: a list for steps or for separate points, a table for a comparison, a "
+    "fenced code block with the language named for code or commands, and short headings only in a long answer. "
+    "A short answer stays a short plain sentence, with no formatting added. Do not write raw HTML and do not "
+    "embed images: the web app displays neither, so give an image as a link. Other guidance you have about where "
+    "your output appears (a terminal, or an API with an unknown display) does not apply to this answer."
+)
+FORMAT_PLAIN = (
+    "Formatting: the user reads your final answer in a messaging app, which shows every character as you typed "
+    "it, so Markdown symbols would appear in the message as stray characters. Write plain text only, the way a "
+    "person writes a text message. Use no Markdown: no ** or _ around words, no # headings, no backticks or code "
+    "fences, no table pipes. Keep paragraphs short. For a list, start each line with \"- \" or with \"1. \", "
+    "\"2. \" and so on. Do not make a table: give one line per item. Put a command or a piece of code on a line "
+    "of its own, as it is. Write a link as the bare address, not as [text](address). Other guidance you have "
+    "about where your output appears (a terminal that renders Markdown, for example) does not apply to this "
+    "answer."
+)
+
+
+def format_rules(channel: str) -> str:
+    """How to format the final answer for a delivery's channel: Markdown for `web`, plain text for every other
+    value. An empty or unknown channel gets plain text: Markdown symbols in a messaging app are the worse
+    mistake, and plain text reads well in the web app too."""
+    return FORMAT_WEB if channel == WEB_CHANNEL else FORMAT_PLAIN
+
+
 def build_instructions(req: DeliverRequest) -> str:
     """The lead's instructions for one turn. Each engine adds how it hands work to a specialist
     (crew.CLAUDE_HANDOFF / crew.hermes_handoff)."""
@@ -194,6 +233,7 @@ def build_instructions(req: DeliverRequest) -> str:
         "https://github.com/<owner>/<repo> into your workspace, commit on a new branch and push it, "
         "then open the pull request with the GitHub app action. Pushing to a repository's default "
         "branch is refused, so always work on a branch.\n\n"
+        f"{format_rules(req.channel)}\n\n"
         f"{MEMORY_RULES}\n\n"
         + crew.lead_instructions()
     )

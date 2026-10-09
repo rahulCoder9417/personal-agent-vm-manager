@@ -19,7 +19,8 @@ from bridge import browser, crew
 from bridge.claude import (LEAD_GATE, MSG_CHOICE, MSG_NOT_SIGNED_IN, MSG_REFUSED, ClaudeAuth, ClaudeError,
                            ClaudeRunner, CrewEvents, LoginNotFound, Redactor, SessionMap, classify_failure,
                            find_authorize_url, render_settings)
-from bridge.core import MEMORY_RULES, Bridge, DeliverRequest, DeliveryStore, TurnOptions
+from bridge.core import (FORMAT_PLAIN, FORMAT_WEB, MEMORY_RULES, Bridge, DeliverRequest, DeliveryStore,
+                         TurnOptions)
 from bridge.lead_gate import BLOCK, PASS, REFUSAL
 from bridge.platform import load_platform_file
 from bridge.runtime import PlatformReader, RuntimeRunner
@@ -1090,10 +1091,33 @@ class BridgeWithRuntimesTest(unittest.TestCase):
         self.bridge = Bridge(SECRET, self.runtime, self.sender,
                              DeliveryStore(os.path.join(self.e.data, ".platform", "deliveries.json")), retry_delay=0)
 
-    def deliver(self, did, text="hello", metadata=None):
+    def deliver(self, did, text="hello", metadata=None, session_key="telegram:42", channel="telegram"):
         return list(self.bridge.deliver(DeliverRequest.from_json(
-            {"delivery_id": did, "kind": "message", "session_key": "telegram:42", "channel": "telegram",
+            {"delivery_id": did, "kind": "message", "session_key": session_key, "channel": channel,
              "text": text, "metadata": metadata or {}})))
+
+    def test_both_engines_are_told_how_to_format_for_the_channel(self):
+        # The web app draws Markdown, a messaging app shows the text as typed: the lead's instructions say which
+        # it is, and they reach Hermes (the run's instructions) and Claude Code (--append-system-prompt) alike.
+        self.e.sign_in()
+        self.deliver("d1", "compare tea and coffee", session_key="web", channel="web")
+        self.deliver("d2", "compare tea and coffee")
+        web, telegram = (call["instructions"] for call in self.hermes.calls)
+        self.e.write_platform("claude_code")
+        self.deliver("d3", "compare tea and coffee", session_key="web", channel="web")
+        self.deliver("d4", "compare tea and coffee")
+        prompts = [flag(call["argv"], "--append-system-prompt") for call in self.e.calls()]
+        for web_text in (web, prompts[0]):
+            self.assertIn("through web", web_text)
+            self.assertIn(FORMAT_WEB, web_text)
+            self.assertNotIn(FORMAT_PLAIN, web_text)
+        for plain_text in (telegram, prompts[1]):
+            self.assertIn("through telegram", plain_text)
+            self.assertIn(FORMAT_PLAIN, plain_text)
+            self.assertNotIn(FORMAT_WEB, plain_text)
+        # Claude Code gets the same instructions as Hermes, then how it hands work to a specialist.
+        self.assertEqual(prompts, [f"{web}\n\n{crew.CLAUDE_HANDOFF}", f"{telegram}\n\n{crew.CLAUDE_HANDOFF}"])
+        self.assertEqual([sent[1] for sent in self.sender.sent], ["web", "telegram:42", "web", "telegram:42"])
 
     def test_the_deliverys_metadata_reaches_the_engine(self):
         # The vm-manager passes DeliverRequest.metadata_json through as the body's "metadata" (no proto change).

@@ -4,8 +4,9 @@ import threading
 import time
 import unittest
 
-from bridge.core import (CLAUDE_EFFORTS, MEMORY_RULES, Bridge, DeliverRequest, DeliveryStore, TurnOptions,
-                         build_input, build_instructions)
+from bridge import crew
+from bridge.core import (CLAUDE_EFFORTS, FORMAT_PLAIN, FORMAT_WEB, KINDS, MEMORY_RULES, Bridge, DeliverRequest,
+                         DeliveryStore, TurnOptions, build_input, build_instructions, format_rules)
 
 from tests.fakes import FakeRunner, FakeSender
 
@@ -241,6 +242,80 @@ class RequestTest(unittest.TestCase):
                      "signing in to a site is not available yet, so when a job needs a sign-in, tell the user that"):
             self.assertIn(part, text)
         self.assertIn("through chat", build_instructions(req(channel="")))
+
+    def test_formatting_by_channel(self):
+        # Shared spec of 2026-10-09: the web app draws the agent's text as Markdown, a messaging app shows it as
+        # typed. So the lead is told which of the two this turn's answer is for, with the reason.
+        web = build_instructions(req(channel="web", session_key="web"))
+        self.assertIn(FORMAT_WEB, web)
+        for part in ("the user reads your final answer in the web app, which shows Markdown as formatted text",
+                     "use Markdown where it helps the reader", "a list for steps or for separate points",
+                     "a table for a comparison", "a fenced code block with the language named for code or commands",
+                     "short headings only in a long answer", "A short answer stays a short plain sentence",
+                     "Do not write raw HTML and do not embed images", "give an image as a link"):
+            self.assertIn(part, web)
+        # Nothing in the web instructions forbids Markdown or asks for plain text.
+        self.assertNotIn(FORMAT_PLAIN, web)
+        for part in ("plain text only", "Use no Markdown", "no # headings", "no table pipes", "Do not make a table",
+                     "stray characters"):
+            self.assertNotIn(part, web)
+        # Every other value asks for plain text: the messaging apps the backend knows, no channel at all, and a
+        # value the Bridge has never heard of.
+        for channel in ("telegram", "whatsapp", "imessage", "", "sms"):
+            text = build_instructions(req(channel=channel))
+            self.assertIn(FORMAT_PLAIN, text, channel)
+            self.assertNotIn(FORMAT_WEB, text, channel)
+            for part in ("the user reads your final answer in a messaging app, which shows every character as you "
+                         "typed it", "Write plain text only, the way a person writes a text message",
+                         "Use no Markdown: no ** or _ around words, no # headings, no backticks or code fences, no "
+                         "table pipes", "Keep paragraphs short",
+                         'For a list, start each line with "- " or with "1. ", "2. " and so on',
+                         "Do not make a table: give one line per item",
+                         "Write a link as the bare address, not as [text](address)"):
+                self.assertIn(part, text, channel)
+            self.assertNotIn("use Markdown where it helps", text, channel)
+        # A delivery with no channel field is the empty channel.
+        bare = DeliverRequest.from_json({"delivery_id": "x", "kind": "message"})
+        self.assertEqual(bare.channel, "")
+        self.assertIn(FORMAT_PLAIN, build_instructions(bare))
+        self.assertEqual((format_rules("web"), format_rules("telegram"), format_rules("")),
+                         (FORMAT_WEB, FORMAT_PLAIN, FORMAT_PLAIN))
+        # Both texts give the reason, and set aside what the engine itself says about where its output appears
+        # (Claude Code: a terminal that renders Markdown; Hermes: an API with an unknown display).
+        for text in (FORMAT_WEB, FORMAT_PLAIN):
+            self.assertTrue(text.startswith("Formatting: the user reads your final answer in "))
+            self.assertIn("Other guidance you have about where your output appears", text)
+            self.assertTrue(text.endswith("does not apply to this answer."))
+
+    def test_formatting_goes_by_the_channel_for_every_kind_of_delivery(self):
+        # An approval's answer, an automation and an app event carry the channel of the chat their answer goes
+        # to (the backend: the approval's or the automation's session), so they are formatted for it as well.
+        for kind in sorted(KINDS):
+            self.assertIn(FORMAT_WEB, build_instructions(req(kind=kind, channel="web", session_key="web")), kind)
+            self.assertIn(FORMAT_PLAIN, build_instructions(req(kind=kind, channel="telegram")), kind)
+
+    def test_the_formatting_rules_are_the_only_new_part(self):
+        # The instructions as they were before the formatting rules: with the rules taken out, the text is that
+        # again, for every channel. The rules are a paragraph of their own, after the first one and before the
+        # memory rules.
+        for channel, shown in (("web", "web"), ("telegram", "telegram"), ("whatsapp", "whatsapp"), ("", "chat")):
+            before = (
+                f"The user is talking to you through {shown}. Your final answer for this turn is delivered to "
+                "them automatically, so do not try to send it yourself. Keep replies suited to a chat app. "
+                "Before anything risky (sending to other people, deleting, paying, posting publicly) call "
+                "request_approval and end your turn; the user's answer arrives as a later message. "
+                "When the user's GitHub is connected, git works for their repositories: clone "
+                "https://github.com/<owner>/<repo> into your workspace, commit on a new branch and push it, "
+                "then open the pull request with the GitHub app action. Pushing to a repository's default "
+                "branch is refused, so always work on a branch.\n\n"
+                f"{MEMORY_RULES}\n\n"
+                + crew.lead_instructions()
+            )
+            text = build_instructions(req(channel=channel))
+            rules = format_rules(channel) + "\n\n"
+            self.assertEqual(text.count(rules), 1, channel)
+            self.assertEqual(text.replace(rules, ""), before, channel)
+            self.assertIn("so always work on a branch.\n\n" + rules + MEMORY_RULES, text, channel)
 
     def test_one_memory_the_platforms(self):
         # The lead keeps facts about the user in the platform's memory, on both engines (the same text), and
