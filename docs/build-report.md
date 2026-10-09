@@ -7,7 +7,7 @@
 - Phase 2 is **coded, committed and unit tested**: every gRPC RPC, the container spec, the five background loops, the egress writer, the agent image (Hermes + Bridge).
 - **Nothing has run against real Docker.** Docker and gVisor aren't installed on the dev machine, so the Docker parts were tested against a fake daemon, and the Bridge against a fake Hermes.
 - The proto (`proto/vm/v1/vm.proto`) got additive RPCs and fields for the agent runtime and the Claude Code sign-in (section 6); no existing field changed.
-- Later additions, each in its own section: the Claude Code runtime (6), git through the platform's git gateway (7), the crew of specialists (8), Scout's browser (9), and what the second server run of 2026-10-08 found (10: failed messages acted on later, failed runs without a logged cause, a refusal counted as our fault, the idle stop coming late), and the Bridge's part of "New chat" and of the Claude Code model and effort (11). The crew is unit tested against fakes only; the image build and a real turn with either runtime are untested. The browser was run for real on the development machine (the real server, a real Chromium, gVisor, a real Squid), but not in the image and not by an engine.
+- Later additions, each in its own section: the Claude Code runtime (6), git through the platform's git gateway (7), the crew of specialists (8), Scout's browser (9), and what the second server run of 2026-10-08 found (10: failed messages acted on later, failed runs without a logged cause, a refusal counted as our fault, the idle stop coming late), the Bridge's part of "New chat" and of the Claude Code model and effort (11), and its part of "Chat history": each conversation of a chat keeps its own engine conversation, and an earlier one can be opened again (12). The crew is unit tested against fakes only; the image build and a real turn with either runtime are untested. The browser was run for real on the development machine (the real server, a real Chromium, gVisor, a real Squid), but not in the image and not by an engine.
 
 ## 1. Initial design vs what we built
 
@@ -522,6 +522,8 @@ What is left: the reaper runs every minute at :56 past (the vm-manager started a
 
 ## 11. New chat, and Claude Code's model and effort (2026-10-08)
 
+*Changed by section 12 (2026-10-09): a lower `chat_epoch` is no longer ignored, and a missing one is no longer 0. The rest of this section stands.*
+
 **Date:** 2026-10-08 · **Branch:** `mvp-build`. The agent image's part of two features built at the same time in three repositories, from one shared spec (the backend and the web app build theirs). Built and tested on the development machine; the image was not built and nothing on the server was changed. No change to `proto/vm/v1/vm.proto` and no Go change: the vm-manager already passes `DeliverRequest.metadata_json` to the Bridge as the body's `metadata`, untouched (`internal/sandbox/deliver.go`, `internal/bridge/client.go`).
 
 ### Asked for vs built
@@ -611,3 +613,124 @@ Checked three ways: the binary's own `--help`; the model table built into it (th
 - **Haiku 4.5 has no effort levels at 2.1.283**: with it, `claudeEffort` has no effect. Worth a line in Settings, or keep the effort select but say it does not apply to Haiku 4.5.
 - **Sonnet 5.5 is unknown to the pinned 2.1.283** (sent as given; whether Anthropic serves it to this version is unchecked). If it fails on the server, the fix is a newer CLI pin in this image, not a change in the backend's list.
 - A refused choice comes back as an `error` event with `platform_fault: false` and a message that starts "Claude Code could not use the model or thinking effort chosen in Settings: ".
+
+## 12. Chat history: each conversation of a chat keeps its own engine conversation (2026-10-09)
+
+**Date:** 2026-10-09 · **Branch:** `mvp-build`. The agent image's part of "Chat history" (shared spec, round 2, part A), built at the same time as the backend's and the web app's. Built and tested on the development machine; the image was not built and nothing on the server was changed. No change to `proto/vm/v1/vm.proto` and no Go change: the delivery's `metadata_json` already reaches the Bridge untouched (section 11).
+
+What the founder asked for: a history of chats with a sidebar, like ChatGPT or Claude.ai, where every chat has its own context. For the Bridge that means one thing: when the user opens an earlier conversation again and writes in it, the agent must go on with that conversation's own context, not the newest one's. Until now it could not: a delivery with a lower `chat_epoch` was ignored and the turn ran in the newest conversation.
+
+### Asked for vs built
+
+| Asked for (shared spec) | Built |
+|---|---|
+| Every delivery carries `"chat_epoch"`, the conversation's epoch; it may now be lower than the chat's highest | Read as before (`core.TurnOptions`). A lower number is now a request: go on in that conversation |
+| Keep, per session key and engine, a map from epoch to the engine's conversation (Claude Code: session id; Hermes: conversation key) | `claude.SessionMap` and `hermes.Conversations`, in the same two files as before; see "The state and how old state is read" |
+| A delivery resumes the conversation of its `chat_epoch` if known; an unknown epoch starts a new one and records it | Done on both engines; see "What each delivery does" |
+| Old state migrates: what the Bridge holds today for a chat is that chat's current epoch | The old record is read in place as one conversation, the one of the epoch it recorded. No user's current conversation is lost |
+| Keep every rule already in place | All of them hold for each conversation on its own: a Claude Code turn runs in a copy of the session that is kept only when the turn completes; a failed turn is never continued, on either engine; a first turn that fails leaves no session; a lost session starts a new one; each engine keeps its own record; turns of one chat on Claude Code run one at a time |
+| Old sessions must stay on disk while their conversation exists | The Bridge removes none of them. **Not fully met on Claude Code**: the CLI's own clean-up still removes old transcripts; see "Open: Claude Code's own clean-up" |
+| When the backend deletes a conversation the Bridge is not told; acceptable, say so | So it is: the deleted conversation's session or Hermes conversation stays in the user's volume, unused |
+
+### The state and how old state is read
+
+Both files are in `/data/.platform`, one record per chat (session key).
+
+| Engine | File | A chat's record now | What an older Bridge wrote, and how it is read |
+|---|---|---|---|
+| Claude Code | `claude-sessions.json` | `{"epoch": 1, "sessions": {"0": "<id>", "1": "<id>"}, "at": <time>}` | `{"session_id": "<id>", "epoch": 2, "at": t}` is read as `{"epoch": 2, "sessions": {"2": "<id>"}}`. With no `epoch` (the Bridge before yesterday's): epoch 0. With `"session_id": null` (a new chat whose first turn had not completed): `{"epoch": 2, "sessions": {}}` |
+| Hermes | `hermes-conversations.json` | `{"generation": 3, "epoch": 1, "epochs": {"0": 0, "1": 3}}` | `{"generation": 3, "epoch": 2}` is read as `{"generation": 3, "epoch": 2, "epochs": {"2": 3}}`. A bare number `2` (the Bridge before yesterday's): `{"generation": 2, "epoch": 0, "epochs": {"0": 2}}`. A chat with no record: conversation 0 under the session key itself |
+
+- `epoch` is the conversation of the chat's last turn on that engine. A delivery that names no conversation goes on in it.
+- Claude Code's `sessions` has an entry for each conversation that has a session. One with no entry starts a new session with its next turn.
+- Hermes's `epochs` gives each conversation its key suffix: 0 is the session key itself (`telegram:42`), 3 is `telegram:42#3`. `generation` is the highest suffix handed out so far. The next key is always `generation + 1`, so a key Hermes has already seen is never given to another conversation.
+- Nothing is rewritten at start. A chat's record gets the new layout when its next turn changes it.
+- **What old state cannot give back.** A chat that had a "New chat" under yesterday's Bridge: that Bridge dropped the session id (Claude Code) or did not keep which suffix was whose (Hermes) of the conversation before it. If the user opens such an earlier conversation again, the engine starts it afresh and does not see its earlier messages; the web app still shows them. "New chat" was built on 2026-10-08, so this is at most a day of conversations.
+- An older image that reads the new files does not fail (checked with yesterday's code): on Claude Code each chat starts a new session, on Hermes each chat goes on under its newest key and new keys still come after it.
+
+### What each delivery does
+
+| The delivery's `chat_epoch` | Claude Code | Hermes |
+|---|---|---|
+| The same as the chat's last turn | The turn runs in a copy of that conversation's session (`--resume <id> --fork-session`); the conversation moves on to the copy when the turn completes, and the replaced transcript is removed (section 10) | The turn runs under that conversation's key |
+| One the engine has no conversation for: a new chat, or a conversation that never ran on this engine | A new session (`--session-id <new>`). It becomes the conversation's session when the turn completes | The next key (`#n`), written to /data before the turn |
+| Another one the engine has a conversation for: the user opened it again (lower), or went back to a later one (higher) | A copy of that conversation's own session, as in the first row | That conversation's own key |
+| Missing, or not a whole number of 0 or more | The conversation of the chat's last turn on this engine | The same |
+| Any of these, and the turn fails | That conversation keeps the session from before the turn (none, after a first turn that fails). The chat's other conversations are not touched | That conversation gets the next key, so Hermes starts it afresh (section 10). The others keep theirs |
+| Any of these, and Claude Code no longer has the session (`No conversation found`) | That conversation starts a new session, in the same delivery | No such answer from Hermes: a key it has no session for starts a fresh one (section 10) |
+
+The chat's move to another conversation (`epoch`) is written to /data before the turn on both engines. So a new chat whose first turn fails stays the chat's conversation, and a later delivery that names none does not fall back to the one before it.
+
+### Where we filled in or changed the spec
+
+- **A delivery that names no conversation goes on in the chat's last one.** Section 11 said "missing means 0", which was harmless while a lower number was ignored. Now 0 is a real conversation, the chat's first, and a delivery without the field (a kind of delivery the backend forgot, or an older backend) would have jumped back to it. It goes on in the conversation of the chat's last turn on that engine instead, which is what such a delivery did before this change. The same for a bad value. The backend should still send the field on every delivery.
+- **Claude Code records a session when a turn completes, not when it starts.** The spec says an unknown epoch "starts a new one and records it". Recording it before the turn would make a failed first turn the conversation's session, and the failed message would be continued by the next turn. What is written before the turn is only which conversation the chat is in.
+- **Hermes: a failed turn moves only its own conversation.** Before, the chat had one key and a failure moved the chat. Now the conversation whose turn failed gets the next key and the chat's other conversations keep theirs.
+- **Each engine still keeps its own record** (section 11). A conversation that started while the chat ran on Hermes is unknown to Claude Code, so its first turn there starts a new session, and the other way round. The backend's recap on an engine change is what gives that turn the conversation's earlier messages.
+- **Two deliveries of one chat in different conversations at the same time**: on Claude Code they run one after the other, as two deliveries of one conversation did (one lock per chat). On Hermes the Bridge does not order them, as before; each uses its own key.
+- **Nothing tells the backend that an engine started a conversation afresh** (old state, a removed transcript). The Bridge has no channel for it and none was asked for.
+
+### Open: Claude Code's own clean-up
+
+The spec asks that old sessions stay on disk while their conversation exists. The Bridge removes none. But Claude Code removes old transcripts by itself: 30 days by default, its setting `cleanupPeriodDays` (code.claude.com/docs/en/sessions, "Where transcripts are stored": "Change the 30-day retention"; the settings index lists the key for any settings file). Sections 10 and 11 counted on that clean-up to remove the copies of failed turns and the sessions left behind by a new chat. Now a session left behind by a new chat is one the user can open again.
+
+**What happens today:** a conversation on Claude Code whose transcript the CLI has removed, and which the user then opens again, starts a new session (the `No conversation found` path). The turn is answered, but the agent does not see the conversation's earlier messages. The web app still shows them.
+
+**Not changed here, and why.** Keeping transcripts longer is a choice about how long users' conversations stay on the server, and about disk: with a long `cleanupPeriodDays` the copies of failed turns, the folders of replaced sessions (sub-agent transcripts, saved tool output) and the CLI's other files would stay as long, in a volume with a disk quota, so the Bridge would then have to remove what it knows is dead. That is the founder's decision, not one to take inside this change. It is also not checked: how the CLI measures a transcript's age, and whether the clean-up runs in a `claude -p` run at all, could not be looked up in this session (looking it up in the pinned binary and in the docs' page on the clean-up was refused by the session's permission checks, and was not worked around).
+
+**The choices:**
+1. Leave it. A Claude Code conversation that had no turn for about 30 days starts afresh when opened again.
+2. Set `cleanupPeriodDays` to a long time in the settings file the Bridge already writes for each turn (`/data/.platform/claude-settings.json`), and have the Bridge remove the copies of failed turns itself. Needs a run with the pinned binary to see that the setting is taken from `--settings`.
+3. Have the backend send the conversation's own messages as a recap when the engine has lost it. Needs a way for the Bridge to say so, which does not exist.
+
+### Tests (real runs, 2026-10-09)
+
+- `cd agent-image && python3 -m unittest discover -s tests -t .`: **185 tests, OK** (1 skipped: the real-browser test). 179 before.
+- `go vet ./...`: clean. `go test -count=1 ./...`: all 9 packages with tests pass (no Go change).
+- New and changed tests. The metadata read: a missing or bad `chat_epoch` names no conversation, and 0 is a conversation. Claude Code: each conversation has its own session through a new chat, a return to the first, a Bridge restart, a return to the second, a delivery that names none, and another chat; a conversation this engine never ran starts a new session; a new chat whose first turn fails does not go back, and the first conversation is as it was; a failed and a timed-out turn in a conversation opened again are never continued and the other conversation is not touched; a lost session of one conversation leaves the others; the session map; the files of both older Bridges, with a chat that had left its session. Hermes: the same sequence by key; a failed turn in a conversation opened again moves only that one; the files of both older Bridges; a suffix in the file is never handed out again. The Bridge with both engines: a conversation that starts while the chat is on Hermes, then deliveries on Claude Code that name each conversation.
+- **End to end with the real 2.1.283 binary** (downloaded again from Anthropic's release store, sha256 `1859583c…5e804ae2` as in its signed manifest): the Bridge (`core.Bridge` and `ClaudeRunner`, wired as in `__main__`) and 15 deliveries, against a small fake Messages API that logs which of the earlier messages each request carried. Chat `web`:
+
+| # | Delivery | The request carried messages | Result |
+|---|---|---|---|
+| 1 | epoch 0 | 1 | done |
+| 2 | epoch 0 | 1, 2 | done |
+| 3 | epoch 1 (New chat) | 3 only | done, a new session |
+| 4 | epoch 0 (the first conversation opened again) | 1, 2, 4 (not 3) | done |
+| 5 | epoch 1 | 3, 5 (not 4) | done |
+| 6 | epoch 0, after a Bridge restart; the API answers 400 | 1, 2, 4, 6 | `error`; conversation 0 keeps its session |
+| 7 | epoch 0 | 1, 2, 4, 7 (not 6) | done |
+| 8 | no `chat_epoch` | 1, 2, 4, 7, 8 | done, in conversation 0 |
+| 9 | epoch 2 (New chat) | 9 only | done, a new session |
+| 10 | epoch 1 | 3, 5, 10 | done |
+
+  Chat `telegram:42`, whose record was rewritten by hand to yesterday's layout after its first turn, then a Bridge restart:
+
+| # | Delivery | The request carried messages | Result |
+|---|---|---|---|
+| 11 | epoch 3 | 20 | done; then the record was set to `{"session_id", "epoch": 3, "at"}` |
+| 12 | epoch 3 | 20, 21 | done: the old record's conversation goes on |
+| 13 | epoch 4 (New chat) | 22 only | done |
+| 14 | epoch 3 | 20, 21, 23 | done |
+| 15 | chat `web` again, epoch 0 | 1, 2, 4, 7, 8, 11 | done |
+
+  Left in the project folder: one transcript for each of the five conversations, and the copy of the failed turn (6).
+- Not run: Hermes itself. Its part is tested against the fake Hermes only, as before.
+
+### Not verified yet (after the next deploy)
+
+| What | How to check |
+|---|---|
+| Every user's current conversation goes on after the deploy | Before the deploy, tell the agent a word in the chat ("My code word is kiwi", not with `remember`). After it: "What is my code word? One line." It must know. `docker exec pa-sbx-<user> cat /data/.platform/claude-sessions.json` (or `hermes-conversations.json`): the chat's record has `sessions` (or `epochs`) |
+| An earlier conversation opened again, on Claude Code | "My code word is kiwi", New chat, "My code word is mango", then open the first conversation in the web app and write "What is my code word? One line.": kiwi. Then the second one: mango. `claude-sessions.json` has both under `sessions`, and `ls /data/claude/projects/-data-workspace/` has a `<id>.jsonl` for each |
+| The same on Hermes | For a Hermes user; `hermes-conversations.json` has both under `epochs` with different numbers |
+| A failed turn in a conversation opened again | Open an earlier conversation, send a message that fails (section 10's check), then "What did I ask you just before this? One line.": not the failed one; the other conversation still answers with its own context |
+| Telegram is as before | `/new` in Telegram, then a message: a new conversation; no way back to the earlier one from Telegram |
+| A Claude Code conversation opened again after more than 30 days | See "Open: Claude Code's own clean-up". Expected today: it is answered, without the earlier context |
+| Hermes still has a conversation that was not used for a long time | Open a Hermes conversation that is weeks old and ask about something said in it. Not checked in Hermes's source |
+
+### For the backend (`../beckend`, not edited from here)
+
+- Send `metadata.chat_epoch` on **every** delivery of every kind (messages, approval answers, automations, app events): the epoch of the conversation the delivery belongs to. Without it the turn runs in whichever conversation of the chat ran last on that engine.
+- Making an earlier web conversation the active one needs no call to the vm-manager. The next delivery's `chat_epoch` is enough.
+- Deleting a conversation needs no call either. Its session stays in the user's volume, unused (accepted in the spec). If the same chat and epoch were ever used again, the engine would go on in the old session; epochs only rise, so that should not happen.
+- The engine has no context for a conversation it has no record of: a conversation from before this change other than each chat's current one, one that first ran on the other engine, and on Claude Code one whose transcript the CLI removed. The recap on an engine change covers the second case. Nothing covers the other two, and the Bridge cannot report them.
