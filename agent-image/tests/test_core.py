@@ -175,8 +175,10 @@ class RequestTest(unittest.TestCase):
         self.assertEqual(ok.session_key, "default")
 
     def test_the_metadata_of_a_turn(self):
-        # Shared spec: "chat_epoch": <int> (missing = 0) and "claude": {"model", "effort"} (omitted = the default).
-        self.assertEqual(req().options(), TurnOptions(0, "", ""))
+        # Shared spec: "chat_epoch": <int> (the conversation of the chat; missing = none named, the turn goes on in
+        # the chat's last one) and "claude": {"model", "effort"} (omitted = the default).
+        self.assertEqual(req().options(), TurnOptions(None, "", ""))
+        self.assertEqual(req(metadata={"chat_epoch": 0}).options().chat_epoch, 0, "conversation 0 is a conversation")
         self.assertEqual(req(metadata={"chat_epoch": 3, "claude": {"model": "claude-opus-5-5", "effort": "xhigh"},
                                        "source": "telegram"}).options(),
                          TurnOptions(chat_epoch=3, claude_model="claude-opus-5-5", claude_effort="xhigh"))
@@ -188,7 +190,7 @@ class RequestTest(unittest.TestCase):
         # A value that is not what the spec says is left out; the message still runs.
         with self.assertLogs("bridge.core", "WARNING"):
             for epoch in (-1, "3", 1.5, True, [1]):
-                self.assertEqual(req(metadata={"chat_epoch": epoch}).options().chat_epoch, 0, epoch)
+                self.assertIsNone(req(metadata={"chat_epoch": epoch}).options().chat_epoch, epoch)
             for model in ("--dangerously-skip-permissions", "-p", "", "a b", "x" * 101, 5, "claude\nopus"):
                 self.assertEqual(req(metadata={"claude": {"model": model}}).options().claude_model, "", model)
             for effort in ("XHIGH", "ultra", "auto", "", 3):

@@ -389,37 +389,65 @@ class ClaudeRunnerTest(unittest.TestCase):
         self.assertEqual(flag(c[3]["argv"], "--resume"), c[1]["session"])
         self.assertEqual(c[3]["history"], ["one", "two"])
 
-    def test_a_new_chat_starts_a_new_session(self):
-        # Shared spec "New chat": a delivery whose chat_epoch is higher than the last one this engine saw for the
-        # chat starts a new session (not resumed); a lower one changes nothing; a missing one is 0. Each engine keeps
-        # its own number, so a chat that started anew while it ran on Hermes starts anew here too.
+    def test_each_conversation_of_a_chat_has_its_own_session(self):
+        # Shared spec "Chat history": a delivery's chat_epoch names the conversation of the chat it belongs to. One
+        # this engine has no session for starts a new session (the user's "New chat"); one it has a session for is
+        # continued in a copy of that session, also when it is an earlier one the user opened again; none named
+        # is the conversation of the chat's last turn here.
         self.e.sign_in()
-        self.run_turn("one")  # no options: epoch 0
+        self.run_turn("one")  # no options: the chat's first conversation, 0
         self.run_turn("two", options=TurnOptions(chat_epoch=0))
         self.run_turn("other chat", "web")
-        self.run_turn("three", options=TurnOptions(chat_epoch=1))
+        self.run_turn("three", options=TurnOptions(chat_epoch=1))  # New chat
         self.run_turn("four", options=TurnOptions(chat_epoch=1))
-        self.run_turn("five", options=TurnOptions(chat_epoch=0))  # lower than the chat's: no reset
+        self.run_turn("five", options=TurnOptions(chat_epoch=0))  # the user opened the first conversation again
         again = ClaudeRunner([self.e.cli], self.e.env, self.e.data, self.e.reader().load)  # a Bridge restart
-        self.run_turn("six", options=TurnOptions(chat_epoch=1), runner=again)
+        self.run_turn("six", options=TurnOptions(chat_epoch=1), runner=again)  # and went back to the second
+        self.run_turn("seven", runner=again)  # names none: the conversation of the last turn
+        self.run_turn("eight", options=TurnOptions(chat_epoch=0), runner=again)
         self.run_turn("other chat again", "web", options=TurnOptions(chat_epoch=0), runner=again)
         c = self.e.calls()
         self.assertEqual(c[1]["history"], ["one"])
-        # The new chat: a new session, nothing of the old one.
+        # The new chat: a new session, nothing of the first conversation.
         self.assertIsNotNone(flag(c[3]["argv"], "--session-id"))
         self.assertIsNone(flag(c[3]["argv"], "--resume"))
         self.assertEqual(c[3]["history"], [])
         self.assertNotIn(c[3]["session"], {c[0]["session"], c[1]["session"]})
-        # Then it goes on as usual, in copies of the new session, also after a lower number and a restart.
         self.assertEqual(c[4]["history"], ["three"])
-        self.assertEqual(c[5]["history"], ["three", "four"])
-        self.assertEqual(c[6]["history"], ["three", "four", "five"])
-        # Another chat keeps its own session.
-        self.assertEqual(c[7]["history"], ["other chat"])
+        # Back in the first conversation: a copy of its own session, with its history and nothing of the second.
+        self.assertEqual(flag(c[5]["argv"], "--resume"), c[1]["session"])
+        self.assertIn("--fork-session", c[5]["argv"])
+        self.assertEqual(c[5]["history"], ["one", "two"])
+        # Back in the second, after a restart: its own history, without what was said in the first meanwhile.
+        self.assertEqual(flag(c[6]["argv"], "--resume"), c[4]["session"])
+        self.assertEqual(c[6]["history"], ["three", "four"])
+        self.assertEqual(c[7]["history"], ["three", "four", "six"])
+        self.assertEqual(c[8]["history"], ["one", "two", "five"])
+        # Another chat keeps its own sessions.
+        self.assertEqual(c[9]["history"], ["other chat"])
         with open(os.path.join(self.e.data, ".platform", "claude-sessions.json")) as fh:
             saved = json.load(fh)
-        self.assertEqual((saved["telegram:42"]["epoch"], saved["telegram:42"]["session_id"]), (1, c[6]["session"]))
-        self.assertEqual(saved["web"]["epoch"], 0)
+        self.assertEqual({k: v for k, v in saved["telegram:42"].items() if k != "at"},
+                         {"epoch": 0, "sessions": {"0": c[8]["session"], "1": c[7]["session"]}})
+        self.assertEqual({k: v for k, v in saved["web"].items() if k != "at"},
+                         {"epoch": 0, "sessions": {"0": c[9]["session"]}})
+        # Each conversation's transcript is on disk: the Bridge removes only the copy a completed turn replaced.
+        for call in (c[7], c[8], c[9]):
+            self.assertIsNotNone(self.transcript(call["session"]))
+
+    def test_a_conversation_this_engine_never_ran_starts_a_new_session(self):
+        # Each engine keeps its own record. Conversations 1 and 2 of this chat ran on Hermes (or were never written
+        # in); the first turn of conversation 3 on Claude Code starts a new session, and conversation 0 keeps its own.
+        self.e.sign_in()
+        self.run_turn("one", options=TurnOptions(chat_epoch=0))
+        self.run_turn("two", options=TurnOptions(chat_epoch=3))
+        self.run_turn("three", options=TurnOptions(chat_epoch=1))
+        self.run_turn("four", options=TurnOptions(chat_epoch=0))
+        self.run_turn("five", options=TurnOptions(chat_epoch=3))
+        c = self.e.calls()
+        self.assertEqual([call["history"] for call in c], [[], [], [], ["one"], ["two"]])
+        for call in c[:3]:
+            self.assertIsNotNone(flag(call["argv"], "--session-id"))
 
     def test_a_new_chat_whose_first_turn_fails_does_not_go_back(self):
         self.e.sign_in()
@@ -427,28 +455,117 @@ class ClaudeRunnerTest(unittest.TestCase):
         self.e.mode("limit")
         self.assertEqual(self.run_turn("two", options=TurnOptions(chat_epoch=1)).reason, "plan_limit")
         self.e.mode("")
-        self.run_turn("three", options=TurnOptions(chat_epoch=1))
+        self.run_turn("three")  # names no conversation: still the new chat, not the one before it
+        self.run_turn("four", options=TurnOptions(chat_epoch=1))
+        self.run_turn("five", options=TurnOptions(chat_epoch=0))
         c = self.e.calls()
         self.assertEqual(c[1]["history"], [], "the new chat's first turn ran in a new session")
-        self.assertIsNotNone(flag(c[2]["argv"], "--session-id"), "the old session is never resumed again")
-        self.assertEqual(c[2]["history"], [])
+        self.assertIsNotNone(flag(c[2]["argv"], "--session-id"), "not the session of the conversation before")
+        self.assertEqual(c[2]["history"], [], "and not the failed one")
+        self.assertEqual(c[3]["history"], ["three"])
+        # The first conversation is as it was, for when the user opens it again.
+        self.assertEqual(c[4]["history"], ["one"])
 
-    def test_the_session_map_keeps_the_epoch(self):
+    def test_a_failed_turn_in_a_conversation_opened_again_is_never_continued(self):
+        # The rule of a failed turn holds in every conversation: the turn runs in a copy of that conversation's
+        # session, kept only when it completed. No other conversation of the chat is touched.
+        self.e.sign_in()
+        self.run_turn("one", options=TurnOptions(chat_epoch=0))
+        self.run_turn("two", options=TurnOptions(chat_epoch=1))
+        self.e.mode("limit")
+        self.assertEqual(self.run_turn("send the email to Bob", options=TurnOptions(chat_epoch=0)).reason, "plan_limit")
+        self.e.mode("hang")
+        with self.assertRaises(ClaudeError):
+            self.run_turn("a long job", options=TurnOptions(chat_epoch=0), timeout=1)
+        self.e.mode("")
+        self.run_turn("three", options=TurnOptions(chat_epoch=0))
+        self.run_turn("four", options=TurnOptions(chat_epoch=1))
+        self.run_turn("five", options=TurnOptions(chat_epoch=0))
+        c = self.e.calls()
+        for failed in (c[2], c[3]):
+            self.assertEqual(flag(failed["argv"], "--resume"), c[0]["session"])
+            self.assertIn("--fork-session", failed["argv"])
+        self.assertEqual(c[4]["history"], ["one"], "a failed message must never be continued")
+        self.assertEqual(flag(c[4]["argv"], "--resume"), c[0]["session"])
+        self.assertEqual(c[5]["history"], ["two"])
+        self.assertEqual(c[6]["history"], ["one", "three"])
+
+    def test_a_lost_session_of_one_conversation_leaves_the_others(self):
+        self.e.sign_in()
+        self.run_turn("one", options=TurnOptions(chat_epoch=0))
+        self.run_turn("two", options=TurnOptions(chat_epoch=1))
+        sessions_path = os.path.join(self.e.cfg, "fake_sessions.json")
+        with open(sessions_path) as fh:
+            sessions = json.load(fh)
+        del sessions[self.e.calls()[0]["session"]]  # conversation 0's session is gone from the CLI's store
+        with open(sessions_path, "w") as fh:
+            json.dump(sessions, fh)
+        self.assertEqual(self.run_turn("three", options=TurnOptions(chat_epoch=0)).status, "completed")
+        self.run_turn("four", options=TurnOptions(chat_epoch=1))
+        self.run_turn("five", options=TurnOptions(chat_epoch=0))
+        c = self.e.calls()
+        self.assertIsNotNone(flag(c[2]["argv"], "--resume"))
+        self.assertIsNotNone(flag(c[3]["argv"], "--session-id"), "a new session for that conversation")
+        self.assertEqual(c[4]["history"], ["two"], "the other conversation still has its own")
+        self.assertEqual(c[5]["history"], ["three"])
+
+    def test_the_session_map(self):
         path = os.path.join(self.e.data, ".platform", "claude-sessions.json")
-        with open(path, "w") as fh:  # written by an older Bridge: no epoch
-            json.dump({"telegram:42": {"session_id": "11111111-1111-1111-1111-111111111111", "at": 1}}, fh)
+        a, b, d = ("-".join(n * width for width in (8, 4, 4, 4, 12)) for n in "123")
         sessions = SessionMap(path)
-        self.assertEqual(sessions.epoch("telegram:42"), 0)
-        self.assertFalse(sessions.new_chat("telegram:42", 0))
-        self.assertEqual(sessions.get("telegram:42"), "11111111-1111-1111-1111-111111111111")
-        self.assertTrue(sessions.new_chat("telegram:42", 2))
-        self.assertIsNone(sessions.get("telegram:42"))
-        self.assertFalse(sessions.new_chat("telegram:42", 1))
-        sessions.set("telegram:42", "22222222-2222-2222-2222-222222222222")
-        sessions.drop("telegram:42")  # a lost session: the chat keeps its epoch
-        self.assertEqual((SessionMap(path).get("telegram:42"), SessionMap(path).epoch("telegram:42")), (None, 2))
-        self.assertTrue(sessions.new_chat("web", 1), "a chat this engine never saw")
+        self.assertEqual((sessions.epoch("telegram:42"), sessions.get("telegram:42", 0)), (0, None))
+        self.assertEqual(sessions.enter("telegram:42", None), (0, "same"))
+        self.assertEqual(sessions.enter("telegram:42", 0), (0, "same"))
+        self.assertFalse(os.path.exists(path), "nothing to keep yet")
+        sessions.set("telegram:42", 0, a)
+        self.assertEqual(sessions.enter("telegram:42", 2), (2, "new"))
+        self.assertEqual((sessions.get("telegram:42", 2), sessions.get("telegram:42", 0)), (None, a))
+        sessions.set("telegram:42", 2, b)
+        self.assertEqual(sessions.enter("telegram:42", 0), (0, "reopened"))
+        self.assertEqual(sessions.enter("telegram:42", None), (0, "same"))
+        self.assertEqual(sessions.enter("telegram:42", 2), (2, "reopened"))
+        self.assertEqual(sessions.enter("telegram:42", 1), (1, "new"))
+        sessions.set("telegram:42", 1, d)
+        sessions.drop("telegram:42", 2)  # a lost session: only that conversation's
+        again = SessionMap(path)  # a Bridge restart
+        self.assertEqual([again.get("telegram:42", n) for n in (0, 1, 2)], [a, d, None])
+        self.assertEqual(again.epoch("telegram:42"), 1)
+        self.assertEqual(again.enter("web", 1), (1, "new"), "a chat this engine never saw")
         self.assertEqual(oct(os.stat(path).st_mode & 0o777), oct(0o600))
+
+    def test_the_sessions_file_of_an_older_bridge(self):
+        # Before: one session per chat, {"session_id", "epoch", "at"} (yesterday's Bridge), or with no epoch (the
+        # one before). That session is the one of that epoch: the chat's current conversation goes on.
+        self.e.sign_in()
+        self.run_turn("one", "telegram:42")
+        self.run_turn("two", "web")
+        self.run_turn("three", "telegram:7")
+        first, web, third = (call["session"] for call in self.e.calls())
+        path = os.path.join(self.e.data, ".platform", "claude-sessions.json")
+        with open(path, "w") as fh:
+            json.dump({"telegram:42": {"session_id": first, "epoch": 2, "at": 5}, "web": {"session_id": web, "at": 1},
+                       "telegram:7": {"session_id": None, "epoch": 3, "at": 2}, "bad": "x"}, fh)
+        sessions = SessionMap(path)
+        self.assertEqual((sessions.epoch("telegram:42"), sessions.get("telegram:42", 2)), (2, first))
+        self.assertEqual((sessions.epoch("web"), sessions.get("web", 0)), (0, web))
+        self.assertEqual((sessions.epoch("telegram:7"), sessions.get("telegram:7", 3)), (3, None))
+        self.assertIsNone(sessions.get("telegram:42", 0), "the older Bridge did not keep the earlier ones")
+        runner = ClaudeRunner([self.e.cli], self.e.env, self.e.data, self.e.reader().load)
+        self.run_turn("four", "telegram:42", options=TurnOptions(chat_epoch=2), runner=runner)
+        self.run_turn("five", "web", options=TurnOptions(chat_epoch=0), runner=runner)
+        self.run_turn("six", "telegram:7", options=TurnOptions(chat_epoch=3), runner=runner)
+        self.run_turn("seven", "telegram:42", options=TurnOptions(chat_epoch=0), runner=runner)
+        self.run_turn("eight", "telegram:42", options=TurnOptions(chat_epoch=2), runner=runner)
+        c = self.e.calls()[3:]
+        self.assertEqual([call["history"] for call in c], [["one"], ["two"], [], [], ["one", "four"]])
+        self.assertEqual(flag(c[0]["argv"], "--resume"), first)
+        # A chat that had left its session for a new chat (session_id null) does not get the old one back.
+        self.assertIsNotNone(flag(c[2]["argv"], "--session-id"))
+        self.assertNotEqual(c[2]["session"], third)
+        with open(path) as fh:
+            saved = json.load(fh)
+        self.assertEqual(saved["telegram:42"]["sessions"], {"0": c[3]["session"], "2": c[4]["session"]})
+        self.assertNotIn("bad", saved)
 
     def test_the_model_and_effort_of_the_turn(self):
         # Shared spec "Claude Code model and effort": --model and --effort (2.1.283 `claude --help`). The turn's
@@ -578,7 +695,7 @@ class ClaudeRunnerTest(unittest.TestCase):
         self.assertIsNone(self.transcript(first))
         self.assertIsNotNone(self.transcript(second))
         self.assertIsNotNone(self.transcript(failed))
-        self.assertEqual(self.runner.sessions.get("telegram:42"), second)
+        self.assertEqual(self.runner.sessions.get("telegram:42", 0), second)
         # Only an id shaped like a session id is ever put into a path.
         self.assertIsNone(self.runner._transcript("../../.credentials"))
         self.assertIsNone(self.runner._transcript("*"))
@@ -997,6 +1114,24 @@ class BridgeWithRuntimesTest(unittest.TestCase):
         self.assertTrue(events[-1]["message"].startswith(MSG_CHOICE + ": There's an issue with the selected model "
                                                          "(claude-fable-5-1)."))
         self.assertEqual(self.sender.sent, [("hermes says hi", "telegram:42"), ("reply 1 to: on claude", "telegram:42")])
+
+    def test_conversations_and_a_switch_between_engines(self):
+        # Each engine keeps its own record of a chat's conversations. Here the chat's second conversation starts
+        # while it runs on Hermes; back on Claude Code, each delivery goes on in the conversation it names.
+        self.e.sign_in()
+        self.e.write_platform("claude_code")
+        self.deliver("d1", "one", {"chat_epoch": 0})
+        self.e.write_platform("hermes")
+        self.deliver("d2", "two", {"chat_epoch": 0})
+        self.deliver("d3", "three", {"chat_epoch": 1})
+        self.e.write_platform("claude_code")
+        self.deliver("d4", "four", {"chat_epoch": 1})
+        self.deliver("d5", "five", {"chat_epoch": 0})
+        self.deliver("d6", "six", {"chat_epoch": 1})
+        self.deliver("d7", "seven", {})  # names none: the conversation of the chat's last turn on this engine
+        self.assertEqual([call["options"].chat_epoch for call in self.hermes.calls], [0, 1])
+        self.assertEqual([call["history"] for call in self.e.calls()], [[], [], ["one"], ["four"], ["four", "six"]])
+        self.assertEqual(len(self.sender.sent), 7)
 
     def test_runtime_switch_without_restart(self):
         self.e.sign_in()

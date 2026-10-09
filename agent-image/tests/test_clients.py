@@ -368,13 +368,15 @@ class HermesClientTest(unittest.TestCase):
             down.run("hello", "be brief", "telegram:42", "evt-2#1", self.progress.append, timeout=1)
         self.assertEqual(down.conversations.key("telegram:42"), "telegram:42")
 
-    def test_a_new_chat_starts_a_new_conversation(self):
-        # Shared spec "New chat": a chat_epoch higher than the last one Hermes saw for the chat moves the chat to a
-        # new conversation key before the turn, the same way a failed turn does. Lower or equal: nothing. Missing: 0.
+    def test_each_conversation_of_a_chat_has_its_own_hermes_conversation(self):
+        # Shared spec "Chat history": a delivery's chat_epoch names the conversation of the chat it belongs to. One
+        # Hermes has no key for (the user's "New chat") gets the next key before the turn; one it has a key for goes
+        # on under it, also when it is an earlier one the user opened again; none named is the conversation of the
+        # chat's last turn. A failed turn moves only its own conversation to a new key.
         path = os.path.join(self.tmp, "hermes-conversations.json")
         failed = frames({"event": "run.failed", "error": "budget exceeded"})
         done = frames({"event": "run.completed", "output": "ok"})
-        FakeHermes.runs = [done, done, done, done, failed, done, done, done]
+        FakeHermes.runs = [done, done, done, done, failed, done, done, done, done, done, done]
         c = HermesClient(self.url, "local-key", poll_interval=0.01, conversations_path=path)
 
         def turn(client, n, epoch=None, session_key="telegram:42"):
@@ -382,33 +384,76 @@ class HermesClientTest(unittest.TestCase):
             return client.run(f"message {n}", "be brief", session_key, f"evt-{n}#1", self.progress.append, 10,
                               options=options)
 
-        turn(c, 1)
-        turn(c, 2, epoch=1)
+        turn(c, 1)  # no options: the chat's first conversation, 0
+        turn(c, 2, epoch=1)  # New chat
         turn(c, 3, epoch=1)
-        turn(c, 4, epoch=0)
-        self.assertEqual(turn(c, 5, epoch=1).status, "failed")
+        turn(c, 4, epoch=0)  # the user opened the first conversation again
+        self.assertEqual(turn(c, 5, epoch=1).status, "failed")  # back in the second, and the turn fails
         again = HermesClient(self.url, "local-key", poll_interval=0.01, conversations_path=path)  # a Bridge restart
         turn(again, 6, epoch=1)
-        turn(again, 7, epoch=2)
-        turn(again, 8, epoch=0, session_key="web")
+        turn(again, 7, epoch=2)  # New chat again
+        turn(again, 8, epoch=0)
+        turn(again, 9)  # names none: the conversation of the last turn
+        turn(again, 10, epoch=1)
+        turn(again, 11, epoch=0, session_key="web")
         keys = [headers["X-Hermes-Session-Key"] for headers, _ in self.run_posts()]
-        self.assertEqual(keys, ["telegram:42", "telegram:42#1", "telegram:42#1", "telegram:42#1", "telegram:42#1",
-                                "telegram:42#2", "telegram:42#3", "web"])
+        self.assertEqual(keys, ["telegram:42", "telegram:42#1", "telegram:42#1", "telegram:42", "telegram:42#1",
+                                "telegram:42#2", "telegram:42#3", "telegram:42", "telegram:42", "telegram:42#2",
+                                "web"])
         with open(path) as fh:
-            self.assertEqual(json.load(fh), {"telegram:42": {"generation": 3, "epoch": 2}})
+            self.assertEqual(json.load(fh), {"telegram:42": {"generation": 3, "epoch": 1,
+                                                             "epochs": {"0": 0, "1": 2, "2": 3}}})
         self.assertEqual(oct(os.stat(path).st_mode & 0o777), oct(0o600))
 
+    def test_a_failed_turn_in_a_conversation_opened_again_moves_only_that_one(self):
+        path = os.path.join(self.tmp, "hermes-conversations.json")
+        failed = frames({"event": "run.failed", "error": "budget exceeded"})
+        done = frames({"event": "run.completed", "output": "ok"})
+        FakeHermes.runs = [done, done, failed, done, done]
+        c = HermesClient(self.url, "local-key", poll_interval=0.01, conversations_path=path)
+        for n, epoch in enumerate((0, 1, 0, 1, 0)):
+            c.run(f"message {n}", "be brief", "telegram:42", f"evt-{n}#1", self.progress.append, 10,
+                  options=TurnOptions(chat_epoch=epoch))
+        keys = [headers["X-Hermes-Session-Key"] for headers, _ in self.run_posts()]
+        # The failed message was saved under "telegram:42": that key is never used again. The second conversation
+        # keeps its key.
+        self.assertEqual(keys, ["telegram:42", "telegram:42#1", "telegram:42", "telegram:42#1", "telegram:42#2"])
+
     def test_the_conversations_file_of_an_older_bridge(self):
+        # Before: one key per chat, {"generation", "epoch"} (yesterday's Bridge) or the bare generation (the one
+        # before, epoch 0). That key is the one of that epoch: the chat's current conversation goes on.
         path = os.path.join(self.tmp, "hermes-conversations.json")
         with open(path, "w") as fh:
-            json.dump({"telegram:42": 2, "web": 0, "bad": "x"}, fh)
+            json.dump({"telegram:42": 2, "web": 0, "bad": "x", "telegram:7": {"generation": 3, "epoch": 2}}, fh)
         conversations = Conversations(path)
-        self.assertEqual((conversations.key("telegram:42"), conversations.key("web")), ("telegram:42#2", "web"))
-        self.assertFalse(conversations.new_chat("telegram:42", 0))
-        self.assertTrue(conversations.new_chat("telegram:42", 1))
-        self.assertEqual(Conversations(path).key("telegram:42"), "telegram:42#3")
-        self.assertTrue(conversations.new_chat("never-seen", 1), "a chat this engine never ran: its old key is left")
-        self.assertEqual(conversations.key("never-seen"), "never-seen#1")
+        self.assertEqual((conversations.key("telegram:42"), conversations.key("web"), conversations.key("bad")),
+                         ("telegram:42#2", "web", "bad"))
+        self.assertEqual(conversations.key("telegram:7"), "telegram:7#3")
+        self.assertEqual(conversations.enter("telegram:42", 0), (0, "telegram:42#2", "same"))
+        self.assertEqual(conversations.enter("telegram:42", None), (0, "telegram:42#2", "same"))
+        self.assertEqual(conversations.enter("telegram:42", 1), (1, "telegram:42#3", "new"))
+        self.assertEqual(conversations.enter("telegram:42", 0), (0, "telegram:42#2", "reopened"))
+        self.assertEqual(Conversations(path).key("telegram:42"), "telegram:42#2")
+        self.assertEqual(conversations.enter("telegram:7", 2), (2, "telegram:7#3", "same"))
+        # The older Bridge did not keep which key an earlier conversation had: it gets a new one, never a key that
+        # was already used (the bare key and #1, #2 here).
+        self.assertEqual(conversations.enter("telegram:7", 0), (0, "telegram:7#4", "new"))
+        self.assertEqual(conversations.enter("telegram:7", 2), (2, "telegram:7#3", "reopened"))
+        # A chat this engine never ran: the bare key is conversation 0's.
+        self.assertEqual(conversations.enter("never-seen", 1), (1, "never-seen#1", "new"))
+        self.assertEqual(conversations.enter("never-seen", 0), (0, "never-seen", "reopened"))
+        with open(path) as fh:
+            saved = json.load(fh)
+        self.assertEqual(saved, {"telegram:42": {"generation": 3, "epoch": 0, "epochs": {"0": 2, "1": 3}},
+                                 "telegram:7": {"generation": 4, "epoch": 2, "epochs": {"2": 3, "0": 4}},
+                                 "never-seen": {"generation": 1, "epoch": 0, "epochs": {"0": 0, "1": 1}}})
+        # What this Bridge wrote reads back the same; a suffix in the file is never handed out again.
+        with open(path, "w") as fh:
+            json.dump({"a": {"generation": 1, "epoch": 1, "epochs": {"0": 0, "1": 5, "x": 9, "2": "7"}},
+                       "b": {"generation": 2, "epoch": 4, "epochs": {"0": 1}}}, fh)
+        conversations = Conversations(path)
+        self.assertEqual((conversations.key("a"), conversations.key("b")), ("a#5", "b#3"))
+        self.assertEqual(conversations.enter("a", 2), (2, "a#6", "new"))
 
     def test_a_long_session_key_stays_within_what_hermes_takes(self):
         conversations = Conversations(None)

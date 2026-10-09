@@ -57,17 +57,20 @@ _CLAUDE_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._\[\]-]{0,99}")
 
 @dataclass(frozen=True)
 class TurnOptions:
-    """What the backend says about a turn in the delivery's metadata (shared spec "New chat" and "Claude Code
-    model and effort"):
+    """What the backend says about a turn in the delivery's metadata (shared spec "New chat", "Chat history" and
+    "Claude Code model and effort"):
 
-    chat_epoch     metadata "chat_epoch": the chat's number of new starts. When it is higher than the last one the
-                   engine saw for the chat, the engine starts a fresh conversation for it (ClaudeRunner.run,
-                   HermesClient.run). Missing means 0.
+    chat_epoch     metadata "chat_epoch": which conversation of the chat (the session key) this turn belongs to.
+                   A chat's conversations are numbered 0, 1, 2, ... (one more at each "New chat"), and each has
+                   its own engine conversation: the turn goes on in the one of its number, or starts it when the
+                   engine has none for that number (claude.SessionMap, hermes.Conversations). The number may be
+                   lower than the last one: the user opened an earlier conversation again. None = the delivery
+                   names none: the turn goes on in the conversation of the chat's last turn on that engine.
     claude_model   metadata "claude.model": Claude Code's `--model` for this turn; "" = the Bridge's default.
     claude_effort  metadata "claude.effort": Claude Code's `--effort` for this turn; "" = the CLI's default.
     """
 
-    chat_epoch: int = 0
+    chat_epoch: Optional[int] = None
     claude_model: str = ""
     claude_effort: str = ""
 
@@ -76,12 +79,10 @@ class TurnOptions:
         """Read leniently: a value that is not what the spec says is left out (logged), so a bad field never
         stops a message; the turn runs as if it were missing."""
         meta = meta if isinstance(meta, dict) else {}
-        epoch = meta.get("chat_epoch", 0)
-        if epoch is None:
-            epoch = 0
-        if not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < 0:
-            log.warning("metadata chat_epoch is not a whole number >= 0; taken as 0")
-            epoch = 0
+        epoch = meta.get("chat_epoch")
+        if epoch is not None and (not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < 0):
+            log.warning("metadata chat_epoch is not a whole number >= 0; left out")
+            epoch = None
         claude = meta.get("claude")
         if claude is not None and not isinstance(claude, dict):
             log.warning("metadata claude is not an object; left out")
