@@ -167,7 +167,7 @@ Header `X-Bridge-Secret: <secret>` on every call except health.
 | Call | Behaviour |
 |---|---|
 | `GET /healthz` | `200 {"ok":true,"busy":N,"runtime":"hermes\|claude_code","claude_connected":bool\|null,"claude_login_pending":bool,"browser":bool}` when the current runtime answers (Hermes API / `claude` installed), else `503`. `busy` = turns in progress; `claude_connected` is `null` until `claude auth status` has answered once; `browser` = Scout's browser is turned on in this container |
-| `POST /deliver` | Body `{"delivery_id","kind","session_key","channel","text","attachments":[{"id","name","mime_type","url"}],"approval_id","approved","metadata":{}}`, `kind` = `message` / `approval_answer` / `automation` / `app_event`. `200` with `Content-Type: application/x-ndjson`, one line per event: `{"type":"accepted\|working\|turn_done\|error","message":"...","platform_fault":bool}`, ending with `turn_done` or `error`. A `working` message is `using <tool>`, or a crew line that starts with the member's name and a colon (`Scout: researching flight options`, `Scout: done`; see "The crew"). The last event also has `"browser_seconds":N,"browser_report_id":"<delivery_id>#<n>"` when Scout's browser was open: whole seconds since the Bridge's last report, and an id under which the vm-manager stores the report once (both are left out when the browser never started). `metadata` is `DeliverRequest.metadata_json` as the backend sent it; the Bridge reads two fields of it, see "What the Bridge reads in `metadata`". `401` bad secret, `400` bad body |
+| `POST /deliver` | Body `{"delivery_id","kind","session_key","channel","text","attachments":[{"id","name","mime_type","url"}],"approval_id","approved","metadata":{}}`, `kind` = `message` / `approval_answer` / `automation` / `app_event`. `200` with `Content-Type: application/x-ndjson`, one line per event: `{"type":"accepted\|working\|turn_done\|error","message":"...","platform_fault":bool}`, ending with `turn_done` or `error`. A `working` message is `using <tool>`, or a crew line that starts with the member's name and a colon (`Scout: researching flight options`, `Scout: done`; see "The crew"). The last event also has `"browser_seconds":N,"browser_report_id":"<delivery_id>#<n>"` when Scout's browser was open: whole seconds since the Bridge's last report, and an id under which the vm-manager stores the report once (both are left out when the browser never started). `metadata` is `DeliverRequest.metadata_json` as the backend sent it; the Bridge reads two fields of it, see "What the Bridge reads in `metadata`". `channel` is where the user reads the answer (`web`, `telegram`, `whatsapp`, `imessage`); it decides how the lead formats it, see "How the answer is formatted, by channel". `401` bad secret, `400` bad body |
 | `POST /shutdown` | Stop taking work, stop Hermes (it saves to /data), `200` when done (< 20 s) |
 | `POST /claude/login/start` | Starts `claude auth login` (in a pty). `200 {"login_id","authorize_url","expires_at"}` (unix ms, +10 min). One pending sign-in per container; a new start replaces it. `502` no link shown, `503` Claude Code not installed |
 | `POST /claude/login/complete` | Body `{"login_id","code"}`. Types the code into the waiting CLI, waits (<= 60 s) and asks `claude auth status`. `200 {"connected":bool,"message":"..."}`; `409` unknown / expired / used; `400` missing or multi-line code. Bodies are never logged |
@@ -237,6 +237,54 @@ The Bridge never returns reply text. It sends the final answer itself by calling
 Platform MCP tool `send_message` `{"text","session_key"}` with the container's bearer
 token. The agent (Hermes or Claude Code) sees the other Platform MCP tools but not `send_message`.
 
+**How the answer is formatted, by channel.** The web app shows the agent's text as Markdown. A messaging app
+shows it as typed, so `**bold**` would arrive with its asterisks. So the lead's instructions for each turn say
+which of the two the answer is for, from the delivery's `channel` (`format_rules` and `build_instructions` in
+`bridge/core.py`):
+
+| `channel` | What the lead is told |
+|---|---|
+| `web` | The user reads the answer in the web app, which shows Markdown as formatted text. Use Markdown where it helps the reader: a list for steps or for separate points, a table for a comparison, a fenced code block with the language named for code or commands, short headings only in a long answer. A short answer stays a short plain sentence. No raw HTML and no images: the web app displays neither, so an image is given as a link |
+| Anything else: `telegram`, `whatsapp`, `imessage`, empty, or a value the Bridge does not know | The user reads the answer in a messaging app, which shows every character as typed. Plain text only, the way a person writes a text message. No Markdown: no `**` or `_` around words, no `#` headings, no backticks or code fences, no table pipes. Short paragraphs. A list is lines that start with `- ` or with `1. `, `2. `. No table: one line per item. A command or a piece of code on a line of its own. A link is the bare address, not `[text](address)` |
+
+An example. The same message, "Compare tea and coffee in three points", sent through the Bridge once as `web`
+and once as `telegram` (Claude Code 2.1.283 on Opus 5.5; the first point of each answer):
+
+```
+web:       1. **Caffeine:** Coffee has roughly twice as much per cup (about 80–100 mg versus 30–50 mg ...
+telegram:  1. Caffeine: Coffee has roughly twice as much, about 80 to 100 mg per cup against 30 to 50 mg ...
+```
+
+- **Which channel a delivery has.** The backend sends `web`, `telegram`, `whatsapp` or `imessage`, on every kind
+  of delivery. For a message it is the channel the message came from. For an approval's answer, a scheduled
+  automation and an app event it is the channel of the chat the answer goes to (the approval's or the
+  automation's own session). So a turn the user did not start is formatted for the chat it reports into.
+- **An empty or unknown channel gets plain text.** Plain text reads well everywhere; Markdown symbols do not.
+  Only the exact value `web` gets Markdown.
+- **The same text on both engines.** The rules are a paragraph of their own in the lead's instructions. Hermes
+  gets them as the run's `instructions`, Claude Code with `--append-system-prompt`. Nothing else in the
+  instructions depends on the channel, except its name in the first sentence.
+- **Each engine has its own idea of where its output appears**, and both texts end by saying that it does not
+  apply to this answer.
+  - Claude Code's system prompt says its text is "rendered in a monospace font" as "Github-flavored markdown"
+    (2.1.283). There is no setting for that short of replacing its whole system prompt, so for a messaging app
+    the lead's instructions are what asks for plain text.
+  - Hermes's built-in hint for its API server, the only way the Bridge talks to it, says "assume plain text. No
+    markdown formatting". That would fight the web rules, so the Bridge replaces it in `config.yaml` with
+    Hermes's own setting for this (`platform_hints: {api_server: {replace: ...}}`; `HERMES_API_HINT` in
+    `bridge/platform.py`). The new hint takes no side: the answer goes to the web app or to a messaging app, and
+    the instructions of each turn say which and how to format it. It keeps the rest of the built-in hint (the
+    tone, and that a `MEDIA:` tag is not turned into a file here). Hermes builds a session's prompt when the
+    session starts and when it compacts the history, so a conversation that started under an older image keeps
+    the built-in hint until then.
+- **The Bridge does not change the answer's text.** It sends what the lead wrote. A model can still write
+  Markdown when told not to, so the backend turns the text into plain text before it sends it to a messaging
+  app. That is the backend's part; the instructions are the first line, not the only one.
+- **Only the final answer.** The rules do not cover text the agent passes to a tool, such as an approval's
+  summary or a reminder's text.
+- **The specialists' briefs say nothing about this.** Byte, Patch and Scout report to Tex, and Tex writes the
+  answer.
+
 Deliver errors from the Claude Code runtime: not signed in / login expired / token revoked
 -> `"Connect your Claude plan again"`, `platform_fault=false`; plan usage limit, rate limit or
 spend limit -> `"Your Claude plan's usage limit was reached: <the CLI's message>"`,
@@ -268,7 +316,8 @@ runtime", and "Agent image" for Hermes).
 renders `$HERMES_HOME/config.yaml` from `platform.json` at every boot (model = LiteLLM
 with the user's key via the egress proxy; MCP = Platform MCP with the container token
 + the user's MCP servers; cron and messaging toolsets off; Hermes's own memory off (see "One
-memory" below); skills and sessions under `/data/hermes`), starts `hermes gateway run` with only its API server on 127.0.0.1
+memory" below); Hermes's own hint about formatting replaced (see "How the answer is formatted, by channel"
+under "Bridge contract"); skills and sessions under `/data/hermes`), starts `hermes gateway run` with only its API server on 127.0.0.1
 (random per-boot key), and drives one Hermes run per delivery with
 `X-Hermes-Session-Key: <session_key>`, so each chat keeps its own session (a delivery in
 which the lead hands work to its crew takes follow-up runs; see "The crew"). Hermes saves a turn to its
@@ -828,4 +877,7 @@ from the delivery's metadata): tested against fakes and run through the Bridge w
 a fake API, not against Anthropic's API with a real plan and not in an image on the server; the checks are in
 `docs/build-report.md` section 11. So is the fourth, of 2026-10-09 (each conversation of a chat keeps its own
 engine conversation, and an earlier one can be opened again): tested the same two ways; the checks are in
-`docs/build-report.md` section 12.
+`docs/build-report.md` section 12. The formatting by channel is tested against fakes, and with two real turns
+through the Bridge and the real 2.1.283 binary on a real Claude plan, on the development machine. Not run: Hermes
+itself with its replaced hint (read in its source only), any model other than Opus 5.5, and the image on the
+server; the checks are in `docs/build-report.md` section 13.

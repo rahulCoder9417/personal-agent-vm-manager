@@ -7,7 +7,7 @@
 - Phase 2 is **coded, committed and unit tested**: every gRPC RPC, the container spec, the five background loops, the egress writer, the agent image (Hermes + Bridge).
 - **Nothing has run against real Docker.** Docker and gVisor aren't installed on the dev machine, so the Docker parts were tested against a fake daemon, and the Bridge against a fake Hermes.
 - The proto (`proto/vm/v1/vm.proto`) got additive RPCs and fields for the agent runtime and the Claude Code sign-in (section 6); no existing field changed.
-- Later additions, each in its own section: the Claude Code runtime (6), git through the platform's git gateway (7), the crew of specialists (8), Scout's browser (9), and what the second server run of 2026-10-08 found (10: failed messages acted on later, failed runs without a logged cause, a refusal counted as our fault, the idle stop coming late), the Bridge's part of "New chat" and of the Claude Code model and effort (11), and its part of "Chat history": each conversation of a chat keeps its own engine conversation, and an earlier one can be opened again (12). The crew is unit tested against fakes only; the image build and a real turn with either runtime are untested. The browser was run for real on the development machine (the real server, a real Chromium, gVisor, a real Squid), but not in the image and not by an engine.
+- Later additions, each in its own section: the Claude Code runtime (6), git through the platform's git gateway (7), the crew of specialists (8), Scout's browser (9), and what the second server run of 2026-10-08 found (10: failed messages acted on later, failed runs without a logged cause, a refusal counted as our fault, the idle stop coming late), the Bridge's part of "New chat" and of the Claude Code model and effort (11), and its part of "Chat history": each conversation of a chat keeps its own engine conversation, and an earlier one can be opened again (12), and its part of the formatting of replies: Markdown for the web app, plain text for a messaging app (13). The crew is unit tested against fakes only; the image build and a real turn with either runtime are untested. The browser was run for real on the development machine (the real server, a real Chromium, gVisor, a real Squid), but not in the image and not by an engine.
 
 ## 1. Initial design vs what we built
 
@@ -734,3 +734,128 @@ The spec asks that old sessions stay on disk while their conversation exists. Th
 - Making an earlier web conversation the active one needs no call to the vm-manager. The next delivery's `chat_epoch` is enough.
 - Deleting a conversation needs no call either. Its session stays in the user's volume, unused (accepted in the spec). If the same chat and epoch were ever used again, the engine would go on in the old session; epochs only rise, so that should not happen.
 - The engine has no context for a conversation it has no record of: a conversation from before this change other than each chat's current one, one that first ran on the other engine, and on Claude Code one whose transcript the CLI removed. The recap on an engine change covers the second case. Nothing covers the other two, and the Bridge cannot report them.
+
+## 13. How the answer is formatted, by channel (2026-10-09)
+
+**Date:** 2026-10-09 · **Branch:** `mvp-build`. The agent image's part of the third round of the day (shared spec, round 3, part 1), built at the same time as the backend's and the web app's. Built and tested on the development machine; the image was not built and nothing on the server was changed. No change to `proto/vm/v1/vm.proto` and no Go change: the delivery's `channel` already reaches the Bridge (`DeliverRequest.channel`, `internal/grpcserver/server.go`, `internal/bridge/client.go`).
+
+What the founder asked for: "the response the Tex gives on the web or app should be in proper markdown given and on telegram app it should be simple message only". The web app now draws the agent's text as Markdown, and the backend turns a text into plain text before it sends it to a messaging app. The Bridge's part is the first line: tell the agent how to write for the place the user reads it.
+
+### Asked for vs built
+
+| Asked for (shared spec) | Built |
+|---|---|
+| The per-turn instructions say, by channel, how to format the reply | `format_rules(channel)` in `bridge/core.py`, a paragraph of its own in `build_instructions`. Two texts, `FORMAT_WEB` and `FORMAT_PLAIN`; see "The wording" |
+| `web`: Markdown when it helps; a short answer stays a short plain sentence; no raw HTML, no images | `FORMAT_WEB`, for the exact value `web` |
+| Every other channel (Telegram, WhatsApp, iMessage, unknown): plain text only | `FORMAT_PLAIN`, for every other value, the empty one included |
+| Clear, calm wording with the reason | Each text starts with where the user reads the answer and what that app does with Markdown |
+| Both engines use them | They do, with no engine change: Hermes gets the lead's instructions as the run's `instructions`, Claude Code with `--append-system-prompt` |
+| Check whether an engine has a formatting setting of its own that would fight them | Both have a line of their own; Hermes's is replaced through its own setting; see "What each engine says by itself" |
+| The specialists' instructions stay as they are | Unchanged. `crew.py` says nothing about the user's formatting: Byte, Patch and Scout report to Tex |
+
+### The wording
+
+Both are one paragraph, placed after the first paragraph of the lead's instructions (the channel, who sends the answer, approvals, git) and before the memory rules. The first paragraph is unchanged, "Keep replies suited to a chat app" included: it holds for both.
+
+For `web`:
+
+> Formatting: the user reads your final answer in the web app, which shows Markdown as formatted text. So use Markdown where it helps the reader: a list for steps or for separate points, a table for a comparison, a fenced code block with the language named for code or commands, and short headings only in a long answer. A short answer stays a short plain sentence, with no formatting added. Do not write raw HTML and do not embed images: the web app displays neither, so give an image as a link. Other guidance you have about where your output appears (a terminal, or an API with an unknown display) does not apply to this answer.
+
+For every other value:
+
+> Formatting: the user reads your final answer in a messaging app, which shows every character as you typed it, so Markdown symbols would appear in the message as stray characters. Write plain text only, the way a person writes a text message. Use no Markdown: no ** or _ around words, no # headings, no backticks or code fences, no table pipes. Keep paragraphs short. For a list, start each line with "- " or with "1. ", "2. " and so on. Do not make a table: give one line per item. Put a command or a piece of code on a line of its own, as it is. Write a link as the bare address, not as [text](address). Other guidance you have about where your output appears (a terminal that renders Markdown, for example) does not apply to this answer.
+
+### Which channel a delivery has
+
+Read in the backend (`../beckend`, not edited): its `Channel` type is `web`, `telegram`, `whatsapp` or `imessage` (`src/modules/channels/types.ts`), and one function makes every delivery (`deliverTurn` in `src/modules/orchestrator/turn.ts`), which always sends the turn's channel. Which channels are switched on is its setting `ENABLED_CHANNELS` (default: `telegram,web`).
+
+| Kind of delivery | Its channel |
+|---|---|
+| A message | The channel it came from: `web` for the web app (and the desktop app, a window around it), else the messaging app's name (`process-message.ts`) |
+| An approval's answer | The channel of the chat the approval was asked in, from the approval's session key (`approvals.ts`) |
+| A scheduled automation, a reminder | The channel of the automation's own session key (`automations/jobs.ts`). That is the session the agent named when it created it (the chat the request came from); when it named none, the chat the user last wrote from, else `web` (`platform-mcp/tools/core.ts`, `resolveSession`) |
+| An app event (a trigger, a pull-request review) | The same. A pull-request review reports to the user's linked Telegram chat when there is one, else to `web` (`pr-review.ts`) |
+
+So the channel always names the chat the answer is sent to, and a turn the user did not start is formatted for the chat it reports into. By its types the backend never sends an empty channel. The Bridge still takes one (and any value it does not know) and asks for plain text.
+
+### What each engine says by itself
+
+Both engines tell the model something about where its output appears, before the Bridge's instructions.
+
+- **Claude Code** (read in the pinned 2.1.283 binary). Its system prompt has, in a section that is always there: "All text you output outside of tool use is displayed to the user. Output text to communicate with the user. You can use Github-flavored markdown for formatting, and will be rendered in a monospace font using the CommonMark specification." (a shorter variant says "displayed to the user as Github-flavored markdown in a terminal"). That agrees with the web rules and fights the plain-text ones. No flag or setting takes that one line out: in the binary it sits in the prompt's "# System" section, which is built whatever the output style, and `--system-prompt` would replace the whole prompt, which the Bridge does not do. `--append-system-prompt` puts the Bridge's instructions after it, and the plain-text rules end with "Other guidance you have about where your output appears (a terminal that renders Markdown, for example) does not apply to this answer." In the real run below the Telegram answer had no Markdown symbol.
+- **Hermes** (read in its source at the pinned commit). The Bridge reaches Hermes only through its API server, so every agent has the platform `api_server` (`gateway/platforms/api_server.py`, `_create_agent`), and Hermes puts its built-in hint for that platform into each session's system prompt: "You're responding through an API server. The rendering layer is unknown — assume plain text. No markdown formatting (no asterisks, bullets, headers, code fences). Treat this like a conversation, not a document. Keep responses brief and natural. ..." (`agent/prompt_builder.py`, `PLATFORM_HINTS`). That fights the web rules. Hermes has a setting for it: `platform_hints.<platform>.replace` at the top of `config.yaml` "substitutes the built-in hint entirely" (`website/docs/developer-guide/prompt-assembly.md`, "Customizing platform hints"; `agent/system_prompt.py`, `_resolve_platform_hint`). **Set**: the Bridge now writes `platform_hints: {api_server: {replace: <HERMES_API_HINT>}}` (`bridge/platform.py`):
+
+  > You are answering through the platform: it delivers your final answer for a turn to the user, in the web app or in a messaging app. Which of the two it is, and how to format the answer for it, is said in the instructions of each turn: follow those. Treat this like a conversation, not a document. Keep responses brief and natural. Files: nothing here turns a MEDIA:/path tag into a file, it would reach the user as literal text with a path of this machine in it. So state the plain file path in your answer instead of a MEDIA: tag.
+
+  The hint takes no side because it cannot: it is part of the session's stored prompt, the same for every turn. The run's instructions, which Hermes appends to the system prompt of each request (`ephemeral_system_prompt`), say which it is. The tone and the `MEDIA:` part are kept from the built-in hint, in fewer words. Nothing else in Hermes's prompt builder (`agent/prompt_builder.py`, `agent/system_prompt.py`) speaks about Markdown, and the API server's code has no step that strips or converts it. Not read: the descriptions of Hermes's tools and its bundled skills.
+- **An old Hermes conversation keeps the old hint for a while.** Hermes builds a session's prompt when the session starts and again when it compacts the history; in between it reuses the stored one, byte for byte (`agent/conversation_loop.py`, `_restore_or_build_system_prompt`). So a Hermes conversation that started before the deploy still carries "No markdown formatting" until then. The web rules come later in the same request and say that such guidance does not apply; whether the model then writes Markdown was not run. A new chat starts a new Hermes session and gets the new hint at once.
+
+### Where we filled in or changed the spec
+
+- **"Keep replies suited to a chat app" stays.** The task allowed dropping it if the new wording replaces it. It does not: it is about length and tone, and it is true for the web chat too.
+- **Two sentences the spec does not have.** "Put a command or a piece of code on a line of its own, as it is" in the plain-text rules: with backticks ruled out, the model needs to know where code goes. And the last sentence of both texts, about other guidance, because of what each engine says by itself.
+- **"give an image as a link"** in the web rules: the web app shows a Markdown image as a link, so that is what the agent should write.
+- **Only the exact value `web` gets Markdown.** `Web` or `web ` would get plain text. The backend sends the exact value, and plain text is the safe side: it reads well in the web app, Markdown symbols do not in Telegram.
+- **Hermes's hint is replaced, not appended to.** Appending would leave "No markdown formatting" in the prompt.
+- **Not covered: text the agent passes to a tool**, such as an approval's summary or a reminder's text. The rules speak of the final answer only. The spec says the web app draws only the agent's messages as Markdown, so Markdown in an approval's summary would show its symbols there, as it would have before this change.
+- **The Bridge does not rework the answer.** No stripping of Markdown here; the spec gives that to the backend, for messaging apps only.
+
+### Tests (real runs, 2026-10-09)
+
+- `cd agent-image && python3 -m unittest discover -s tests -t .`: **191 tests, OK** (1 skipped: the real-browser test). 185 before.
+- `go vet ./...`: clean. `go test -count=1 ./...`: all 9 packages with tests pass (no Go change).
+- New tests. The web instructions mention Markdown and each thing the spec lists, and contain none of the plain-text rules. `telegram`, `whatsapp`, `imessage`, the empty channel, a delivery with no `channel` field and an unknown value all get the plain-text rules and none of the web ones. Every kind of delivery is formatted by its channel. With the rules taken out, the instructions are the text from before this change, character for character, for four channels. Both engines get the rules of the delivery's channel: the Bridge with the fake Hermes runner and the fake CLI (the `--append-system-prompt` value is Hermes's instructions plus the hand-over line), and the real Hermes client against the fake Hermes API; the specialists' briefs in it have no word about formatting. The rendered Hermes config has the replaced hint, the hint names neither Markdown nor plain text, and it is written to `config.yaml` as it is.
+- The new tests of the instructions were also run against three wrong versions of the code (Markdown for every channel, plain text for every channel, another sentence of the instructions dropped): they failed each time.
+- **Hermes's own resolver, fed the Bridge's config.** `_resolve_platform_hint`, one pure function, was taken out of the pinned source and called with the `platform_hints` the Bridge renders: the result is the Bridge's hint, with none of the built-in text left; another platform's hint is untouched. Hermes itself was not run.
+- **Two real turns, on a real Claude plan.** The Bridge (`core.Bridge` and `ClaudeRunner`, wired as in `__main__`) with the real 2.1.283 binary (the one of sections 10 to 12, sha256 `1859583c…5e804ae2` as in its signed manifest), on the Claude plan the development machine is signed in to. The same message twice, "Compare tea and coffee in three points. Answer from what you already know, no research needed.", once as `web` and once as `telegram`. Model `claude-opus-5-5`, effort `low` (passed in the delivery's metadata, to use little of the plan). Each turn was one answer with no tool call: about 28,000 tokens in, under 300 out.
+
+  `web`, as the Bridge sent it with `send_message`:
+
+  ```
+  1. **Caffeine:** Coffee has roughly twice as much per cup (about 80–100 mg versus 30–50 mg for black tea), so it gives a sharper lift. Tea's lift is gentler, partly because it also contains L-theanine, which has a calming effect.
+
+  2. **Taste and variety:** Coffee is bold, roasted and bitter, with flavour shaped mostly by the bean's origin, the roast and the brewing method. Tea is lighter and ranges more widely, from grassy green to malty black to floral oolong, all from the same plant processed differently.
+
+  3. **Health effects:** Both are rich in antioxidants and linked to lower risk of heart disease when drunk in moderation. Coffee is more likely to cause jitters, acid reflux or disturbed sleep, while tea is easier on the stomach but can reduce iron absorption if drunk with meals.
+  ```
+
+  `telegram`:
+
+  ```
+  Tea vs coffee in three points:
+
+  1. Caffeine: Coffee has roughly twice as much, about 80 to 100 mg per cup against 30 to 50 mg for black tea. Coffee hits faster and harder; tea is gentler, partly because it contains L-theanine, which smooths out the buzz.
+
+  2. Taste and variety: Coffee is bold, roasted and bitter, with flavor shaped mostly by the bean and the roast. Tea is lighter and ranges widely, from grassy green to malty black to floral oolong, all from the same plant processed differently.
+
+  3. Health effects: Both are rich in antioxidants and linked to lower risk of heart disease when drunk in moderation. Coffee is more likely to cause jitters, acid stomach or poor sleep; tea is easier on the stomach but can reduce iron absorption if taken with meals.
+  ```
+
+  The web answer is a Markdown numbered list with three bold labels. It is not a table: asked for "three points", the model chose a list. The Telegram answer has no `**`, no `#`, no backtick, no table pipe and no `[text](link)`; its list lines start with "1. ", as the rules say.
+
+  How this run differed from a container, so it is not mistaken for one:
+  - The sign-in was the machine's own. A wrapper removed `CLAUDE_CONFIG_DIR` from the CLI's environment, so the unmodified binary used its default config folder; no credential was read, copied or passed. Because of that, the machine's own user settings were loaded too (`--setting-sources user`), with two plugins a container does not have.
+  - The lead had no file or shell tools (`ClaudeRunner(allowed_tools=())`) and at most four steps (`max_turns=4`): the run was on a developer's machine, not in a sandbox.
+  - No Platform MCP was listening, so there were no platform tools.
+  - Left behind on that machine: the two turns' transcripts, in the CLI's own folder `~/.claude/projects/` under the name of the run's work folder. The CLI removes them after its retention period.
+- Not run: Hermes itself, any model other than Opus 5.5, a request that invites a table or code, and the image.
+
+### Not verified yet (after the next deploy)
+
+| What | How to check |
+|---|---|
+| Web chat, Claude Code | In the web app: "Compare tea and coffee in three points." The answer shows a formatted list or table, with no stray symbols (needs the web app's part of this round) |
+| Telegram, Claude Code | The same message in Telegram: plain text, no `**`, `#`, backticks or pipes. To see the agent's own text before the backend's safety net, read the saved message in the web app's list of the Telegram conversation |
+| A table and code | In the web app: "Give me a table of three phones with price and battery" and "Show me the git command to undo the last commit": a table, and a fenced code block. The same two in Telegram: one line per phone, and the command on a line of its own without backticks |
+| Hermes has the new hint | For a Hermes user, once the container runs the new image: `docker exec pa-sbx-<user> grep -A3 '"platform_hints"' /data/hermes/config.yaml` shows `api_server`, `replace` and the hint's first words. Then New chat in the web app and the tea and coffee message: Markdown. In Telegram, after `/new`: plain text |
+| An old Hermes conversation | The tea and coffee message in a web conversation on Hermes that started before the deploy. It may still come back as plain text until Hermes compacts that conversation; New chat fixes it. If old conversations stay plain for long, there are two fixes: firmer wording in the instructions, or moving such a conversation to a new Hermes key (it then starts afresh, as after a failed turn) |
+| The cheap model on Free | The same two checks for a Free user (Hermes on the cheap model). A small model follows formatting rules less well than Claude; on Telegram the backend's safety net covers it, on the web a plain answer is the worst case |
+| Other Claude models | The same two checks with Sonnet 5.5, Fable 5.1 and Haiku 4.5 chosen in Settings. Only Opus 5.5 was run |
+| A turn the user did not start | A reminder set from Telegram arrives as plain text; one set from the web app shows as Markdown where the agent used any |
+
+### For the backend and the web app (not edited from here)
+
+- The Bridge reads only `DeliverRequest.channel`, and only the exact value `web` means Markdown. A new channel that should get Markdown (none is planned) needs a change in `format_rules`.
+- The instructions do not replace the backend's safety net: a model can still write Markdown for Telegram, and a Hermes user on a small model more often than Claude. They make it rare, so the stripped text reads as it was meant.
+- The rules cover the final answer only. An approval's summary and a reminder's text come from tool calls and may contain Markdown symbols on any channel, as before. If that shows up in the web app's approval cards or in Telegram, the fix is a line in those tools' descriptions on the Platform MCP, not in the Bridge.
+- The agent is told not to embed images and to give a link instead, which matches the web app showing a Markdown image as a link.
