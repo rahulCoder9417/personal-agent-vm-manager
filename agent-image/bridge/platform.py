@@ -105,6 +105,33 @@ def hermes_context_length(env: dict[str, str]) -> int:
     return value if value >= HERMES_MIN_CONTEXT_LENGTH else HERMES_CONTEXT_LENGTH
 
 
+# What Hermes's system prompt says about where its answers appear, in place of its built-in hint for the API
+# server. The Bridge reaches Hermes only through that API (`/v1/runs`), so every agent it builds has the platform
+# `api_server` (gateway/platforms/api_server.py `_create_agent`), and the built-in hint for it asks for plain text
+# always: "The rendering layer is unknown — assume plain text. No markdown formatting (no asterisks, bullets,
+# headers, code fences)" (agent/prompt_builder.py PLATFORM_HINTS, at the pinned commit). That contradicts the
+# lead's instructions for a turn from the web app, which ask for Markdown (core.FORMAT_WEB). The setting is
+# Hermes's own: top-level `platform_hints.<platform>.replace` "substitutes the built-in hint entirely"
+# (website/docs/developer-guide/prompt-assembly.md "Customizing platform hints"; agent/system_prompt.py
+# `_resolve_platform_hint`).
+#
+# The hint is part of a session's stored system prompt, the same for every turn, so it cannot say Markdown or
+# plain text itself: it points to the turn's instructions, which can (Hermes appends them to the system prompt of
+# each request, `ephemeral_system_prompt`). The rest keeps what the built-in hint says and still holds here: the
+# tone, and that a MEDIA: tag is not turned into a file on the runs endpoint.
+# Hermes builds a session's prompt when the session starts and again when it compacts the history; in between it
+# reuses the stored one (agent/conversation_loop.py `_restore_or_build_system_prompt`). So a conversation that
+# started before this change keeps the built-in hint until then.
+HERMES_API_HINT = (
+    "You are answering through the platform: it delivers your final answer for a turn to the user, in the web app "
+    "or in a messaging app. Which of the two it is, and how to format the answer for it, is said in the "
+    "instructions of each turn: follow those. Treat this like a conversation, not a document. Keep responses "
+    "brief and natural. Files: nothing here turns a MEDIA:/path tag into a file, it would reach the user as "
+    "literal text with a path of this machine in it. So state the plain file path in your answer instead of a "
+    "MEDIA: tag."
+)
+
+
 def render_hermes_config(pf: PlatformFile, env: dict[str, str], data_dir: str = "/data") -> dict[str, Any]:
     """Build the Hermes config dict.
 
@@ -117,6 +144,8 @@ def render_hermes_config(pf: PlatformFile, env: dict[str, str], data_dir: str = 
       turned on for the user
     - delegation (the crew): children cannot delegate, BRIDGE_CREW_MAX_PARALLEL at a time (default 3)
     - Hermes's own memory off: the user's memory is the platform's (remember / recall / forget)
+    - Hermes's own hint about where its answers appear replaced: how to format an answer is said by the
+      lead's instructions for each turn, by the delivery's channel (HERMES_API_HINT, core.format_rules)
     - no runtime installs and no model catalog: Hermes fetches nothing from GitHub, PyPI, Nous or
       OpenRouter when it starts; and the model's context size is given, so it does not probe LiteLLM for it
     - skills and sessions under HERMES_HOME (= /data/hermes)
@@ -170,6 +199,10 @@ def render_hermes_config(pf: PlatformFile, env: dict[str, str], data_dir: str = 
         # Nor does Hermes offer, on a first message, to build a profile of the user in that memory
         # (agent/onboarding.py: "off" never offers).
         "onboarding": {"profile_build": "off"},
+        # Hermes's built-in hint for its API server asks for plain text without Markdown, always. How to format
+        # an answer depends on where the user reads it and is said per turn (core.format_rules), so the hint is
+        # replaced by one that points there (HERMES_API_HINT).
+        "platform_hints": {"api_server": {"replace": HERMES_API_HINT}},
         # Hermes downloads and installs nothing at runtime: only what the image pins runs. Without this, the
         # gateway's start-up check (GatewayRunner._init_startup_checks -> tirith_security.ensure_installed) has
         # Hermes's package manager fetch a standalone Python, uv and the tirith command scanner from GitHub and

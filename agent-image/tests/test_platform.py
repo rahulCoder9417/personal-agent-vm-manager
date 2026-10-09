@@ -10,8 +10,9 @@ import threading
 import unittest
 
 from bridge import browser, crew
-from bridge.platform import (git_gateway_url, load_platform_file, render_gitconfig, render_hermes_config,
-                             write_gitconfig, write_hermes_config)
+from bridge.core import FORMAT_PLAIN, FORMAT_WEB
+from bridge.platform import (HERMES_API_HINT, git_gateway_url, load_platform_file, render_gitconfig,
+                             render_hermes_config, write_gitconfig, write_hermes_config)
 
 
 class PlatformTest(unittest.TestCase):
@@ -144,6 +145,33 @@ class PlatformTest(unittest.TestCase):
         self.assertEqual(cfg["onboarding"], {"profile_build": "off"})
         self.assertNotIn("memory", cfg["agent"]["disabled_toolsets"])
         self.assertNotIn("session_search", cfg["agent"]["disabled_toolsets"])
+
+    def test_render_replaces_hermes_own_hint_about_formatting(self):
+        # Every run the Bridge starts is on Hermes's platform "api_server", whose built-in hint says "assume
+        # plain text. No markdown formatting", whatever the channel. The lead's instructions for a turn from the
+        # web app ask for Markdown, so that hint is replaced (Hermes's own setting, top-level
+        # platform_hints.<platform>.replace) by one that leaves formatting to the turn's instructions.
+        for browser_on in (False, True):
+            cfg = render_hermes_config(load_platform_file(self.path), {"BROWSER_ROOT": "/nowhere"} if browser_on else {})
+            self.assertEqual(cfg["platform_hints"], {"api_server": {"replace": HERMES_API_HINT}})
+        # The hint is the same for every turn of a session, so it takes no side: it neither asks for Markdown
+        # nor forbids it, and names where the answer is said to go.
+        low = HERMES_API_HINT.lower()
+        for word in ("markdown", "plain text", "asterisk", "bullets", "code fence"):
+            self.assertNotIn(word, low)
+        for part in ("in the web app or in a messaging app",
+                     "how to format the answer for it, is said in the instructions of each turn: follow those",
+                     # Kept from the built-in hint: the tone, and that a MEDIA: tag does nothing here.
+                     "Treat this like a conversation, not a document. Keep responses brief and natural.",
+                     "state the plain file path in your answer instead of a MEDIA: tag"):
+            self.assertIn(part, HERMES_API_HINT)
+        # The instructions it points to do say it, for either channel.
+        self.assertIn("use Markdown where it helps the reader", FORMAT_WEB)
+        self.assertIn("Write plain text only", FORMAT_PLAIN)
+        # It is written into config.yaml as it is.
+        home = os.path.join(self.tmp, "hermes")
+        with open(write_hermes_config(cfg, home)) as fh:
+            self.assertEqual(json.load(fh)["platform_hints"]["api_server"]["replace"], HERMES_API_HINT)
 
     def test_render_hermes_fetches_nothing_at_runtime(self):
         # Seen in a container with the open web: at its first start the gateway fetched a standalone Python,
