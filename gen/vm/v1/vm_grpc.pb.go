@@ -51,7 +51,8 @@ type VmManagerClient interface {
 	// Start if needed and wait until the Bridge is healthy.
 	// At the awake cap with nothing evictable -> RESOURCE_EXHAUSTED (retryable).
 	WakeSandbox(ctx context.Context, in *WakeSandboxRequest, opts ...grpc.CallOption) (*WakeSandboxResponse, error)
-	// Deliver a message or approval answer. Streams accepted -> working... -> turn_done | error.
+	// Deliver a message or approval answer. Streams accepted -> working... -> turn_done | error,
+	// with text_delta events among the working ones when the delivery's metadata asks for them.
 	Deliver(ctx context.Context, in *DeliverRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[DeliverEvent], error)
 	// Refresh last-active (every delivered message and every Platform MCP call).
 	Touch(ctx context.Context, in *TouchRequest, opts ...grpc.CallOption) (*TouchResponse, error)
@@ -272,7 +273,8 @@ type VmManagerServer interface {
 	// Start if needed and wait until the Bridge is healthy.
 	// At the awake cap with nothing evictable -> RESOURCE_EXHAUSTED (retryable).
 	WakeSandbox(context.Context, *WakeSandboxRequest) (*WakeSandboxResponse, error)
-	// Deliver a message or approval answer. Streams accepted -> working... -> turn_done | error.
+	// Deliver a message or approval answer. Streams accepted -> working... -> turn_done | error,
+	// with text_delta events among the working ones when the delivery's metadata asks for them.
 	Deliver(*DeliverRequest, grpc.ServerStreamingServer[DeliverEvent]) error
 	// Refresh last-active (every delivered message and every Platform MCP call).
 	Touch(context.Context, *TouchRequest) (*TouchResponse, error)

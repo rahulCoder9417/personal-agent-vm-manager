@@ -313,6 +313,63 @@ class HermesClientTest(unittest.TestCase):
         self.assertEqual(h2["X-Hermes-Session-Key"], "telegram:42", "the same conversation")
         self.assertEqual((h1["Idempotency-Key"], h2["Idempotency-Key"]), ("evt-1#1", "evt-1#1/crew1"))
 
+    def drafts(self):
+        """An on_text hook that records the draft after each call (None starts it over), like core.Draft."""
+        states = [""]
+
+        def on_text(piece):
+            states.append("" if piece is None else states[-1] + piece)
+        return states, on_text
+
+    def test_the_draft_follows_message_delta_and_starts_over_at_a_tool(self):
+        # The pinned commit's Runs API: `message.delta` {"delta"} per piece, the words before a tool call, a
+        # paragraph break Hermes adds before the next model call's words, `message.interim` beside a tool call.
+        FakeHermes.runs = [frames(
+            {"event": "message.delta", "delta": "Let me "},
+            {"event": "message.delta", "delta": "look."},
+            {"event": "message.interim", "text": "Let me look.", "already_streamed": True},
+            {"event": "tool.started", "tool": "web_search", "preview": "x"},
+            {"event": "tool.completed", "tool": "web_search", "duration": 0.1, "error": False},
+            {"event": "message.delta", "delta": "\n\nYou have "},
+            {"event": "message.delta", "delta": "\n\n⚠ Connection dropped mid tool-call; reconnecting…\n\n"},
+            {"event": "message.delta", "delta": "You have two "},
+            {"event": "message.delta", "delta": "meetings."},
+            {"event": "run.completed", "output": "You have two meetings."})]
+        states, on_text = self.drafts()
+        c = HermesClient(self.url, "local-key", poll_interval=0.01)
+        res = c.run("hello", "be brief", "web", "evt-1#1", self.progress.append, timeout=10, on_text=on_text)
+        self.assertEqual((res.status, res.output), ("completed", "You have two meetings."))
+        self.assertIn("Let me look.", states)
+        self.assertEqual(states[states.index("Let me look.") + 1], "", "the tool started: the draft starts over")
+        self.assertEqual(states[-1].strip(), res.output, "the reconnect notice and what came before it are gone")
+        self.assertFalse(any("⚠" in st for st in states[states.index("\n\nYou have ") + 1:]))
+        self.assertEqual(self.progress, ["using web_search"])
+
+    def test_each_round_of_the_crew_starts_the_draft_over(self):
+        FakeHermes.runs = [
+            frames({"event": "message.delta", "delta": "Scout is on it."},
+                   {"event": "tool.started", "tool": "delegate_task", "preview": "1 task"},
+                   {"event": "tool.completed", "tool": "delegate_task", "duration": 0.1, "error": False,
+                    "preview": json.dumps({"status": "dispatched", "mode": "background", "count": 1})},
+                   {"event": "message.delta", "delta": "Started Scout."},
+                   {"event": "run.completed", "output": "Started Scout."}),
+            frames({"event": "message.delta", "delta": "Here is "},
+                   {"event": "message.delta", "delta": "the answer."},
+                   {"event": "run.completed", "output": "Here is the answer."}),
+        ]
+        FakeHermes.health = [0, 0]
+        states, on_text = self.drafts()
+        c = HermesClient(self.url, "local-key", poll_interval=0.01)
+        res = c.run("hello", "be brief", "web", "evt-1#1", self.progress.append, timeout=10, on_text=on_text)
+        self.assertEqual(res.output, "Here is the answer.")
+        self.assertEqual(states[states.index("Started Scout.") + 1], "", "the follow-up round writes a new answer")
+        self.assertEqual(states[-1], "Here is the answer.")
+
+    def test_no_draft_without_the_hook(self):
+        FakeHermes.runs = [frames({"event": "message.delta", "delta": "Hi"},
+                                  {"event": "run.completed", "output": "Hi"})]
+        self.assertEqual(self.run_turn().output, "Hi")
+
     def test_crew_that_finishes_inside_the_run_needs_no_follow_up(self):
         FakeHermes.runs = [frames(
             {"event": "tool.started", "tool": "delegate_task"},

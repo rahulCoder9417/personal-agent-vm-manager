@@ -157,10 +157,68 @@ class ClaudeRunnerTest(unittest.TestCase):
         self.runner = ClaudeRunner([self.e.cli], self.e.env, self.e.data, self.e.reader().load, auth=self.auth)
         self.progress = []
 
-    def run_turn(self, text="hello", session_key="telegram:42", timeout=20, options=None, runner=None):
+    def run_turn(self, text="hello", session_key="telegram:42", timeout=20, options=None, runner=None, on_text=None):
         return (runner or self.runner).run(text=text, instructions="The user is talking to you through telegram.",
                                            session_key=session_key, idempotency_key="d#1",
-                                           on_progress=self.progress.append, timeout=timeout, options=options)
+                                           on_progress=self.progress.append, timeout=timeout, options=options,
+                                           on_text=on_text)
+
+    def drafts(self):
+        """An on_text hook that records the draft after each call (None starts it over), like core.Draft."""
+        states = [""]
+
+        def on_text(piece):
+            states.append("" if piece is None else states[-1] + piece)
+        return states, on_text
+
+    def test_the_draft_is_the_leads_message_being_written(self):
+        self.e.sign_in()
+        states, on_text = self.drafts()
+        res = self.run_turn("what's up?", on_text=on_text)
+        self.assertEqual(res.status, "completed")
+        self.assertIn("--include-partial-messages", self.e.calls()[0]["argv"])
+        # What the lead said before its tool call was shown, then went away when the tool started.
+        self.assertIn("Let me check.", states)
+        gone = states.index("Let me check.") + 1
+        self.assertEqual(states[gone], "")
+        # The draft grew piece by piece into the final answer.
+        self.assertEqual(states[-1], res.output)
+        self.assertIn(res.output[:5], states)
+        # Thinking, tool input and a specialist's words are never in it.
+        for text in ("hmm", "{}", "SPECIALIST"):
+            self.assertFalse(any(text in st for st in states), text)
+        self.assertIn("using get_profile", self.progress)
+
+    def test_a_status_while_the_crew_works_in_the_background_is_not_left_on_screen(self):
+        self.e.sign_in()
+        self.e.mode("crew_background")
+        states, on_text = self.drafts()
+        res = self.run_turn("review my pull request", on_text=on_text)
+        self.assertEqual(res.output, "the crew is done")
+        # "Patch is reviewing it." went away when the lead's message ended with Patch still at work, so the web
+        # app shows Patch's progress line meanwhile; the answer was written after Patch reported.
+        status = states.index("Patch is reviewing it.")
+        self.assertEqual(states[status + 1], "")
+        self.assertEqual(states[-1], "the crew is done")
+        self.assertIn("Patch: done", self.progress)
+
+    def test_no_partial_messages_without_a_draft(self):
+        self.e.sign_in()
+        self.run_turn("hello")
+        self.assertNotIn("--include-partial-messages", self.e.calls()[0]["argv"])
+
+    def test_a_run_that_starts_again_starts_the_draft_over(self):
+        self.e.sign_in()
+        self.run_turn("one")
+        os.remove(os.path.join(self.e.cfg, "fake_sessions.json"))  # the next run finds no session, then starts one
+        states, on_text = self.drafts()
+        res = self.run_turn("two", on_text=on_text)
+        self.assertEqual(res.status, "completed")
+        argv = [c["argv"] for c in self.e.calls()[1:]]
+        self.assertEqual(len(argv), 2)
+        self.assertTrue(all("--include-partial-messages" in a for a in argv))
+        self.assertEqual(states[-1], res.output)
+        self.assertEqual(states.count("Let me check."), 1, "the run that failed wrote nothing")
 
     def test_stream_json_run_and_cli_arguments(self):
         self.e.sign_in()
