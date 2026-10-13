@@ -29,6 +29,7 @@ vm-manager/
 - **Contract first:** change `proto/vm/v1/vm.proto` first, regenerate, then code. Tell the user the backend must regenerate its client (`pnpm proto:gen` in `../beckend`). Never break existing RPCs; add new fields or RPCs instead.
 - **Tests with every change:** unit tests for the loops and state machine (fake Docker); integration tests against real Docker with gVisor for create → wake → deliver → idle stop → wake again. Run `go vet`, the linter and tests before saying done, and report real results.
 - **Small commits** after each working step.
+- **Log every change** in the backend's **`../beckend/docs/optimization-log.md`**: one entry per feature, in plain words and with no code, written in the same piece of work as the change. Section 3 of that file says what an entry holds.
 - **Ask when the HLD is unclear**; don't invent behaviour.
 
 ## Stack
