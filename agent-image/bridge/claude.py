@@ -486,8 +486,8 @@ class ClaudeRunner:
                 "--agents", json.dumps(crew.claude_agents(PLATFORM_SERVER_NAME, self.crew_model, self.with_browser)),
                 "--append-system-prompt", f"{instructions}\n\n{crew.CLAUDE_HANDOFF}"]
         # The model and effort: the user's choice for this turn, else the Bridge's default model and the CLI's
-        # default effort. 2.1.283 (`claude --help`): "--model <model> ... an alias for the latest model (e.g.
-        # 'fable', 'opus', or 'sonnet') or a model's full name"; "--effort <level> Effort level for the current
+        # default effort. 2.1.283 and 2.1.296 (`claude --help`): "--model <model> ... an alias for the latest model
+        # (e.g. 'fable', 'opus', or 'sonnet') or a model's full name"; "--effort <level> Effort level for the current
         # session (low, medium, high, xhigh, max)". Both apply to the lead; a specialist whose definition says
         # `inherit` runs on the lead's model at the session's effort (crew.claude_agents).
         if model:

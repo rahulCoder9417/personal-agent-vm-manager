@@ -48,7 +48,8 @@ def browser_fields(rec: Optional[dict]) -> dict:
     return {"browser_seconds": seconds, "browser_report_id": report_id}
 
 
-# Claude Code's effort levels (2.1.283 `claude --help`: "--effort <level> ... (low, medium, high, xhigh, max)").
+# Claude Code's effort levels (`claude --help`: "--effort <level> ... (low, medium, high, xhigh, max)"; the same five
+# in 2.1.283 and in the pinned 2.1.296).
 CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 # A model alias or id as `--model` takes it (e.g. `opus`, `claude-opus-5-5`, `claude-opus-4-8[1m]`). It starts with a
 # letter or digit, so it can never be read as another flag of the command line.
