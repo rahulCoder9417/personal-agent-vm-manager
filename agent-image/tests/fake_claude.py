@@ -232,6 +232,8 @@ def print_mode(args) -> int:
              "result": "\n".join(the_web_tools(sid, settings))})
         return 0
     if m in CREW_MODES:
+        global PARTIAL
+        PARTIAL = "--include-partial-messages" in args
         CREW_MODES[m](sid)
         out({"type": "result", "subtype": "success", "is_error": False, "result": "the crew is done",
              "session_id": sid})
@@ -375,6 +377,17 @@ def crew_foreground(sid) -> None:
     msg(sid, "assistant", [{"type": "text", "text": "the crew is done"}])
 
 
+def lead_says(sid, text, stop_reason="end_turn") -> None:
+    """With --include-partial-messages: the lead writes one message of text (its stream events)."""
+    if not PARTIAL:
+        return
+    stream(sid, {"type": "message_start", "message": {"id": f"m-{uuid.uuid4()}", "role": "assistant", "content": []}},
+           {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+           {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}},
+           {"type": "content_block_stop", "index": 0},
+           {"type": "message_delta", "delta": {"stop_reason": stop_reason}}, {"type": "message_stop"})
+
+
 def crew_background(sid) -> None:
     """The lead starts Patch in the background (old tool name `Task`); it ends with a task_notification."""
     msg(sid, "assistant", [agent_call("b1", "patch", "reviewing pull request 12", tool="Task",
@@ -389,8 +402,10 @@ def crew_background(sid) -> None:
     # A background shell task of the lead must not be taken for a specialist.
     out({"type": "system", "subtype": "task_notification", "task_id": "t0", "tool_use_id": "l1",
          "status": "completed", "output_file": "", "summary": "", "session_id": sid})
+    lead_says(sid, "Patch is reviewing it.")  # a status while Patch works: not the answer
     out({"type": "system", "subtype": "task_notification", "task_id": "t9", "status": "completed",
          "output_file": "/data/tmp/x2.output", "summary": "review posted", "session_id": sid})
+    lead_says(sid, "the crew is done")
     msg(sid, "assistant", [{"type": "text", "text": "the crew is done"}])
 
 
@@ -407,6 +422,7 @@ def crew_unreported(sid) -> None:
     msg(sid, "assistant", [{"type": "text", "text": "the crew is done"}])
 
 
+PARTIAL = False  # the run was started with --include-partial-messages
 CREW_MODES = {"crew": crew_foreground, "crew_background": crew_background, "crew_unreported": crew_unreported}
 
 

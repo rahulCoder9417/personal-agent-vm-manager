@@ -189,6 +189,19 @@ class ClaudeRunnerTest(unittest.TestCase):
             self.assertFalse(any(text in st for st in states), text)
         self.assertIn("using get_profile", self.progress)
 
+    def test_a_status_while_the_crew_works_in_the_background_is_not_left_on_screen(self):
+        self.e.sign_in()
+        self.e.mode("crew_background")
+        states, on_text = self.drafts()
+        res = self.run_turn("review my pull request", on_text=on_text)
+        self.assertEqual(res.output, "the crew is done")
+        # "Patch is reviewing it." went away when the lead's message ended with Patch still at work, so the web
+        # app shows Patch's progress line meanwhile; the answer was written after Patch reported.
+        status = states.index("Patch is reviewing it.")
+        self.assertEqual(states[status + 1], "")
+        self.assertEqual(states[-1], "the crew is done")
+        self.assertIn("Patch: done", self.progress)
+
     def test_no_partial_messages_without_a_draft(self):
         self.e.sign_in()
         self.run_turn("hello")

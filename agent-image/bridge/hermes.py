@@ -57,7 +57,9 @@ class DraftText:
     Hermes sends the deltas of the whole run in one stream: the words before a tool call, then (after a paragraph
     break it adds itself) those of the next model call. Its final answer (`output`) is the last model call's
     text only. So the draft starts over (on_text(None)) when a tool starts (`tool.started`, which also covers
-    handing work to the crew), when a run starts (each follow-up round of the crew is a run of its own), and at
+    handing work to the crew), when a run ends with specialists still at work in the background (its words were
+    a status; the crew's progress lines show while the client waits), when a run starts (each follow-up round of
+    the crew is a run of its own), and at
     the reconnect notice above: what came before it is written again after it, and the notice itself is not
     part of the answer. `message.interim` (the text beside a tool call, already streamed) adds nothing.
     Only the lead's deltas are in this stream: a specialist's run has none here."""
@@ -368,6 +370,8 @@ class HermesClient:
                                                  progress, deadline, started, draft)
             rounds = 0
             while result.status == "completed" and handed_over and rounds < MAX_CREW_ROUNDS:
+                if draft is not None:
+                    draft.restart()  # the lead's words were a status; the crew's progress lines show meanwhile
                 if not self._wait_for_crew(deadline):
                     break  # Hermes does not say whether they are done: keep the lead's status as the answer
                 progress.finish_all()

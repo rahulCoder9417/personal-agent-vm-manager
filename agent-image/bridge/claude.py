@@ -648,9 +648,6 @@ class ClaudeRunner:
         redact = redact or Redactor([], text)
         choice = choice or {}
         args = self._args(pf, instructions, session_id, resume, model, effort, stream_text=on_text is not None)
-        lead_text = LeadText(on_text) if on_text is not None else None
-        if lead_text is not None:
-            lead_text.restart()  # a run that starts again (a new session) starts the draft over
         proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 cwd=self.workdir, env=self.env, start_new_session=True)
         timed_out = threading.Event()
@@ -688,6 +685,10 @@ class ClaudeRunner:
         api_error: Optional[dict] = None  # the CLI's last own message for a failed API call (the lead's)
         refusal = ""  # the category of a refusal the CLI gave up on (system/model_refusal_no_fallback)
         crew_events = CrewEvents(on_progress)
+        lead_text = LeadText(on_text, crew_busy=lambda: crew_events.progress.open_runs() > 0) \
+            if on_text is not None else None
+        if lead_text is not None:
+            lead_text.restart()  # a run that starts again (a new session) starts the draft over
         try:
             for raw in proc.stdout:
                 try:
@@ -802,13 +803,17 @@ class LeadText:
       last message, so the draft is always the message being written;
     - when the lead starts a tool call (`content_block_start` of a tool block, or a tool_use in a whole
       `assistant` message): the words before it were the lead saying what it is about to do;
-    - when a run starts (restart()), so a second run of the turn (a new session) does not add to the first.
+    - when a run starts (restart()), so a second run of the turn (a new session) does not add to the first;
+    - at the end of a message (`message_stop`) while specialists the lead started still work in the background
+      (`crew_busy`): those words were a status ("Scout is on it"), the answer comes after the crew reports, and
+      meanwhile the web app shows the crew's progress lines instead.
     Two text blocks in one message are kept apart by a blank line."""
 
     _TOOL_BLOCKS = ("tool_use", "server_tool_use", "mcp_tool_use")
 
-    def __init__(self, on_text: Callable[[Optional[str]], None]):
+    def __init__(self, on_text: Callable[[Optional[str]], None], crew_busy: Callable[[], bool] = lambda: False):
         self.on_text = on_text
+        self.crew_busy = crew_busy
         self._wrote = False  # the message being written has text in the draft
 
     def restart(self) -> None:
@@ -819,7 +824,7 @@ class LeadText:
         if not isinstance(raw, dict):
             return
         typ = raw.get("type")
-        if typ == "message_start":
+        if typ == "message_start" or (typ == "message_stop" and self.crew_busy()):
             self.restart()
         elif typ == "content_block_start":
             block = raw.get("content_block") if isinstance(raw.get("content_block"), dict) else {}
