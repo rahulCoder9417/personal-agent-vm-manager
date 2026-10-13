@@ -2,7 +2,10 @@
 final answer through the Platform MCP, and report NDJSON events.
 
 Events (one JSON object per line):
-    {"type": "accepted" | "working" | "turn_done" | "error", "message": str, "platform_fault": bool}
+    {"type": "accepted" | "working" | "text_delta" | "turn_done" | "error", "message": str, "platform_fault": bool}
+
+A `text_delta` carries the whole draft of the lead's answer so far in "message" (see Draft). It is sent only
+when the delivery's metadata has "stream_text": true; the final answer still goes through the Platform MCP.
 
 The last event of a turn (turn_done or error) also carries the browser time to charge, when Scout's
 browser was open: "browser_seconds" (whole seconds since the Bridge's last report) and
@@ -27,6 +30,7 @@ from . import crew
 log = logging.getLogger("bridge.core")
 
 ACCEPTED, WORKING, TURN_DONE, ERROR = "accepted", "working", "turn_done", "error"
+TEXT_DELTA = "text_delta"
 KINDS = {"message", "approval_answer", "automation", "app_event"}
 MAX_TEXT = 100_000
 
@@ -68,11 +72,15 @@ class TurnOptions:
                    names none: the turn goes on in the conversation of the chat's last turn on that engine.
     claude_model   metadata "claude.model": Claude Code's `--model` for this turn; "" = the Bridge's default.
     claude_effort  metadata "claude.effort": Claude Code's `--effort` for this turn; "" = the CLI's default.
+    stream_text    metadata "stream_text": true when the answer is read where it can be shown as it is written
+                   (the backend sets it for web chat only): the lead's draft goes out as `text_delta` events
+                   (Draft). Anything but true is false.
     """
 
     chat_epoch: Optional[int] = None
     claude_model: str = ""
     claude_effort: str = ""
+    stream_text: bool = False
 
     @classmethod
     def from_metadata(cls, meta: Any) -> "TurnOptions":
@@ -94,7 +102,8 @@ class TurnOptions:
         if effort is not None and effort not in CLAUDE_EFFORTS:
             log.warning("metadata claude.effort is not one of %s; the default effort is used", ", ".join(CLAUDE_EFFORTS))
             effort = None
-        return cls(chat_epoch=epoch, claude_model=model or "", claude_effort=effort or "")
+        return cls(chat_epoch=epoch, claude_model=model or "", claude_effort=effort or "",
+                   stream_text=meta.get("stream_text") is True)
 
 
 @dataclass
@@ -250,11 +259,93 @@ class RunResult:
     platform_fault: Optional[bool] = None  # None: decided from reason
 
 
+# The draft of the answer, as text_delta events: at most one per DRAFT_INTERVAL seconds, and at most
+# MAX_DRAFT characters (a longer draft stops growing; the final answer has all of it).
+DRAFT_INTERVAL = 0.25
+MAX_DRAFT = 16_000
+
+# What an engine calls with the lead's answer as the model writes it: a piece of text to add to the draft, or
+# None when the draft starts over (a new message of the lead, a tool call, a new run of the turn).
+OnText = Callable[[Optional[str]], None]
+
+
+class Draft:
+    """The answer the lead is writing, so far, published as `text_delta` events (the on_text hook of a turn).
+
+    Each event carries the whole draft, not only what was added: the events of a turn are replayed to a
+    delivery that attaches to it again (Turn.subscribe), and the backend and the web app can miss one (a
+    reconnect) and still show the right text with the next. Only the latest draft is replayed (Turn).
+
+    Only the lead's own words are added: text from the crew, thinking and tool input never are (the engines
+    pick what they pass). The draft starts over when the lead starts a new message or goes on to a tool, so it
+    is the message being written, which is what the final answer is made of; the text before a tool was only
+    the lead saying what it is about to do. Starting over publishes an empty draft, so what was shown goes away.
+
+    At most one event per `interval` seconds: the first change goes out at once, later ones are gathered and
+    the latest goes out when the interval has passed (a timer, so the last words before a long tool call are
+    not held back). Nothing is published after close() (the end of the run)."""
+
+    def __init__(self, publish: Callable[[str], None], interval: float = DRAFT_INTERVAL, max_chars: int = MAX_DRAFT,
+                 clock: Callable[[], float] = time.monotonic):
+        self._publish = publish
+        self.interval = interval
+        self.max_chars = max_chars
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._text = ""  # the draft
+        self._sent = ""  # what was published last ("": nothing is shown)
+        self._last = float("-inf")  # when it was published
+        self._timer: Optional[threading.Timer] = None
+        self._closed = False
+
+    def __call__(self, delta: Optional[str]) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            if delta is None:
+                self._text = ""
+            elif isinstance(delta, str) and delta and len(self._text) < self.max_chars:
+                self._text = (self._text + delta)[: self.max_chars]
+            else:
+                return
+            wait = self._last + self.interval - self._clock()
+            if wait <= 0:
+                self._flush()
+            elif self._timer is None:
+                self._timer = threading.Timer(wait, self._on_timer)
+                self._timer.daemon = True
+                self._timer.start()
+
+    def _on_timer(self) -> None:
+        with self._lock:
+            self._timer = None
+            if not self._closed:
+                self._flush()
+
+    def _flush(self) -> None:
+        # Leading blank lines are dropped (an engine may start a new piece with a paragraph break).
+        text = self._text.lstrip()
+        if text == self._sent:
+            return
+        self._sent = text
+        self._last = self._clock()
+        self._publish(text)
+
+    def close(self) -> None:
+        """No more events: the run is over, and the final answer (or the error) takes the draft's place."""
+        with self._lock:
+            self._closed = True
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+
+
 class Runner(Protocol):
     def healthy(self) -> bool: ...
 
     def run(self, text: str, instructions: str, session_key: str, idempotency_key: str,
-            on_progress: Callable[[str], None], timeout: float, options: Optional[TurnOptions] = None) -> Any: ...
+            on_progress: Callable[[str], None], timeout: float, options: Optional[TurnOptions] = None,
+            on_text: Optional[OnText] = None) -> Any: ...
 
 
 class Sender(Protocol):
@@ -316,15 +407,21 @@ class DeliveryStore:
 
 
 class Turn:
-    """Events of one in-progress delivery, fanned out to every subscriber."""
+    """Events of one in-progress delivery, fanned out to every subscriber.
+
+    A subscriber that comes late (a re-delivery) is given every event from the start, except the drafts that a
+    later draft replaced: each `text_delta` holds the whole draft, so only the latest one is replayed."""
 
     def __init__(self) -> None:
         self.events: list[dict] = []
         self.done = False
         self.cond = threading.Condition()
+        self._last_draft = -1  # index of the latest text_delta in events
 
     def publish(self, ev: dict) -> None:
         with self.cond:
+            if ev["type"] == TEXT_DELTA:
+                self._last_draft = len(self.events)
             self.events.append(ev)
             if ev["type"] in (TURN_DONE, ERROR):
                 self.done = True
@@ -339,7 +436,10 @@ class Turn:
                 if i >= len(self.events):
                     return
                 ev = self.events[i]
+                stale = ev["type"] == TEXT_DELTA and i < self._last_draft
                 i += 1
+            if stale:
+                continue
             yield ev
             if ev["type"] in (TURN_DONE, ERROR):
                 return
@@ -348,7 +448,7 @@ class Turn:
 class Bridge:
     def __init__(self, secret: str, runner: Runner, sender: Sender, store: DeliveryStore,
                  turn_timeout: float = 900, send_retries: int = 3, retry_delay: float = 1.0,
-                 browser: Optional[BrowserUsage] = None):
+                 browser: Optional[BrowserUsage] = None, draft_interval: float = DRAFT_INTERVAL):
         if not secret:
             raise ValueError("bridge secret is required")
         self._secret = secret.encode()
@@ -359,6 +459,7 @@ class Bridge:
         self.send_retries = send_retries
         self.retry_delay = retry_delay
         self.browser = browser  # None: this container has no browser (it is not turned on for the user)
+        self.draft_interval = draft_interval  # at most one text_delta per this many seconds
         self._turns: dict[str, Turn] = {}
         self._ending: set[Turn] = set()  # turns whose run is over and which are reporting browser time
         self._lock = threading.Lock()
@@ -413,15 +514,24 @@ class Bridge:
             if output is None:
                 attempts = int((rec or {}).get("attempts", 0)) + 1
                 self.store.put(req.delivery_id, state="running", attempts=attempts)
-                result = self.runner.run(
-                    text=build_input(req),
-                    instructions=build_instructions(req),
-                    session_key=req.session_key,
-                    idempotency_key=f"{req.delivery_id}#{attempts}",
-                    on_progress=lambda msg: turn.publish(event(WORKING, msg)),
-                    timeout=self.turn_timeout,
-                    options=req.options(),
-                )
+                options = req.options()
+                # The draft of the answer, only where the answer can be shown as it is written (stream_text).
+                draft = Draft(lambda text: turn.publish(event(TEXT_DELTA, text)), self.draft_interval) \
+                    if options.stream_text else None
+                try:
+                    result = self.runner.run(
+                        text=build_input(req),
+                        instructions=build_instructions(req),
+                        session_key=req.session_key,
+                        idempotency_key=f"{req.delivery_id}#{attempts}",
+                        on_progress=lambda msg: turn.publish(event(WORKING, msg)),
+                        timeout=self.turn_timeout,
+                        options=options,
+                        on_text=draft,
+                    )
+                finally:
+                    if draft is not None:
+                        draft.close()  # nothing after the run: the answer or the error takes its place
                 if result.status != "completed":
                     reason = getattr(result, "reason", "") or ""
                     fault = getattr(result, "platform_fault", None)

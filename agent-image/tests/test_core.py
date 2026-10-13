@@ -6,7 +6,7 @@ import unittest
 
 from bridge import crew
 from bridge.core import (CLAUDE_EFFORTS, FORMAT_PLAIN, FORMAT_WEB, KINDS, MEMORY_RULES, Bridge, DeliverRequest,
-                         DeliveryStore, TurnOptions, build_input, build_instructions, format_rules)
+                         DeliveryStore, Draft, Turn, TurnOptions, build_input, build_instructions, event, format_rules)
 
 from tests.fakes import FakeRunner, FakeSender
 
@@ -159,6 +159,138 @@ class BridgeCoreTest(unittest.TestCase):
         events = list(self.bridge.deliver(req("new")))
         self.assertEqual(types(events), ["error"])
         self.assertFalse(self.bridge.healthy())
+
+
+class DraftTest(unittest.TestCase):
+    """core.Draft: the whole draft so far, at most one event per interval, nothing after close()."""
+
+    def setUp(self):
+        self.now = 100.0
+        self.sent: list[str] = []
+        self.draft = Draft(self.sent.append, interval=0.25, max_chars=20, clock=lambda: self.now)
+
+    def test_whole_draft_throttled_with_the_latest_sent_when_the_interval_has_passed(self):
+        self.draft("Hel")  # the first change goes out at once
+        self.draft("lo")
+        self.draft(" there")  # gathered: one event with the latest text, once the interval has passed
+        self.assertEqual(self.sent, ["Hel"])
+        self.now += 0.3
+        self.draft(",")
+        self.assertEqual(self.sent, ["Hel", "Hello there,"])
+
+    def test_the_timer_sends_the_last_words_before_a_long_pause(self):
+        sent = []
+        done = threading.Event()
+        draft = Draft(lambda t: (sent.append(t), done.set() if len(sent) == 2 else None), interval=0.05)
+        draft("Let me check")
+        draft(" your calendar.")  # nothing more comes (the lead waits on a tool): the timer sends it
+        self.assertTrue(done.wait(2))
+        self.assertEqual(sent, ["Let me check", "Let me check your calendar."])
+        draft.close()
+
+    def test_starting_over_clears_what_was_shown_and_nothing_is_sent_twice(self):
+        self.draft(None)  # nothing was shown: nothing to clear
+        self.assertEqual(self.sent, [])
+        self.draft("Let me look")
+        self.now += 1
+        self.draft(None)
+        self.now += 1
+        self.draft("\n\nYou have two")  # a new piece's leading blank lines are not shown
+        self.now += 1
+        self.draft("")  # nothing added: nothing sent
+        self.assertEqual(self.sent, ["Let me look", "", "You have two"])
+
+    def test_a_long_draft_stops_growing(self):
+        self.draft("x" * 15)
+        self.now += 1
+        self.draft("y" * 10)
+        self.now += 1
+        self.draft("z")
+        self.assertEqual(self.sent, ["x" * 15, "x" * 15 + "y" * 5])
+
+    def test_nothing_after_close(self):
+        sent = []
+        draft = Draft(sent.append, interval=0.05)
+        draft("one")
+        draft(" two")  # waits for the timer
+        draft.close()
+        draft(" three")
+        time.sleep(0.15)
+        self.assertEqual(sent, ["one"])
+
+
+class StreamTextTest(unittest.TestCase):
+    """A delivery whose metadata has "stream_text": true gets the lead's draft as text_delta events."""
+
+    def setUp(self):
+        self.runner = FakeRunner(output="Hello there")
+        self.sender = FakeSender()
+        self.bridge = Bridge(SECRET, self.runner, self.sender, DeliveryStore(None), retry_delay=0, draft_interval=0)
+
+    def test_drafts_come_before_the_answer_is_sent_and_the_turn_ends(self):
+        self.runner.pieces = ["Let me check.", None, "Hello", " there"]
+        self.runner.piece_delay = 0.05  # the listener keeps up, so it sees each draft
+        events = list(self.bridge.deliver(req(channel="web", session_key="web", metadata={"stream_text": True})))
+        self.assertEqual(types(events), ["accepted", "working", "text_delta", "text_delta", "text_delta", "text_delta",
+                                         "turn_done"])
+        self.assertEqual([e["message"] for e in events if e["type"] == "text_delta"],
+                         ["Let me check.", "", "Hello", "Hello there"])
+        self.assertFalse(any(e["platform_fault"] for e in events))
+        self.assertEqual(self.sender.sent, [("Hello there", "web")], "the answer still goes through send_message")
+
+    def test_no_drafts_unless_asked(self):
+        self.runner.pieces = ["Hello"]
+        for meta in ({}, {"stream_text": "true"}, {"stream_text": 1}, {"stream_text": False}):
+            with self.subTest(meta=meta):
+                events = list(self.bridge.deliver(req(delivery_id=f"evt-{len(self.runner.calls)}", metadata=meta)))
+                self.assertEqual(types(events), ["accepted", "working", "turn_done"])
+                self.assertIsNone(self.runner.calls[-1]["on_text"])
+        self.assertTrue(req(metadata={"stream_text": True}).options().stream_text)
+        self.assertFalse(req().options().stream_text)
+
+    def test_a_failed_turn_ends_with_its_error_after_the_drafts(self):
+        self.runner.pieces = ["Half an ans"]
+        self.runner.status = "failed"
+        events = list(self.bridge.deliver(req(metadata={"stream_text": True})))
+        self.assertEqual(types(events), ["accepted", "working", "text_delta", "error"])
+        self.assertEqual(self.sender.sent, [])
+
+    def test_a_delivery_that_attaches_again_gets_only_the_latest_draft(self):
+        self.runner.pieces = ["One", " two", " three"]
+        self.runner.piece_delay = 0.05
+        self.runner.block = threading.Event()
+        first = []
+        t = threading.Thread(target=lambda: first.extend(self.bridge.deliver(req(metadata={"stream_text": True}))))
+        t.start()
+        self.assertTrue(self.runner.started.wait(2))
+        deadline = time.monotonic() + 2
+        while len(self.bridge._turns["evt-1"].events) < 5 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        again = self.bridge.deliver(req(metadata={"stream_text": True}))
+        replayed = [next(again) for _ in range(3)]
+        self.assertEqual([(e["type"], e["message"]) for e in replayed],
+                         [("accepted", ""), ("working", "using web_search"), ("text_delta", "One two three")])
+        self.runner.block.set()
+        self.assertEqual(types(list(again)), ["turn_done"])
+        t.join(5)
+        self.assertEqual([e["message"] for e in first if e["type"] == "text_delta"],
+                         ["One", "One two", "One two three"], "the first listener got every draft live")
+        self.assertEqual(len(self.runner.calls), 1)
+
+    def test_a_listener_that_falls_behind_skips_the_drafts_a_later_one_replaced(self):
+        self.runner.pieces = ["One", " two", " three"]
+        events = list(self.bridge.deliver(req(metadata={"stream_text": True})))
+        drafts = [e["message"] for e in events if e["type"] == "text_delta"]
+        self.assertEqual(drafts[-1], "One two three")
+        self.assertLessEqual(len(drafts), 3)
+
+    def test_replay_keeps_an_empty_latest_draft(self):
+        turn = Turn()
+        for ev in (event("accepted"), event("text_delta", "Let me look"), event("working", "using gmail"),
+                   event("text_delta", ""), event("turn_done")):
+            turn.publish(ev)
+        self.assertEqual([(e["type"], e["message"]) for e in turn.subscribe()],
+                         [("accepted", ""), ("working", "using gmail"), ("text_delta", ""), ("turn_done", "")])
 
 
 class RequestTest(unittest.TestCase):
