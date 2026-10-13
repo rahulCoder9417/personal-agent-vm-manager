@@ -184,6 +184,25 @@ def build_input(req: DeliverRequest) -> str:
     return "\n".join(parts) or "(empty message)"
 
 
+# Who the lead is, for the user. Each engine has an identity of its own in its own system prompt (Claude Code: "You
+# are Claude Code, Anthropic's official CLI for Claude"; Hermes: its default persona), and the lead's instructions
+# are added after it (Claude Code: --append-system-prompt; Hermes: the run's instructions). Without this, the lead
+# on Claude Code once sent the founder to "your Claude settings" to connect Google Calendar (2026-10-13). Apps are
+# connected in Textcrew's own web app; the backend's list_app_actions says which apps are still connecting.
+APPS_PAGE = "https://app.textcrew.in/apps"
+IDENTITY = (
+    "Who you are: you are Tex, the user's own personal agent in Textcrew. The user reaches you in the Textcrew "
+    "web app or in a chat app linked to it. The user connects their apps (Gmail, Google Calendar, GitHub and "
+    f"others) in Textcrew, on the Apps page: {APPS_PAGE}. To see what is connected, use the platform tools: "
+    "get_profile lists the connected apps, and list_app_actions lists what you can do in them and says which "
+    "apps are still connecting. If an app the user says is connected is not there, tell them it may still be "
+    "finishing, or that it needs to be connected again on the Apps page. Never send the user to the settings or "
+    "connectors of Claude or of any other product. Never present yourself as Claude or Claude Code, and do not "
+    "mention the engine, the model or the company behind you unless the user asks. Where other guidance you have "
+    "names you differently, this takes its place."
+)
+
+
 # There is one memory, on the platform (founder's decision): the platform tools remember, recall and forget,
 # the same on both engines. Each engine's own memory is switched off where it has a switch (claude.child_env,
 # platform.render_hermes_config); this text is what tells the lead.
@@ -240,13 +259,14 @@ def format_rules(channel: str) -> str:
 
 
 def build_instructions(req: DeliverRequest, job_folder: str = "") -> str:
-    """The lead's instructions for one turn. Each engine adds how it hands work to a specialist
+    """The lead's instructions for one turn, starting with who it is (IDENTITY). Each engine adds how it hands work to a specialist
     (crew.CLAUDE_HANDOFF / crew.hermes_handoff). `job_folder`: the folder the Bridge made for this delivery's crew
     job; the lead is told the job's rules (crew.job_instructions)."""
     channel = req.channel or "chat"
     job = req.crew_job()
     job_rules = f"\n\n{crew.job_instructions(job.member, job_folder)}" if job is not None and job_folder else ""
     return (
+        f"{IDENTITY}\n\n"
         f"The user is talking to you through {channel}. Your final answer for this turn is delivered to "
         "them automatically, so do not try to send it yourself. Keep replies suited to a chat app. "
         "Before anything risky (sending to other people, deleting, paying, posting publicly) call "
