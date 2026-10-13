@@ -47,7 +47,7 @@ RUN python -m compileall -q /opt/venv /opt/bridge \
 
 FROM ${PYTHON_IMAGE} AS claude
 # Pin Claude Code to an exact release; bump deliberately (code.claude.com/docs/en/setup).
-ARG CLAUDE_CODE_VERSION=2.1.283
+ARG CLAUDE_CODE_VERSION=2.1.296
 # Anthropic's release signing key (code.claude.com/docs/en/setup#binary-integrity-and-code-signing).
 ARG CLAUDE_CODE_KEY_FPR=31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE
 RUN apt-get update \
