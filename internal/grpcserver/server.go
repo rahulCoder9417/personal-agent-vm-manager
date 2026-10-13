@@ -240,10 +240,11 @@ var kindToBridge = map[vmv1.DeliverKind]string{
 }
 
 var eventToProto = map[string]vmv1.DeliverEventType{
-	bridge.EventAccepted: vmv1.DeliverEventType_DELIVER_EVENT_TYPE_ACCEPTED,
-	bridge.EventWorking:  vmv1.DeliverEventType_DELIVER_EVENT_TYPE_WORKING,
-	bridge.EventTurnDone: vmv1.DeliverEventType_DELIVER_EVENT_TYPE_TURN_DONE,
-	bridge.EventError:    vmv1.DeliverEventType_DELIVER_EVENT_TYPE_ERROR,
+	bridge.EventAccepted:  vmv1.DeliverEventType_DELIVER_EVENT_TYPE_ACCEPTED,
+	bridge.EventWorking:   vmv1.DeliverEventType_DELIVER_EVENT_TYPE_WORKING,
+	bridge.EventTextDelta: vmv1.DeliverEventType_DELIVER_EVENT_TYPE_TEXT_DELTA,
+	bridge.EventTurnDone:  vmv1.DeliverEventType_DELIVER_EVENT_TYPE_TURN_DONE,
+	bridge.EventError:     vmv1.DeliverEventType_DELIVER_EVENT_TYPE_ERROR,
 }
 
 // --- RPCs ---

@@ -22,7 +22,7 @@ type DeliverRequest struct {
 
 // Event is one Deliver stream event.
 type Event struct {
-	Type          string // bridge.EventAccepted | EventWorking | EventTurnDone | EventError
+	Type          string // bridge.EventAccepted | EventWorking | EventTextDelta | EventTurnDone | EventError
 	Message       string
 	PlatformFault bool
 	At            time.Time
@@ -161,7 +161,8 @@ func (m *Manager) relay(parent context.Context, sb store.Sandbox, body bridge.De
 		case bridge.EventAccepted:
 			_ = m.store.SetState(bg, userID, store.StateBusy, m.clk.Now())
 			emit(ev.Type, ev.Message, false)
-		case bridge.EventWorking:
+		case bridge.EventWorking, bridge.EventTextDelta:
+			// A progress line, or the whole draft of the answer so far: passed on as it is.
 			emit(ev.Type, ev.Message, false)
 		case bridge.EventTurnDone:
 			// Browser time first: it is stored before the caller hears that the turn is over, so

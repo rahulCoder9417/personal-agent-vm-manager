@@ -177,6 +177,38 @@ func TestDeliverRelaysBridgeErrorAndBrokenStream(t *testing.T) {
 	}
 }
 
+// The draft of the answer (text_delta, the whole text so far) is passed on as it came, between the
+// other events; it neither ends the turn nor changes the sandbox's state.
+func TestDeliverRelaysTextDeltas(t *testing.T) {
+	e := newEnv(t)
+	e.create(t, "u1")
+	e.br.Script = func(string, bridge.DeliverRequest) []bridge.Event {
+		return []bridge.Event{{Type: "accepted"}, {Type: "text_delta", Message: "Here are"},
+			{Type: "working", Message: "using get_calendar"}, {Type: "text_delta", Message: ""},
+			{Type: "text_delta", Message: "Here are your meetings:\n\n- 10:00"}, {Type: "turn_done"}}
+	}
+	var midState store.State
+	e.br.OnEvent = func(uid string, ev bridge.Event) {
+		if ev.Type == "text_delta" {
+			midState = e.state(t, uid)
+		}
+	}
+	evs, err := collect(t, e.m, deliverReq("u1", "d1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if types(evs) != "accepted,text_delta,working,text_delta,text_delta,turn_done" {
+		t.Fatalf("events: %s", types(evs))
+	}
+	if evs[1].Message != "Here are" || evs[3].Message != "" || evs[4].Message != "Here are your meetings:\n\n- 10:00" ||
+		evs[4].PlatformFault || evs[4].At.IsZero() {
+		t.Fatalf("drafts: %+v", evs)
+	}
+	if midState != store.StateBusy || e.state(t, "u1") != store.StateAwake {
+		t.Fatalf("busy during the turn (%s), awake after it (%s)", midState, e.state(t, "u1"))
+	}
+}
+
 // Stuck turn: timeout -> force stop + ERROR with platform_fault.
 func TestDeliverTimeoutForceStops(t *testing.T) {
 	e := newEnv(t)
