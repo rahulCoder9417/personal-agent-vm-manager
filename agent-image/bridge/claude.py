@@ -465,7 +465,7 @@ class ClaudeRunner:
             return lock
 
     def _args(self, pf: PlatformFile, instructions: str, session_id: str, resume: bool, model: str = "",
-              effort: str = "") -> list[str]:
+              effort: str = "", stream_text: bool = False) -> list[str]:
         # Permission rules are the session's: the lead's and every specialist's calls are checked against
         # them. So the allow list also names what only Scout uses (its built-in web search and, when the
         # browser is turned on for the user, the browser tools by name), and the deny list only what nobody
@@ -494,6 +494,12 @@ class ClaudeRunner:
             args += ["--model", model]
         if effort:
             args += ["--effort", effort]
+        if stream_text:
+            # The answer as the model writes it: `stream_event` lines with the API's own stream events (CLI
+            # reference: "--include-partial-messages  Include partial message chunks as they arrive (only works
+            # with --print and --output-format=stream-json)"; the Agent SDK's SDKPartialAssistantMessage). Only
+            # for a turn whose draft is shown (core.TurnOptions.stream_text); see LeadText.
+            args.append("--include-partial-messages")
         if self.max_turns > 0:
             args += ["--max-turns", str(self.max_turns)]
         # A turn on an existing chat continues a copy of its session ("--fork-session: When resuming, create a
@@ -504,7 +510,8 @@ class ClaudeRunner:
         return args
 
     def run(self, text: str, instructions: str, session_key: str, idempotency_key: str,
-            on_progress: Callable[[str], None], timeout: float = 900, options: Any = None) -> RunResult:
+            on_progress: Callable[[str], None], timeout: float = 900, options: Any = None,
+            on_text: Optional[Callable[[Optional[str]], None]] = None) -> RunResult:
         """One turn. A message whose turn failed is never acted on later: the CLI writes every message into
         the session before it calls the model, a failed one included, and on --resume the model sees it again
         (on 2026-10-08 three messages refused for the plan's limit were all carried out 90 minutes later, with
@@ -521,7 +528,10 @@ class ClaudeRunner:
         again. A failed turn leaves that conversation where it was and touches no other. The Bridge removes no
         session of another conversation, so an earlier one can be opened again later.
         `claude_model` / `claude_effort` are passed as --model / --effort; the model wins over the Bridge's
-        default (BRIDGE_CLAUDE_MODEL)."""
+        default (BRIDGE_CLAUDE_MODEL).
+
+        `on_text` (core.Draft; None = no draft for this turn): the lead's words as the model writes them, from the
+        CLI's partial messages (LeadText). A run that starts again (a new session, below) starts the draft over."""
         if not installed(self.cmd, self.env):
             raise ClaudeError("claude code is not installed")
         chat_epoch = getattr(options, "chat_epoch", None)
@@ -540,7 +550,7 @@ class ClaudeRunner:
         deadline = time.monotonic() + timeout
         redact = Redactor([pf.mcp_token, pf.bridge_secret, pf.litellm_key, *(s.auth_secret for s in pf.mcp_servers)],
                           text)
-        how = {"model": model, "effort": effort, "choice": choice}
+        how = {"model": model, "effort": effort, "choice": choice, "on_text": on_text}
         with self._session_lock(session_key):
             # Which conversation of the chat this turn is in. The platform's memory is not part of a conversation.
             epoch, moved = self.sessions.enter(session_key, chat_epoch)
@@ -631,12 +641,16 @@ class ClaudeRunner:
     def _run_once(self, pf: PlatformFile, text: str, instructions: str, session_id: str, resume: bool,
                   on_progress: Callable[[str], None], deadline: float, delivery: str = "",
                   redact: Optional["Redactor"] = None, model: str = "", effort: str = "",
-                  choice: Optional[dict] = None) -> tuple[RunResult, Optional[str]]:
+                  choice: Optional[dict] = None,
+                  on_text: Optional[Callable[[Optional[str]], None]] = None) -> tuple[RunResult, Optional[str]]:
         """One CLI run. `model` / `effort` go on the command line; `choice` is what of them the user chose
-        ({"model", "effort"}), so a refusal of it is not a platform fault."""
+        ({"model", "effort"}), so a refusal of it is not a platform fault. `on_text`: the draft (LeadText)."""
         redact = redact or Redactor([], text)
         choice = choice or {}
-        args = self._args(pf, instructions, session_id, resume, model, effort)
+        args = self._args(pf, instructions, session_id, resume, model, effort, stream_text=on_text is not None)
+        lead_text = LeadText(on_text) if on_text is not None else None
+        if lead_text is not None:
+            lead_text.restart()  # a run that starts again (a new session) starts the draft over
         proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 cwd=self.workdir, env=self.env, start_new_session=True)
         timed_out = threading.Event()
@@ -693,10 +707,15 @@ class ClaudeRunner:
                     refusal = str(ev.get("api_refusal_category") or "unknown")
                 elif typ == "system" and sub in ("task_started", "task_notification"):
                     crew_events.task(ev)
+                elif typ == "stream_event":
+                    if lead_text is not None and not ev.get("parent_tool_use_id"):
+                        lead_text.feed(ev.get("event"))
                 elif typ == "assistant":
                     if not ev.get("parent_tool_use_id"):
                         api_error = _api_error(ev) or api_error
                     for block in _blocks(ev, "tool_use"):
+                        if lead_text is not None and not ev.get("parent_tool_use_id"):
+                            lead_text.restart()  # the lead went on to a tool: what it wrote before is not the answer
                         if not crew_events.started(ev, block):
                             on_progress(f"using {_tool_label(block.get('name'))}")
                 elif typ == "user":
@@ -766,6 +785,59 @@ def _blocks(ev: dict, typ: str) -> list[dict]:
     if not isinstance(content, list):
         return []
     return [b for b in content if isinstance(b, dict) and b.get("type") == typ]
+
+
+class LeadText:
+    """The lead's words as the model writes them, for the draft of the answer (core.Draft, the `on_text` hook).
+
+    With --include-partial-messages the CLI writes the API's own stream events as `stream_event` lines:
+    {"type": "stream_event", "event": {...}, "parent_tool_use_id": null, ...} (the Agent SDK's
+    SDKPartialAssistantMessage). The caller passes only the lead's (no `parent_tool_use_id`; a specialist's
+    text is not sent by the CLI anyway unless asked to). Of the events, only the text of `text` blocks is
+    taken (`content_block_delta` with a `text_delta`): thinking, tool input and anything else never are.
+
+    The draft starts over (on_text(None)):
+    - at `message_start`: a new message of the lead (after a tool's result, or a retry of the API call, or the
+      CLI trying the fallback model after a refusal). The final answer (`result`) is the text of the lead's
+      last message, so the draft is always the message being written;
+    - when the lead starts a tool call (`content_block_start` of a tool block, or a tool_use in a whole
+      `assistant` message): the words before it were the lead saying what it is about to do;
+    - when a run starts (restart()), so a second run of the turn (a new session) does not add to the first.
+    Two text blocks in one message are kept apart by a blank line."""
+
+    _TOOL_BLOCKS = ("tool_use", "server_tool_use", "mcp_tool_use")
+
+    def __init__(self, on_text: Callable[[Optional[str]], None]):
+        self.on_text = on_text
+        self._wrote = False  # the message being written has text in the draft
+
+    def restart(self) -> None:
+        self._wrote = False
+        self.on_text(None)
+
+    def feed(self, raw: Any) -> None:
+        if not isinstance(raw, dict):
+            return
+        typ = raw.get("type")
+        if typ == "message_start":
+            self.restart()
+        elif typ == "content_block_start":
+            block = raw.get("content_block") if isinstance(raw.get("content_block"), dict) else {}
+            if block.get("type") in self._TOOL_BLOCKS:
+                self.restart()
+            elif block.get("type") == "text":
+                if self._wrote:
+                    self.on_text("\n\n")
+                self._add(block.get("text"))
+        elif typ == "content_block_delta":
+            delta = raw.get("delta") if isinstance(raw.get("delta"), dict) else {}
+            if delta.get("type") == "text_delta":
+                self._add(delta.get("text"))
+
+    def _add(self, text: Any) -> None:
+        if isinstance(text, str) and text:
+            self._wrote = True
+            self.on_text(text)
 
 
 class CrewEvents:

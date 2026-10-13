@@ -236,15 +236,49 @@ def print_mode(args) -> int:
         out({"type": "result", "subtype": "success", "is_error": False, "result": "the crew is done",
              "session_id": sid})
         return 0
+    answer = f"reply {len(sessions[sid])} to: {prompt.strip().splitlines()[-1] if prompt.strip() else ''}"
+    partial = "--include-partial-messages" in args
+    if partial:
+        # The lead thinks, says what it is about to do, and starts a tool call (the API's own stream events).
+        stream(sid, {"type": "message_start", "message": {"id": "m1", "role": "assistant", "content": []}},
+               {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}},
+               {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "hmm, "}},
+               {"type": "content_block_stop", "index": 0},
+               {"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": ""}},
+               {"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": "Let me "}},
+               {"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": "check."}},
+               {"type": "content_block_stop", "index": 1},
+               {"type": "content_block_start", "index": 2,
+                "content_block": {"type": "tool_use", "id": "t1", "name": "mcp__platform__get_profile", "input": {}}},
+               {"type": "content_block_delta", "index": 2, "delta": {"type": "input_json_delta", "partial_json": "{}"}},
+               {"type": "content_block_stop", "index": 2},
+               {"type": "message_delta", "delta": {"stop_reason": "tool_use"}}, {"type": "message_stop"})
+        # A specialist's words, should the CLI ever send them: never part of the lead's draft.
+        stream(sid, {"type": "content_block_delta", "index": 0,
+                     "delta": {"type": "text_delta", "text": "SPECIALIST TEXT"}}, parent="a9")
     out({"type": "assistant", "session_id": sid, "message": {"content": [
         {"type": "tool_use", "id": "t1", "name": "mcp__platform__get_profile", "input": {}}]}})
     out({"type": "user", "session_id": sid, "message": {"content": [
         {"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}})
+    if partial:
+        # The answer, written in pieces of five characters.
+        pieces = [answer[i:i + 5] for i in range(0, len(answer), 5)]
+        stream(sid, {"type": "message_start", "message": {"id": "m2", "role": "assistant", "content": []}},
+               {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+               *({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": p}}
+                 for p in pieces),
+               {"type": "content_block_stop", "index": 0}, {"type": "message_stop"})
     out({"type": "assistant", "session_id": sid, "message": {"content": [{"type": "text", "text": "done"}]}})
-    out({"type": "result", "subtype": "success", "is_error": False,
-         "result": f"reply {len(sessions[sid])} to: {prompt.strip().splitlines()[-1] if prompt.strip() else ''}",
+    out({"type": "result", "subtype": "success", "is_error": False, "result": answer,
          "session_id": sid, "total_cost_usd": 0.01})
     return 0
+
+
+def stream(sid, *events, parent=None) -> None:
+    """`stream_event` lines, as the CLI writes them with --include-partial-messages."""
+    for ev in events:
+        out({"type": "stream_event", "event": ev, "session_id": sid, "parent_tool_use_id": parent,
+             "uuid": str(uuid.uuid4())})
 
 
 def msg(sid, role, content, parent=None, **extra) -> None:

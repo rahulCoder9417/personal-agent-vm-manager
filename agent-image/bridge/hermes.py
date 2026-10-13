@@ -43,6 +43,41 @@ _DISPATCHED = '"status": "dispatched"'  # start of delegate_task's answer when t
 _CHILD_OUTCOMES = {"completed": crew.DONE, "failed": crew.FAILED, "error": crew.FAILED, "timeout": crew.FAILED,
                    "interrupted": crew.STOPPED}
 
+# The notice Hermes writes into the answer's text when the model's stream broke during a tool call and it asks
+# the model again: "\n\n⚠ Connection dropped mid tool-call; reconnecting…\n\n", then the words before the tool
+# call come again (the pinned commit, agent/chat_completion_helpers.py). The draft starts over at it.
+_RECONNECTING = "⚠ Connection dropped mid tool-call; reconnecting"
+
+
+class DraftText:
+    """The lead's words from the Runs API's `message.delta` events ({"delta": "..."}, one per piece the model
+    wrote; api_server_runs.py `_text_cb` at the pinned commit), for the draft of the answer (core.Draft, the
+    `on_text` hook).
+
+    Hermes sends the deltas of the whole run in one stream: the words before a tool call, then (after a paragraph
+    break it adds itself) those of the next model call. Its final answer (`output`) is the last model call's
+    text only. So the draft starts over (on_text(None)) when a tool starts (`tool.started`, which also covers
+    handing work to the crew), when a run starts (each follow-up round of the crew is a run of its own), and at
+    the reconnect notice above: what came before it is written again after it, and the notice itself is not
+    part of the answer. `message.interim` (the text beside a tool call, already streamed) adds nothing.
+    Only the lead's deltas are in this stream: a specialist's run has none here."""
+
+    def __init__(self, on_text):
+        self.on_text = on_text
+
+    def restart(self) -> None:
+        self.on_text(None)
+
+    def delta(self, text: Any) -> None:
+        if not isinstance(text, str) or not text:
+            return
+        if _RECONNECTING in text:
+            self.restart()
+            text = text.split(_RECONNECTING, 1)[1].lstrip("…. \n")
+            if not text:
+                return
+        self.on_text(text)
+
 
 def _child_id(ev: dict) -> str:
     return str(ev.get("subagent_id") or f"{ev.get('delegation_id') or ''}#{ev.get('task_index') or 0}")
@@ -299,7 +334,7 @@ class HermesClient:
             pass
 
     def run(self, text: str, instructions: str, session_key: str, idempotency_key: str,
-            on_progress, timeout: float = 900, options: Any = None) -> RunResult:
+            on_progress, timeout: float = 900, options: Any = None, on_text=None) -> RunResult:
         """Run one turn to the end. on_progress(message) is called for tool activity.
 
         The crew: on this API Hermes runs the lead's specialists in the background. The lead's run
@@ -312,6 +347,8 @@ class HermesClient:
         turn belongs to, and each has its own Hermes conversation (Conversations): a new chat starts one, an
         earlier conversation the user opened again goes on in its own. The Claude Code model and effort are not
         Hermes's.
+
+        `on_text` (core.Draft; None = no draft for this turn): the lead's words as the model writes them (DraftText).
         """
         instructions = f"{instructions}\n\n{crew.hermes_handoff(self.with_browser)}"
         deadline = time.monotonic() + timeout
@@ -325,9 +362,10 @@ class HermesClient:
             log.info("hermes: back in another chat of this session (chat %d); it goes on in that chat's own "
                      "conversation", epoch)
         started: list[str] = []
+        draft = DraftText(on_text) if on_text is not None else None
         try:
             result, handed_over = self._run_once(text, instructions, key, idempotency_key, on_progress,
-                                                 progress, deadline, started)
+                                                 progress, deadline, started, draft)
             rounds = 0
             while result.status == "completed" and handed_over and rounds < MAX_CREW_ROUNDS:
                 if not self._wait_for_crew(deadline):
@@ -336,7 +374,7 @@ class HermesClient:
                 rounds += 1
                 result, handed_over = self._run_once(CREW_FOLLOW_UP, instructions, key,
                                                      f"{idempotency_key}/crew{rounds}", on_progress, progress,
-                                                     deadline, started)
+                                                     deadline, started, draft)
         except Exception:
             if started:  # Hermes has the turn's message in its session: never continue that conversation
                 self._turn_failed(session_key, epoch, idempotency_key)
@@ -352,9 +390,12 @@ class HermesClient:
 
     def _run_once(self, text: str, instructions: str, session_key: str, idempotency_key: str, on_progress,
                   progress: crew.Progress, deadline: float,
-                  started: Optional[list] = None) -> tuple[RunResult, bool]:
+                  started: Optional[list] = None, draft: Optional[DraftText] = None) -> tuple[RunResult, bool]:
         """One Hermes run. Returns (result, whether specialists are still working in the background).
-        `session_key` is the conversation's X-Hermes-Session-Key; `started` gets the run id once Hermes has it."""
+        `session_key` is the conversation's X-Hermes-Session-Key; `started` gets the run id once Hermes has it;
+        `draft` gets the lead's words (None: no draft for this turn)."""
+        if draft is not None:
+            draft.restart()  # a follow-up round writes a new answer
         run_id = self.start_run(text, instructions, session_key, idempotency_key)
         if started is not None:
             started.append(run_id)
@@ -363,7 +404,12 @@ class HermesClient:
         try:
             for ev in self.events(run_id, timeout=max(deadline - time.monotonic(), 1)):
                 name = ev.get("event", "")
-                if name == "tool.started":
+                if name == "message.delta":
+                    if draft is not None:
+                        draft.delta(ev.get("delta"))
+                elif name == "tool.started":
+                    if draft is not None:
+                        draft.restart()
                     on_progress(f"using {ev.get('tool') or 'a tool'}")
                 elif name == "tool.completed" and ev.get("tool") == crew.HERMES_DELEGATE_TOOL:
                     detached = detached or _DISPATCHED in str(ev.get("preview") or "")
