@@ -180,7 +180,7 @@ as it is):
 | Field | What the Bridge does |
 |---|---|
 | `"chat_epoch": <int>` | Which conversation of the chat this turn belongs to (the chat is the `session_key`). The backend numbers a chat's conversations 0, 1, 2, ...: one more at each "New chat". Each conversation has its own engine conversation, so its own context. A number the engine has a conversation for: the turn goes on in it, whether it is the chat's newest or an earlier one the user opened again in the web app (the number is then lower than the last one). A number it has none for (a new chat, or a conversation that never ran on this engine): the turn starts a new one, on Claude Code a new session (not resumed), on Hermes a new conversation key. Missing: the conversation of the chat's last turn on that engine. Each engine keeps its own record, so a conversation that started while the chat ran on Hermes also starts anew on Claude Code the first time it runs there. The platform's memory (`remember`) is not part of a conversation and stays. See "Conversations of a chat" below |
-| `"claude": {"model": "<id>", "effort": "<level>"}` | Claude Code only (Hermes ignores it). `model` goes to the CLI as `--model`, and wins over `BRIDGE_CLAUDE_MODEL`; `effort` as `--effort`. Either may be left out: the Bridge's default model, the CLI's default effort. See "Model and effort" under "Claude Code runtime" for what 2.1.283 accepts |
+| `"claude": {"model": "<id>", "effort": "<level>"}` | Claude Code only (Hermes ignores it). `model` goes to the CLI as `--model`, and wins over `BRIDGE_CLAUDE_MODEL`; `effort` as `--effort`. Either may be left out: the Bridge's default model, the CLI's default effort. See "Model and effort" under "Claude Code runtime" for what the pinned CLI accepts |
 
 A value that is not what the spec says (a negative or non-integer `chat_epoch`, a `model` that is not a model
 name, an `effort` not in `low`, `medium`, `high`, `xhigh`, `max`) is left out with a warning in the log; the
@@ -380,8 +380,8 @@ reached with the Platform MCP tools `remember`, `recall` and `forget`, the same 
 ## Claude Code runtime (the user's own Claude plan)
 
 **Install.** `agent-image/Dockerfile` installs Claude Code with Anthropic's documented
-native installer at a pinned version (`CLAUDE_CODE_VERSION`, 2.1.283), checks the binary
-against Anthropic's GPG-signed release manifest (key fingerprint
+native installer at a pinned version (`CLAUDE_CODE_VERSION`, 2.1.296 since 2026-10-13;
+2.1.283 before), checks the binary against Anthropic's GPG-signed release manifest (key fingerprint
 `31DD DE24 DDFA B679 F42D 7BD2 BAA9 29FF 1A7E CACE`) and links `/usr/local/bin/claude` to
 the installed tree. The binary is not modified. `CLAUDE_CONFIG_DIR=/data/claude` (settings,
 sessions and the CLI's own `.credentials.json`) and `HOME=/data/home`, so everything
@@ -448,29 +448,36 @@ for the turn wins over `BRIDGE_CLAUDE_MODEL`); so are the crew's `BRIDGE_CLAUDE_
 `BRIDGE_CREW_MAX_PARALLEL` (see "The crew").
 
 **Model and effort** (the user's choice, `metadata.claude`; shared spec "Claude Code model and effort").
-What the pinned 2.1.283 accepts, checked on 2026-10-08 in its `--help`, in the model table built into the binary,
-and by running it against a fake Messages API that logs what it is sent (`docs/build-report.md` section 11):
+What the CLI accepts was checked on 2026-10-08 with 2.1.283, in its `--help`, in the model table built into the
+binary, and by running it against a fake Messages API that logs what it is sent (`docs/build-report.md` section 11).
+The pin moved to 2.1.296 on 2026-10-13, so that every model the backend offers is one the CLI knows; its `--help`
+texts and model table were read in the binary, which was not run (`docs/build-report.md` section 14):
 - **`--model <model>`**: "Provide an alias for the latest model (e.g. 'fable', 'opus', or 'sonnet') or a model's
-  full name (e.g. 'claude-fable-5')". Full ids work, not only aliases. The four ids of the spec:
-  `claude-opus-5-5` (Opus 5.5), `claude-fable-5-1` (Fable 5.1) and `claude-haiku-4-5` (Haiku 4.5) are in the
-  binary's model table; `claude-sonnet-5-5` is not (Sonnet 5.5 came with 2.1.284, the docs' version history:
-  "v2.1.284 `sonnet` resolves to Sonnet 5.5"). 2.1.283 still sends it as given, with the effort, and prints
-  `[claude-code:unrecognized_model]` on stderr; the alias `sonnet` is Sonnet 5 (`claude-sonnet-5`) there, and
-  `haiku` is Haiku 4.5. An id the account cannot use comes back from the API as a 404, which the CLI turns into
-  its error `model_not_found`: "There's an issue with the selected model (<id>). It may not exist or you may not
-  have access to it."
+  full name (e.g. 'claude-fable-5')". Full ids work, not only aliases. The backend offers 13 ids, all in
+  2.1.296's model table: the current `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5` (Haiku 5.5 needs
+  2.1.293 or later) and `claude-fable-5-1`, and the older `claude-fable-5`, `claude-opus-5`, `claude-sonnet-5`,
+  `claude-opus-4-8`, `claude-opus-4-7`, `claude-opus-4-6`, `claude-sonnet-4-6`, `claude-opus-4-5` and
+  `claude-haiku-4-5`. The Bridge does not keep the list: any id of the right shape goes to the CLI, so the
+  backend's list can change without a new image (only a model newer than the pinned CLI needs one). An id the
+  CLI does not know is still sent as given, with a `[claude-code:unrecognized_model]` line on stderr (seen with
+  Sonnet 5.5 on 2.1.283, which did not know it). Aliases at 2.1.296: `opus` is Opus 5.5, `sonnet` Sonnet 5.5,
+  `haiku` Haiku 5.5, `fable` Fable 5.1 (at 2.1.283 `sonnet` was Sonnet 5 and `haiku` Haiku 4.5). An id the
+  account cannot use comes back from the API as a 404, which the CLI turns into its error `model_not_found`:
+  "There's an issue with the selected model (<id>). It may not exist or you may not have access to it."
 - **Effort: the flag `--effort <level>`**, "Effort level for the current session (low, medium, high, xhigh,
   max)". It is sent to the API as `output_config.effort`. Also documented, not used: the environment variable
   `CLAUDE_CODE_EFFORT_LEVEL`, which wins over the flag (seen: `CLAUDE_CODE_EFFORT_LEVEL=low` with `--effort xhigh`
   sent `low`), so the Bridge never passes it to the CLI; and the settings keys `effortLevel` / `modelSettings`,
   which do not take `max` (model-config page). An unknown level is ignored with a warning ("Unknown --effort
   value 'extreme' ... using the default effort").
-- **Which models take which levels** (the binary's table; the same as the model-config page): Opus 5.5 and
-  Fable 5.1 take all five, `xhigh` and `max` included (default effort: Opus 5.5 `medium`, Fable 5.1 `high`).
-  Sonnet 5.5 is not in 2.1.283's table; it was sent the effort it was given, and `high` when none was given.
-  **Haiku 4.5 has no effort levels**: the CLI leaves the effort out of the request (it sends extended thinking
-  with a fixed budget instead), so the user's effort has no effect with Haiku 4.5. A level a model does not
-  take falls back to the highest it does (seen: Sonnet 4.6 with `xhigh` sent `high`).
+- **Which models take which levels** (2.1.296's table; the same as the model-config page): all five, `xhigh`
+  and `max` included, on Opus 5.5, Sonnet 5.5, Haiku 5.5, Fable 5.1, Fable 5, Opus 5, Sonnet 5, Opus 4.8 and
+  Opus 4.7 (default effort `medium` on Opus 5.5, Sonnet 5.5 and Haiku 5.5, `xhigh` on Opus 4.7, `high` on the
+  others). Opus 4.6 and Sonnet 4.6 take `low`, `medium`, `high` and `max`, not `xhigh`. **Opus 4.5 and Haiku 4.5
+  have no effort levels**: the CLI leaves the effort out of the request (seen with Haiku 4.5 on 2.1.283: it sent
+  extended thinking with a fixed budget instead), so the user's effort has no effect on them. A level a model
+  does not take runs at the nearest lower level it does take (seen: Sonnet 4.6 with `xhigh` sent `high`). The
+  backend tells the web app which levels each model takes, so Settings offers only those.
 - **The crew**: a sub-agent's `model` (`--agents`, and the sub-agents page) takes `sonnet`, `opus`, `haiku`,
   `fable`, a full model id, or `inherit`; a sub-agent can have its own `effort` (same five levels; the docs list
   `effort` among the fields `--agents` takes, and 2.1.283 sent a specialist's `"effort": "low"`). The crew has
@@ -880,4 +887,7 @@ engine conversation, and an earlier one can be opened again): tested the same tw
 `docs/build-report.md` section 12. The formatting by channel is tested against fakes, and with two real turns
 through the Bridge and the real 2.1.283 binary on a real Claude plan, on the development machine. Not run: Hermes
 itself with its replaced hint (read in its source only), any model other than Opus 5.5, and the image on the
-server; the checks are in `docs/build-report.md` section 13.
+server; the checks are in `docs/build-report.md` section 13. The Claude Code pin raised to 2.1.296 on 2026-10-13
+(every Claude model the backend offers) is checked only by reading that binary's model table and help texts: the
+image was not built, so the release store's signature and checksum check has not run for 2.1.296, and no turn
+has run on it; everything listed above was run with 2.1.283. The checks are in `docs/build-report.md` section 14.

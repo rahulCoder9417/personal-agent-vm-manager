@@ -524,6 +524,8 @@ What is left: the reaper runs every minute at :56 past (the vm-manager started a
 
 *Changed by section 12 (2026-10-09): a lower `chat_epoch` is no longer ignored, and a missing one is no longer 0. The rest of this section stands.*
 
+*Changed by section 14 (2026-10-13): the pin is now Claude Code 2.1.296, which knows Sonnet 5.5, and the backend offers 13 models instead of four. What is said below about 2.1.283 was true of 2.1.283.*
+
 **Date:** 2026-10-08 · **Branch:** `mvp-build`. The agent image's part of two features built at the same time in three repositories, from one shared spec (the backend and the web app build theirs). Built and tested on the development machine; the image was not built and nothing on the server was changed. No change to `proto/vm/v1/vm.proto` and no Go change: the vm-manager already passes `DeliverRequest.metadata_json` to the Bridge as the body's `metadata`, untouched (`internal/sandbox/deliver.go`, `internal/bridge/client.go`).
 
 ### Asked for vs built
@@ -859,3 +861,54 @@ Both engines tell the model something about where its output appears, before the
 - The instructions do not replace the backend's safety net: a model can still write Markdown for Telegram, and a Hermes user on a small model more often than Claude. They make it rare, so the stripped text reads as it was meant.
 - The rules cover the final answer only. An approval's summary and a reminder's text come from tool calls and may contain Markdown symbols on any channel, as before. If that shows up in the web app's approval cards or in Telegram, the fix is a line in those tools' descriptions on the Platform MCP, not in the Bridge.
 - The agent is told not to embed images and to give a link instead, which matches the web app showing a Markdown image as a link.
+
+## 14. Every Claude model, and Claude Code 2.1.296 (2026-10-13)
+
+**Date:** 2026-10-13 · **Branch:** `opt/models`. The founder's Settings offered four Claude models for Claude Code (Opus 5.5, Sonnet 5.5, Haiku 4.5, Fable 5.1). They asked for every model Claude offers. The backend's list now has 13 (its `CLAUDE_MODELS`), and the web app groups them. The agent image's part: a Claude Code version that knows all 13. No change to `proto/vm/v1/vm.proto`, no Go change, and no change to how the Bridge reads a model: it never kept a list, it passes any id of the right shape.
+
+### Asked for vs built
+
+| Asked for | Built |
+|---|---|
+| Raise the pin to the newest version, 2.1.293 or later (Haiku 5.5 needs 2.1.293) | `CLAUDE_CODE_VERSION=2.1.296` in `agent-image/Dockerfile`, the newest on npm on 2026-10-13 (npm's `latest` and `next` tags; its `stable` tag is 2.1.287, too old for Haiku 5.5) |
+| The Bridge accepts all the new ids | It already did. New tests: every id the backend offers is read from the metadata as it is, and reaches the CLI as `--model` with the effort as `--effort` |
+| Update the notes on the pinned version and Sonnet 5.5 | README "Model and effort" and "Install", and this section |
+
+### The models, and what 2.1.296 knows of them
+
+The list comes from Anthropic's models overview (https://platform.claude.com/docs/en/about-claude/models/overview: the four current models, and the "legacy models (still available)") and from Claude Code's model page (https://code.claude.com/docs/en/model-config: the effort levels by model, and the versions each model needs). Both read on 2026-10-13. Then checked in the 2.1.296 binary itself: npm's `@anthropic-ai/claude-code-linux-x64@2.1.296`, read with `strings`, not run. Its model table holds all 13 ids, with these effort levels and defaults:
+
+| Group | Model (id) | Effort levels | Default effort |
+|---|---|---|---|
+| Current | Opus 5.5 (`claude-opus-5-5`) | all five | medium |
+| Current | Sonnet 5.5 (`claude-sonnet-5-5`) | all five | medium |
+| Current | Haiku 5.5 (`claude-haiku-5-5`) | all five | medium |
+| Current | Fable 5.1 (`claude-fable-5-1`) | all five | high |
+| Older | Fable 5 (`claude-fable-5`) | all five | high |
+| Older | Opus 5 (`claude-opus-5`) | all five | high |
+| Older | Sonnet 5 (`claude-sonnet-5`) | all five | high |
+| Older | Opus 4.8 (`claude-opus-4-8`) | all five | high |
+| Older | Opus 4.7 (`claude-opus-4-7`) | all five | xhigh |
+| Older | Opus 4.6 (`claude-opus-4-6`) | low, medium, high, max | (none set) |
+| Older | Sonnet 4.6 (`claude-sonnet-4-6`) | low, medium, high, max | (none set) |
+| Older | Opus 4.5 (`claude-opus-4-5`) | none | none |
+| Older | Haiku 4.5 (`claude-haiku-4-5`) | none | none |
+
+- The table's aliases at 2.1.296: `opus` Opus 5.5, `sonnet` Sonnet 5.5, `haiku` Haiku 5.5, `fable` Fable 5.1. So `BRIDGE_CLAUDE_CREW_MODEL=haiku`, if anyone sets it, now means Haiku 5.5, which takes effort levels.
+- The help texts the Bridge relies on are unchanged: `--model` ("Provide an alias for the latest model ... or a model's full name") and `--effort` (the same five levels). Every flag the Bridge passes is in the binary (`--agents`, `--allowedTools`, `--disallowedTools`, `--append-system-prompt`, `--fork-session`, `--resume`, `--session-id`, `--setting-sources`, `--settings`, `--strict-mcp-config`, `--mcp-config`, `--permission-mode`, `--permission-prompts`, `--max-turns`, `--output-format`, `--verbose`), and so are the environment names it sets (`CLAUDE_CODE_DISABLE_AUTO_MEMORY`, `DISABLE_AUTOUPDATER`, `DISABLE_UPDATES`, `ENABLE_CLAUDEAI_MCP_SERVERS`, `CLAUDE_CONFIG_DIR`).
+- Fable 5.1 and Fable 5 cost extra on some plans (https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan): on Pro they are paid only with usage credits, from the first message; on Max they may use up to half of the weekly limit, then usage credits. Claude Code applies this itself. The backend shows it as a note next to both Fable models.
+
+### Tests (real runs, 2026-10-13)
+
+- `cd agent-image && python3 -m unittest discover -s tests -t .`: **192 tests, OK** (1 skipped: the real-browser test). 191 before.
+- `go vet ./...`: clean. `VM_TEST_SKIP_POSTGRES=1 go test ./...`: all packages with tests pass (no Go change).
+- New: every model id the backend offers is read from a delivery's metadata unchanged (`test_core`), and each reaches the fake CLI as `--model`, with `--effort` (`test_claude`).
+
+### Not verified yet (after the next deploy)
+
+| What | How to check |
+|---|---|
+| The image builds with 2.1.296 | `docker build -t personal-agent/agent:dev agent-image/`. The build checks the binary against Anthropic's GPG-signed manifest for 2.1.296. That release store (`downloads.claude.ai`) could not be reached from here, so this check has not run |
+| The stream-json shapes and error texts of 2.1.296 still match what the Bridge parses | A real turn, then a plan limit and a sign-out, as in section 10. Everything in sections 10 to 13 was run with 2.1.283; nothing has run with 2.1.296 |
+| Haiku 5.5, and an older model, on a real plan | Choose Haiku 5.5 and then Opus 4.6 in Settings, send a message each time. In the chat's newest `/data/claude/projects/-data-workspace/<id>.jsonl` the answer's line names the model. If the plan does not have a model, the turn ends with Claude Code's message, which is the user's choice, not our fault |
+| Fable on a Pro plan | Choose Fable 5.1 on a Pro plan. In print mode Claude Code bills usage credits without asking (model-config page); if the account has no usage credits, the turn ends with Claude Code's message |
