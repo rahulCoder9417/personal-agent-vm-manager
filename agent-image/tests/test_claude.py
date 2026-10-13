@@ -26,7 +26,7 @@ from bridge.platform import load_platform_file
 from bridge.runtime import PlatformReader, RuntimeRunner
 from bridge.server import BridgeHTTPServer
 
-from tests.fakes import FakeRunner, FakeSender
+from tests.fakes import CLAUDE_CODE_MODELS, FakeRunner, FakeSender
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SECRET = "s3cret-bridge"
@@ -569,8 +569,8 @@ class ClaudeRunnerTest(unittest.TestCase):
         self.assertNotIn("bad", saved)
 
     def test_the_model_and_effort_of_the_turn(self):
-        # Shared spec "Claude Code model and effort": --model and --effort (2.1.283 `claude --help`). The turn's
-        # model wins over the Bridge's default; the specialists inherit the lead's model and the session's effort.
+        # Shared spec "Claude Code model and effort": --model and --effort (`claude --help`, 2.1.283 and 2.1.296). The
+        # turn's model wins over the Bridge's default; the specialists inherit the lead's model and the session's effort.
         self.e.sign_in()
         runner = ClaudeRunner([self.e.cli], {**self.e.env, "CLAUDE_CODE_EFFORT_LEVEL": "low"}, self.e.data,
                               self.e.reader().load, model="sonnet")
@@ -594,6 +594,17 @@ class ClaudeRunnerTest(unittest.TestCase):
         crew_runner = ClaudeRunner([self.e.cli], self.e.env, self.e.data, self.e.reader().load, crew_model="haiku")
         self.run_turn("five", options=TurnOptions(claude_model="claude-opus-5-5"), runner=crew_runner)
         self.assertEqual({a["model"] for a in self.e.calls()[-1]["agents"].values()}, {"haiku"})
+
+    def test_every_model_the_backend_offers_reaches_the_cli(self):
+        # The backend's list of Claude models (current and older): each id goes to the CLI as `--model`, with the
+        # effort as `--effort`, unchanged. Which levels a model takes is the CLI's business (2.1.296's model table:
+        # none on Opus 4.5 and Haiku 4.5, no xhigh on Opus 4.6 and Sonnet 4.6), so the Bridge passes them all.
+        self.e.sign_in()
+        for i, model in enumerate(CLAUDE_CODE_MODELS):
+            options = TurnOptions(claude_model=model, claude_effort="xhigh")
+            self.assertEqual(self.run_turn(f"on {model}", session_key=f"web:{i}", options=options).status, "completed")
+        self.assertEqual([(flag(x["argv"], "--model"), flag(x["argv"], "--effort")) for x in self.e.calls()],
+                         [(model, "xhigh") for model in CLAUDE_CODE_MODELS])
 
     def test_a_refused_model_or_effort_is_the_users_choice(self):
         # Shared spec: if the user's plan or Anthropic refuses the chosen model or effort, the turn ends with the
