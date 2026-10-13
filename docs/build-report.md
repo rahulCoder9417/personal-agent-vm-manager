@@ -859,3 +859,60 @@ Both engines tell the model something about where its output appears, before the
 - The instructions do not replace the backend's safety net: a model can still write Markdown for Telegram, and a Hermes user on a small model more often than Claude. They make it rare, so the stripped text reads as it was meant.
 - The rules cover the final answer only. An approval's summary and a reminder's text come from tool calls and may contain Markdown symbols on any channel, as before. If that shows up in the web app's approval cards or in Telegram, the fix is a line in those tools' descriptions on the Platform MCP, not in the Bridge.
 - The agent is told not to embed images and to give a link instead, which matches the web app showing a Markdown image as a link.
+
+## 14. The answer as it is written (2026-10-13)
+
+**Date:** 2026-10-13 · **Branch:** `opt/streaming`. Built and tested on the development machine, together with the backend's and the web app's part (same branch name in `../beckend` and `../user-frontend-web`). The image was not built and nothing on the server was changed.
+
+What the founder asked for: "when I send a message it should give the response streamingly; the entire response at once is not a good UX." Until now the web chat showed "Tex is working…" and then the whole answer at once. Both engines already have the answer word by word while the model writes it; the Bridge threw that away.
+
+### Asked for vs built
+
+| Asked for | Built |
+|---|---|
+| An `on_text` hook in the Bridge | `core.Draft`, passed to the engine's `run(..., on_text=...)`. The engine calls it with a piece of text, or with None to start over |
+| Claude Code: `--include-partial-messages`, the lead's text only | `claude.LeadText`. The flag is added only for a turn that asks for it; text is taken from `stream_event` lines with no `parent_tool_use_id`, from `text_delta`s only (thinking, tool input left out) |
+| Hermes: `message.delta` | `hermes.DraftText`, in the loop over the run's events |
+| A `text_delta` event with the whole draft, about every 250 ms | `text_delta`, `message` = the whole draft; the first change at once, then at most one per 250 ms, the latest text after the interval (a timer). At most 16,000 characters |
+| Start over at each new lead message, each Hermes follow-up round, a session restart | Also at each tool call of the lead, and at Hermes's reconnect notice; see "Where we filled in or changed the spec" |
+| Only when the metadata has `stream_text: true` | Exactly `true`; anything else is false and the turn runs as before (no flag, no hook) |
+| A new proto event type, additive | `DELIVER_EVENT_TYPE_TEXT_DELTA = 5`; mapped in `internal/grpcserver/server.go`, passed on in `internal/sandbox/deliver.go` |
+| Re-delivery replay stays correct | A delivery that attaches again gets only the latest draft (`core.Turn`) |
+
+### What each engine gives
+
+- **Claude Code** (shapes checked with a real CLI, 2.1.296, against a fake API; see "Tests"). With `--include-partial-messages` the CLI writes, next to its usual lines, one `stream_event` line per event of the API's stream: `{"type":"stream_event","event":{...},"parent_tool_use_id":null,...}`. A message goes `message_start`, then per block `content_block_start` (`text`, `thinking` or `tool_use`), `content_block_delta` (`text_delta`, `thinking_delta`, `input_json_delta`), `content_block_stop`, then `message_delta`, `message_stop`. The whole `assistant` lines still come as before, so progress lines and errors are read as before. A specialist's text is not written by the CLI at all unless asked to (`forwardSubagentText`, read in the binary), so a line with a `parent_tool_use_id` is skipped only to be safe. The CLI's final answer (`result`) is the text of the lead's last message.
+- **Hermes** (read in its source at the pinned commit; Hermes was not run). Its Runs API puts `{"event": "message.delta", "delta": "..."}` into the run's event stream for every piece the model writes (`gateway/platforms/api_server_runs.py`, `_text_cb`). The stream covers the whole run: the words before a tool call, then, after a paragraph break Hermes adds itself, the next model call's words. The run's `output` is the last model call's text only. `message.interim` (the text beside a tool call, already streamed) adds nothing. A delegated specialist has no deltas in this stream (the delegate tool does not pass the callback on).
+
+### Where we filled in or changed the spec
+
+- **The draft also starts over when the lead calls a tool**, not only at its next message. The words before a tool call ("Let me check your calendar.") are not part of the answer, and while the tool runs the web chat should show the working bubble with its progress line, not a sentence that will vanish. For Claude Code that is `content_block_start` of a tool block (and, the same, a `tool_use` in the whole `assistant` line); for Hermes `tool.started`. A start over sends an empty draft, so the web app knows.
+- **Hermes's reconnect notice.** When the model's stream breaks during a tool call and Hermes asks again, it writes "\n\n⚠ Connection dropped mid tool-call; reconnecting…\n\n" into the text and then the words before the tool call come again (`agent/chat_completion_helpers.py`). The draft starts over at the notice and leaves it out. Hermes's other warning, "⚠ Stream stalled mid tool-call …", is part of its final answer too, so it stays.
+- **Leading blank lines are not shown** (Hermes starts a new model call's text with a paragraph break).
+- **A late listener skips old drafts.** Each draft holds the whole text, so a listener that is behind (a re-delivery, a slow consumer) only gets the latest one; the drafts in between are not needed.
+- **Nothing after the run.** The timer is stopped when the engine's run returns, before the answer is sent: the answer, or the error, takes the draft's place.
+- **The 16,000-character cap** is ours (one message from the agent can hold 8,000; the vm-manager reads lines of up to 1 MB).
+
+### Tests (2026-10-13)
+
+- `cd agent-image && python3 -m unittest discover -s tests -t .`: **208 tests, OK** (1 skipped: the real-browser test). 191 before.
+- `go vet ./...`: clean. `VM_TEST_SKIP_POSTGRES=1 go test ./...`: all packages pass. golangci-lint: 0 issues.
+- New tests. `Draft`: the whole text, the throttle with the latest text after the interval, the timer for the last words, starting over, the cap, nothing after close. The Bridge: drafts before the answer and `turn_done`, none without `stream_text: true` (also for `"true"`, `1` and `false`), a failed turn's error after its drafts, a re-delivery that gets only the latest draft. Claude Code, with the fake CLI writing partial messages: the words before a tool call shown and then cleared, the answer growing into `result`, no thinking, tool input or specialist text, the flag only with a draft, a lost session's second run starting the draft over. Hermes, with the fake Runs API: a tool call, the reconnect notice and a crew round. Go: the relay passes `text_delta` in order and keeps the sandbox busy, the gRPC stream carries `TEXT_DELTA` with the draft.
+- **A real CLI through the Bridge, against a fake API.** `ClaudeRunner` with every flag it passes (the crew, the hook, the MCP config, `dontAsk`, `--include-partial-messages`), running the CLI installed on the development machine, **2.1.296** (not the pinned 2.1.283), through a wrapper that pointed it at a local fake Messages API. The fake answered the first call with a thinking block, "Let me check." and a `Bash` call, and the second with "You have two meetings today: **10:00** design review.". The drafts sent were `"Let me "`, `"Let me check."`, `""`, `"You have "`, `"You have two meetings "`, and the whole answer, which was also the run's output; the progress line was `using Bash`. No thinking text reached a draft. No real model and no Anthropic account were used.
+- Not run: Hermes itself, the pinned 2.1.283 binary with the flag, a real model, and the image.
+
+### Not verified yet (after the next deploy)
+
+| What | How to check |
+|---|---|
+| Claude Code, web chat | A question with a long answer ("Explain how a mortgage works, in five points"): the answer appears a few words at a time, then the finished message takes its place. In `docker logs` there is no warning about the flag |
+| Claude Code with a tool | "What's on my calendar today?": a first sentence may show, then the working bubble with "using …", then the answer streams |
+| Hermes, web chat | The same two for a Hermes user. If the answer only appears at the end, look at the Hermes run's events (`message.delta` missing) |
+| Telegram is unchanged | A message from Telegram: one message at the end, no `--include-partial-messages` in the CLI's command line (`ps` in the container during a turn) |
+| The cheap model on Free | Hermes on the cheap model streams too (LiteLLM must pass the stream on) |
+| The crew | "Research what other tools charge for seats": Scout's lines while it works, then the answer streams after |
+
+### For the backend and the web app
+
+- The backend sets `stream_text: true` only for web chat turns and turns each `TEXT_DELTA` into a `message.draft` on the web app's live stream; nothing is saved. Telegram turns do not ask for drafts.
+- The final answer still arrives as a message through `send_message`, just before `turn_done`, so the last draft and the answer can reach the web app in either order; the web app drops a draft of a turn whose answer it already has.
