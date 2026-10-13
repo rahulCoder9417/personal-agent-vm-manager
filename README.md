@@ -93,7 +93,10 @@ Notes on behaviour the proto leaves open:
   relative to it). Writes `<user_id>-<UTC time>.tar.gz` and returns its path and size.
   Streams /data through the Docker archive API (no helper container). Running
   containers are archived live (SQLite files may be mid-write; fine for nightly backups).
-- `StopSandbox` (polite) on a busy sandbox is refused; use `force=true` for stuck turns.
+- `StopSandbox` (polite) on a busy sandbox is refused; use `force=true` for stuck turns. A polite stop is
+  also refused while a Claude sign-in waits for its code (`FAILED_PRECONDITION`, like a busy one), the
+  rule the idle reaper and eviction keep. The backend sends a polite stop right after a crew job, so the
+  container sleeps at once when nothing else runs there.
 - `Sandbox.runtime` / `claude_connected` are in every answer that returns a sandbox.
   `claude_connected` is the last status seen (health checks every 30 s, wakes, sign-in,
   sign-out); the Bridge gets it from `claude auth status`.
@@ -130,7 +133,8 @@ States: `stopped -> waking -> awake <-> busy`, and `broken`.
   `timeout_seconds`) -> force stop + `ERROR` with `platform_fault=true`. The turn is
   tracked to the end even if the gRPC caller disconnects.
 - **Stop**: polite = `POST /shutdown` (Hermes saves to /data, up to 20 s) then `docker
-  stop`; force = kill. Removes the egress file, closes the awake period.
+  stop`; force = kill. Removes the egress file, closes the awake period. A polite stop is
+  refused mid-turn, with a delivery in flight, or while a Claude sign-in waits.
 - **Delete**: container, volume, egress file, row. Awake periods are kept for billing.
 
 Loops: idle reaper (1 min; not busy, nothing in flight, no pending Claude sign-in, Bridge
@@ -692,6 +696,49 @@ specialists on Claude Code, e.g. `haiku`. Both are read from the Bridge's enviro
 vm-manager passes containers a fixed list of variables that doesn't include them, so set them
 with an `ENV` line in `agent-image/Dockerfile`, like the other optional `BRIDGE_*` settings.
 
+### Crew jobs: a folder of their own, and nothing left after the turn
+
+A crew job is a brief the user gave Patch (a review) or Byte (a change), in the web app or in chat
+(the backend's `crew_jobs`, `docs/backend-report.md` section 20). It arrives as one delivery whose
+metadata has `"crew_job": {"id": "<job id>", "member": "patch" | "byte"}`. No proto change: the
+delivery's kind is `MESSAGE`, and the platform's message starts with `[Crew job <id>]` and holds the
+brief. A metadata value that is not that shape (a bad id, another member) is logged and the turn
+runs as an ordinary message.
+
+The Bridge, not only the instructions, makes the job leave nothing behind (`agent-image/bridge/jobs.py`):
+
+1. **Before the run**: an empty folder, `/data/workspace/jobs/<job id>` (0700). An earlier try's leftovers
+   there are stopped and removed first.
+2. **The run**: the lead is told the folder and the job's rules (`crew.job_instructions`): clone into it,
+   start every program the job needs from inside it, in the background when it keeps running, change
+   nothing outside it, stop what was started before the report, and the final answer is the job's report.
+   For Patch: a large review may be split into up to 3 Patch runs at the same time. On Claude Code the
+   CLI's process gets `TEXTCREW_JOB_ID=<id>` and `TEXTCREW_JOB_DIR=<folder>` in its environment, and
+   everything it starts inherits them, also a server that went into the background, made a session of
+   its own or changed its directory. The CLI still runs in the workspace, so the chat's own session
+   (`--resume`) is found as before.
+3. **After the run**, whatever happened (answer, failure, exception), in the turn's thread before its last
+   event: every process whose working directory is the job folder or inside it, or whose environment
+   holds exactly `TEXTCREW_JOB_ID=<id>`, gets SIGTERM, then SIGKILL after 5 seconds; that repeats up to
+   3 more times for processes started meanwhile. Then the folder is deleted (read-only folders are made
+   writable first; a link is removed, never followed; only a folder right under `jobs/` is ever removed,
+   and a link put in place of `jobs/` itself is removed, not followed). A `working` line says so:
+   `Patch: stopped 2 programs and deleted the job folder`.
+4. **At start** (`__main__.py`): every folder under `jobs/` is deleted. No job can run then, since a
+   container that stops ends every process in it.
+
+Concurrent turns are safe: a process is stopped only for its own job's folder or mark. Never stopped:
+PID 1 (tini), the Bridge, its parent, and the Hermes process (`HermesProcess.pid`). Processes are found
+through `/proc` (`cwd`, `environ`, `stat`; zombies are skipped, tini reaps them).
+
+Patch's and Byte's role texts have a "crew job" part: work only in the job folder, stop every program
+you started before you report, report in the job's shape (verdict; findings or changes with file and
+line; the acceptance checks for Byte; the tests run with results; what was not checked). In a job Patch
+posts nothing: the lead posts the one review when the brief asks for it.
+
+On Hermes the mark is not set: Hermes runs every turn inside one long-lived process, so only the folder
+finds a job's processes there.
+
 ## Scout's browser (Max plan)
 
 A headless browser inside the user's own container, for pages that need JavaScript, clicks or a
@@ -930,4 +977,9 @@ image was not built, so the release store's signature and checksum check has not
 has run on it; everything listed above was run with 2.1.283. The checks are in `docs/build-report.md` section 14. The answer as it is written (`text_delta`) is tested
 against fakes, and on Claude Code through the Bridge with a real CLI (2.1.296, the version now pinned) against a
 fake API. Not run: Hermes itself (its `message.delta` events are read in its source only), a real model, and the
-image; the checks are in `docs/build-report.md` section 15.
+image; the checks are in `docs/build-report.md` section 15. Crew jobs (2026-10-13: the job folder, the clean-up
+after the turn, the start-up sweep, the mark in Claude Code's environment) are tested with real processes on Linux
+(SIGTERM, SIGKILL for one that ignores it, a process in a session of its own, two jobs at once) and a fake runner and
+CLI. Not run: inside gVisor (whether its `/proc` gives every process's `cwd` and `environ` the same way), a real
+Claude Code or Hermes turn starting a server in the folder, and the image on the server. The polite stop that waits
+for a Claude sign-in is tested with the fake Docker and Bridge.

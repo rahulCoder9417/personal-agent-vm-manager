@@ -550,7 +550,9 @@ class ClaudeRunner:
         deadline = time.monotonic() + timeout
         redact = Redactor([pf.mcp_token, pf.bridge_secret, pf.litellm_key, *(s.auth_secret for s in pf.mcp_servers)],
                           text)
-        how = {"model": model, "effort": effort, "choice": choice, "on_text": on_text}
+        # A crew job's turn: its mark in the CLI's environment, inherited by everything the CLI starts (jobs.py).
+        job_env = dict(getattr(options, "job_env", ()) or ())
+        how = {"model": model, "effort": effort, "choice": choice, "on_text": on_text, "job_env": job_env}
         with self._session_lock(session_key):
             # Which conversation of the chat this turn is in. The platform's memory is not part of a conversation.
             epoch, moved = self.sessions.enter(session_key, chat_epoch)
@@ -642,14 +644,17 @@ class ClaudeRunner:
                   on_progress: Callable[[str], None], deadline: float, delivery: str = "",
                   redact: Optional["Redactor"] = None, model: str = "", effort: str = "",
                   choice: Optional[dict] = None,
-                  on_text: Optional[Callable[[Optional[str]], None]] = None) -> tuple[RunResult, Optional[str]]:
+                  on_text: Optional[Callable[[Optional[str]], None]] = None,
+                  job_env: Optional[dict] = None) -> tuple[RunResult, Optional[str]]:
         """One CLI run. `model` / `effort` go on the command line; `choice` is what of them the user chose
-        ({"model", "effort"}), so a refusal of it is not a platform fault. `on_text`: the draft (LeadText)."""
+        ({"model", "effort"}), so a refusal of it is not a platform fault. `on_text`: the draft (LeadText).
+        `job_env`: a crew job's mark, added to the CLI's environment."""
         redact = redact or Redactor([], text)
         choice = choice or {}
         args = self._args(pf, instructions, session_id, resume, model, effort, stream_text=on_text is not None)
         proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                cwd=self.workdir, env=self.env, start_new_session=True)
+                                cwd=self.workdir, env={**self.env, **job_env} if job_env else self.env,
+                                start_new_session=True)
         timed_out = threading.Event()
 
         def kill() -> None:

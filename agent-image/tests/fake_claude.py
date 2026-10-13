@@ -121,7 +121,8 @@ def print_mode(args) -> int:
                                                    "HTTPS_PROXY", "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH",
                                                    "CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS",
                                                    "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS",
-                                                   "CLAUDE_CODE_DISABLE_AUTO_MEMORY", "CLAUDE_CODE_EFFORT_LEVEL")},
+                                                   "CLAUDE_CODE_DISABLE_AUTO_MEMORY", "CLAUDE_CODE_EFFORT_LEVEL",
+                                                   "TEXTCREW_JOB_ID", "TEXTCREW_JOB_DIR")},
             "mcp": mcp, "mcp_mode": oct(os.stat(mcp_path).st_mode & 0o777) if mcp_path else None,
             "agents": agents, "settings": settings,
             "settings_mode": oct(os.stat(settings_path).st_mode & 0o777) if settings is not None else None}

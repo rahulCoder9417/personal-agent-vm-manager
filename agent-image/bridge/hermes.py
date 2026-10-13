@@ -534,6 +534,12 @@ class HermesProcess:
                 backoff = 1.0
             self._stopping.wait(1)
 
+    @property
+    def pid(self) -> Optional[int]:
+        """The running Hermes process's id (never stopped by a crew job's clean-up, jobs.py)."""
+        with self._lock:
+            return self._proc.pid if self._proc is not None else None
+
     def stop(self, timeout: float) -> None:
         """SIGTERM Hermes (it drains and saves its sessions to /data), SIGKILL after timeout."""
         self._stopping.set()
