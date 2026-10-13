@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from typing import Callable
 
 from bridge.core import RunResult, TurnOptions
@@ -18,18 +19,27 @@ class FakeRunner:
         self.block: threading.Event | None = None
         self.started = threading.Event()
         self.raise_exc: Exception | None = None
+        # What the lead "writes" while it works: each item is passed to on_text (None starts the draft over).
+        self.pieces: list[str | None] = []
+        self.piece_delay = 0.0  # seconds between two pieces
         self._lock = threading.Lock()
 
     def healthy(self) -> bool:
         return self.is_healthy
 
     def run(self, text: str, instructions: str, session_key: str, idempotency_key: str,
-            on_progress: Callable[[str], None], timeout: float, options: TurnOptions | None = None) -> RunResult:
+            on_progress: Callable[[str], None], timeout: float, options: TurnOptions | None = None,
+            on_text: Callable[[str | None], None] | None = None) -> RunResult:
         with self._lock:
             self.calls.append({"text": text, "instructions": instructions, "session_key": session_key,
-                               "idempotency_key": idempotency_key, "options": options})
+                               "idempotency_key": idempotency_key, "options": options, "on_text": on_text})
         self.started.set()
         on_progress("using web_search")
+        if on_text is not None:
+            for piece in self.pieces:
+                on_text(piece)
+                if self.piece_delay:
+                    time.sleep(self.piece_delay)
         if self.block is not None:
             self.block.wait(5)
         if self.raise_exc:
