@@ -19,7 +19,7 @@ from bridge import browser, crew
 from bridge.claude import (LEAD_GATE, MSG_CHOICE, MSG_NOT_SIGNED_IN, MSG_REFUSED, ClaudeAuth, ClaudeError,
                            ClaudeRunner, CrewEvents, LoginNotFound, Redactor, SessionMap, classify_failure,
                            find_authorize_url, render_settings)
-from bridge.core import (FORMAT_PLAIN, FORMAT_WEB, MEMORY_RULES, Bridge, DeliverRequest, DeliveryStore,
+from bridge.core import (FORMAT_PLAIN, FORMAT_WEB, IDENTITY, MEMORY_RULES, Bridge, DeliverRequest, DeliveryStore,
                          TurnOptions)
 from bridge.lead_gate import BLOCK, PASS, REFUSAL
 from bridge.platform import load_platform_file
@@ -1199,6 +1199,23 @@ class BridgeWithRuntimesTest(unittest.TestCase):
         # Claude Code gets the same instructions as Hermes, then how it hands work to a specialist.
         self.assertEqual(prompts, [f"{web}\n\n{crew.CLAUDE_HANDOFF}", f"{telegram}\n\n{crew.CLAUDE_HANDOFF}"])
         self.assertEqual([sent[1] for sent in self.sender.sent], ["web", "telegram:42", "web", "telegram:42"])
+
+    def test_both_engines_are_told_who_tex_is(self):
+        # The lead's identity (the user's agent in Textcrew, apps on Textcrew's Apps page, never Claude's settings)
+        # opens the instructions on both engines: Hermes's run instructions, and Claude Code's
+        # --append-system-prompt, which comes after Claude Code's own "You are Claude Code" system prompt.
+        self.e.sign_in()
+        self.deliver("d1", "what is on my calendar tomorrow?", session_key="web", channel="web")
+        hermes = self.hermes.calls[0]["instructions"]
+        self.e.write_platform("claude_code")
+        self.deliver("d2", "what is on my calendar tomorrow?", session_key="web", channel="web")
+        claude = flag(self.e.calls()[0]["argv"], "--append-system-prompt")
+        for text in (hermes, claude):
+            self.assertTrue(text.startswith(IDENTITY + "\n\n"))
+            for part in ("you are Tex, the user's own personal agent in Textcrew", "https://app.textcrew.in/apps",
+                         "Never send the user to the settings or connectors of Claude",
+                         "Never present yourself as Claude or Claude Code"):
+                self.assertIn(part, text)
 
     def test_the_deliverys_metadata_reaches_the_engine(self):
         # The vm-manager passes DeliverRequest.metadata_json through as the body's "metadata" (no proto change).

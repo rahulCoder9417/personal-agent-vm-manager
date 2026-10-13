@@ -11,7 +11,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from bridge import crew
-from bridge.core import (FORMAT_PLAIN, FORMAT_WEB, MEMORY_RULES, DeliverRequest, TurnOptions,
+from bridge.core import (FORMAT_PLAIN, FORMAT_WEB, IDENTITY, MEMORY_RULES, DeliverRequest, TurnOptions,
                          build_instructions)
 from bridge.hermes import CREW_FOLLOW_UP, MAX_CREW_ROUNDS, Conversations, HermesClient, HermesError, HermesProcess
 from bridge.mcp_client import MCPError, PlatformMCP
@@ -230,6 +230,8 @@ class HermesClientTest(unittest.TestCase):
                          "Byte's and Patch's briefs")
         # One memory, the platform's: the Hermes lead is told so too (its own memory tool is off in config.yaml).
         self.assertIn(MEMORY_RULES, sent)
+        # Who it is comes first: the user's agent in Textcrew, whatever Hermes's own persona says.
+        self.assertTrue(sent.startswith(IDENTITY))
 
     def test_the_hermes_lead_is_told_how_to_format_for_the_channel(self):
         # The run's instructions carry the formatting rules of the delivery's channel: Markdown for the web app,

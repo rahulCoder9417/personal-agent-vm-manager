@@ -5,8 +5,9 @@ import time
 import unittest
 
 from bridge import crew
-from bridge.core import (CLAUDE_EFFORTS, FORMAT_PLAIN, FORMAT_WEB, KINDS, MEMORY_RULES, Bridge, DeliverRequest,
-                         DeliveryStore, Draft, Turn, TurnOptions, build_input, build_instructions, event, format_rules)
+from bridge.core import (APPS_PAGE, CLAUDE_EFFORTS, FORMAT_PLAIN, FORMAT_WEB, IDENTITY, KINDS, MEMORY_RULES, Bridge,
+                         DeliverRequest, DeliveryStore, Draft, Turn, TurnOptions, build_input, build_instructions, event,
+                         format_rules)
 
 from tests.fakes import CLAUDE_CODE_MODELS, FakeRunner, FakeSender
 
@@ -432,6 +433,7 @@ class RequestTest(unittest.TestCase):
         # memory rules.
         for channel, shown in (("web", "web"), ("telegram", "telegram"), ("whatsapp", "whatsapp"), ("", "chat")):
             before = (
+                f"{IDENTITY}\n\n"
                 f"The user is talking to you through {shown}. Your final answer for this turn is delivered to "
                 "them automatically, so do not try to send it yourself. Keep replies suited to a chat app. "
                 "Before anything risky (sending to other people, deleting, paying, posting publicly) call "
@@ -465,6 +467,38 @@ class RequestTest(unittest.TestCase):
         # Before the crew's part, after the rules for approvals and git.
         self.assertLess(text.index("request_approval"), text.index(MEMORY_RULES))
         self.assertLess(text.index(MEMORY_RULES), text.index("You are Tex"))
+
+    def test_the_lead_knows_who_it_is(self):
+        # 2026-10-13: on Claude Code the lead sent the founder to "your Claude settings" to connect Google Calendar.
+        # The lead's instructions now open with who it is (the user's agent in Textcrew), where apps are connected
+        # (Textcrew's Apps page), how to see them (the platform tools) and what to say when one is missing. The
+        # same text for every channel, every kind of delivery and a crew job, so both engines get it.
+        for part in ("Who you are: you are Tex, the user's own personal agent in Textcrew",
+                     "The user connects their apps", f"in Textcrew, on the Apps page: {APPS_PAGE}",
+                     "get_profile lists the connected apps", "list_app_actions lists what you can do in them and "
+                     "says which apps are still connecting",
+                     "If an app the user says is connected is not there, tell them it may still be finishing, or that "
+                     "it needs to be connected again on the Apps page",
+                     "Never send the user to the settings or connectors of Claude or of any other product",
+                     "Never present yourself as Claude or Claude Code",
+                     "do not mention the engine, the model or the company behind you unless the user asks",
+                     "Where other guidance you have names you differently, this takes its place"):
+            self.assertIn(part, IDENTITY)
+        self.assertEqual(APPS_PAGE, "https://app.textcrew.in/apps")
+        for channel in ("web", "telegram", "whatsapp", "imessage", ""):
+            for kind in sorted(KINDS):
+                text = build_instructions(req(kind=kind, channel=channel))
+                self.assertTrue(text.startswith(IDENTITY + "\n\n"), (channel, kind))
+                self.assertEqual(text.count(IDENTITY), 1, (channel, kind))
+        job = DeliverRequest.from_json({"delivery_id": "j", "kind": "message", "session_key": "web",
+                                        "channel": "web", "text": "[Crew job crj_1] Review acme/web#42.",
+                                        "metadata": {"crew_job": {"id": "crj_1", "member": "patch"}}})
+        self.assertTrue(build_instructions(job, "/data/workspace/jobs/crj_1").startswith(IDENTITY))
+        # Short: one paragraph, and nothing in the instructions sends the user to Claude's own settings.
+        self.assertNotIn("\n", IDENTITY)
+        self.assertLess(len(IDENTITY), 1100)
+        for gone in ("Claude settings", "your Claude", "claude.ai"):
+            self.assertNotIn(gone, build_instructions(req(channel="web")))
 
 
 if __name__ == "__main__":
