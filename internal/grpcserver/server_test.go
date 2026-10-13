@@ -19,6 +19,7 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 
 	vmv1 "github.com/personal-agent/vm-manager/gen/vm/v1"
+	"github.com/personal-agent/vm-manager/internal/bridge"
 	"github.com/personal-agent/vm-manager/internal/clock"
 	"github.com/personal-agent/vm-manager/internal/config"
 	"github.com/personal-agent/vm-manager/internal/docker"
@@ -226,6 +227,49 @@ func TestEndToEndOverGRPC(t *testing.T) {
 	}
 	if _, err := h.client.GetSandbox(ctx, &vmv1.GetSandboxRequest{UserId: "u1"}); code(err) != codes.NotFound {
 		t.Fatalf("after delete: %v", err)
+	}
+}
+
+// The Bridge's text_delta (the whole draft of the answer so far) reaches the backend as TEXT_DELTA, with
+// the draft in `message`, and every Bridge event type has a proto type.
+func TestDeliverStreamsTextDeltas(t *testing.T) {
+	h := newHarness(t, 5)
+	ctx := authed()
+	if _, err := h.client.CreateSandbox(ctx, &vmv1.CreateSandboxRequest{UserId: "u1", LitellmKey: "sk-1"}); err != nil {
+		t.Fatal(err)
+	}
+	h.br.Script = func(string, bridge.DeliverRequest) []bridge.Event {
+		return []bridge.Event{{Type: "accepted"}, {Type: "text_delta", Message: "Hel"},
+			{Type: "text_delta", Message: "Hello there"}, {Type: "turn_done"}}
+	}
+	st, err := h.client.Deliver(ctx, &vmv1.DeliverRequest{
+		UserId: "u1", DeliveryId: "evt-1", Kind: vmv1.DeliverKind_DELIVER_KIND_MESSAGE,
+		SessionKey: "web", Channel: "web", Text: "hello", MetadataJson: `{"stream_text":true}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	evs, err := recvAll(t, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, ev := range evs {
+		got = append(got, ev.GetType().String()+"="+ev.GetMessage())
+	}
+	want := "DELIVER_EVENT_TYPE_ACCEPTED=,DELIVER_EVENT_TYPE_TEXT_DELTA=Hel,DELIVER_EVENT_TYPE_TEXT_DELTA=Hello there," +
+		"DELIVER_EVENT_TYPE_TURN_DONE="
+	if strings.Join(got, ",") != want {
+		t.Fatalf("events: %v", got)
+	}
+	if d := h.br.Delivered()[0]; string(d.Metadata) != `{"stream_text":true}` {
+		t.Fatalf("the metadata goes to the Bridge as it came: %s", d.Metadata)
+	}
+	for _, typ := range []string{bridge.EventAccepted, bridge.EventWorking, bridge.EventTextDelta, bridge.EventTurnDone,
+		bridge.EventError} {
+		if p, ok := eventToProto[typ]; !ok || p == vmv1.DeliverEventType_DELIVER_EVENT_TYPE_UNSPECIFIED {
+			t.Errorf("bridge event %q has no proto type", typ)
+		}
 	}
 }
 
