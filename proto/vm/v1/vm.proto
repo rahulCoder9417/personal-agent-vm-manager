@@ -14,7 +14,8 @@ service VmManager {
   // Start if needed and wait until the Bridge is healthy.
   // At the awake cap with nothing evictable -> RESOURCE_EXHAUSTED (retryable).
   rpc WakeSandbox(WakeSandboxRequest) returns (WakeSandboxResponse);
-  // Deliver a message or approval answer. Streams accepted -> working... -> turn_done | error.
+  // Deliver a message or approval answer. Streams accepted -> working... -> turn_done | error,
+  // with text_delta events among the working ones when the delivery's metadata asks for them.
   rpc Deliver(DeliverRequest) returns (stream DeliverEvent);
   // Refresh last-active (every delivered message and every Platform MCP call).
   rpc Touch(TouchRequest) returns (TouchResponse);
@@ -168,10 +169,17 @@ enum DeliverEventType {
   DELIVER_EVENT_TYPE_WORKING = 2;
   DELIVER_EVENT_TYPE_TURN_DONE = 3;
   DELIVER_EVENT_TYPE_ERROR = 4;
+  // The answer the lead is writing, so far: `message` holds the whole draft (not only what was
+  // added), so a caller that missed one keeps up with the next. Sent only when the delivery's
+  // metadata has "stream_text": true, at most about four a second. A new draft can be shorter or
+  // empty: the lead started a new message, or went on to a tool. Live only: the final answer still
+  // comes through the Platform MCP's send_message, before TURN_DONE.
+  DELIVER_EVENT_TYPE_TEXT_DELTA = 5;
 }
 
 message DeliverEvent {
   DeliverEventType type = 1;
+  // WORKING: the progress line. TEXT_DELTA: the whole draft so far. ERROR: the reason.
   string message = 2;
   // For ERROR: true if caused by us (the turn is not charged).
   bool platform_fault = 3;

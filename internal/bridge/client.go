@@ -24,6 +24,9 @@ const (
 	EventWorking  = "working"
 	EventTurnDone = "turn_done"
 	EventError    = "error"
+	// EventTextDelta carries the whole draft of the answer so far in Message. The Bridge sends it
+	// only when the delivery's metadata has "stream_text": true.
+	EventTextDelta = "text_delta"
 )
 
 // ErrUnauthorized means the Bridge rejected the secret.

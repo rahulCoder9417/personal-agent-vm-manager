@@ -248,6 +248,12 @@ const (
 	DeliverEventType_DELIVER_EVENT_TYPE_WORKING     DeliverEventType = 2
 	DeliverEventType_DELIVER_EVENT_TYPE_TURN_DONE   DeliverEventType = 3
 	DeliverEventType_DELIVER_EVENT_TYPE_ERROR       DeliverEventType = 4
+	// The answer the lead is writing, so far: `message` holds the whole draft (not only what was
+	// added), so a caller that missed one keeps up with the next. Sent only when the delivery's
+	// metadata has "stream_text": true, at most about four a second. A new draft can be shorter or
+	// empty: the lead started a new message, or went on to a tool. Live only: the final answer still
+	// comes through the Platform MCP's send_message, before TURN_DONE.
+	DeliverEventType_DELIVER_EVENT_TYPE_TEXT_DELTA DeliverEventType = 5
 )
 
 // Enum value maps for DeliverEventType.
@@ -258,6 +264,7 @@ var (
 		2: "DELIVER_EVENT_TYPE_WORKING",
 		3: "DELIVER_EVENT_TYPE_TURN_DONE",
 		4: "DELIVER_EVENT_TYPE_ERROR",
+		5: "DELIVER_EVENT_TYPE_TEXT_DELTA",
 	}
 	DeliverEventType_value = map[string]int32{
 		"DELIVER_EVENT_TYPE_UNSPECIFIED": 0,
@@ -265,6 +272,7 @@ var (
 		"DELIVER_EVENT_TYPE_WORKING":     2,
 		"DELIVER_EVENT_TYPE_TURN_DONE":   3,
 		"DELIVER_EVENT_TYPE_ERROR":       4,
+		"DELIVER_EVENT_TYPE_TEXT_DELTA":  5,
 	}
 )
 
@@ -949,9 +957,10 @@ func (x *DeliverRequest) GetTimeoutSeconds() int32 {
 }
 
 type DeliverEvent struct {
-	state   protoimpl.MessageState `protogen:"open.v1"`
-	Type    DeliverEventType       `protobuf:"varint,1,opt,name=type,proto3,enum=vm.v1.DeliverEventType" json:"type,omitempty"`
-	Message string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Type  DeliverEventType       `protobuf:"varint,1,opt,name=type,proto3,enum=vm.v1.DeliverEventType" json:"type,omitempty"`
+	// WORKING: the progress line. TEXT_DELTA: the whole draft so far. ERROR: the reason.
+	Message string `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
 	// For ERROR: true if caused by us (the turn is not charged).
 	PlatformFault bool  `protobuf:"varint,3,opt,name=platform_fault,json=platformFault,proto3" json:"platform_fault,omitempty"`
 	AtUnixMs      int64 `protobuf:"varint,4,opt,name=at_unix_ms,json=atUnixMs,proto3" json:"at_unix_ms,omitempty"`
@@ -2435,13 +2444,14 @@ const file_vm_v1_vm_proto_rawDesc = "" +
 	"\x14DELIVER_KIND_MESSAGE\x10\x01\x12 \n" +
 	"\x1cDELIVER_KIND_APPROVAL_ANSWER\x10\x02\x12\x1b\n" +
 	"\x17DELIVER_KIND_AUTOMATION\x10\x03\x12\x1a\n" +
-	"\x16DELIVER_KIND_APP_EVENT\x10\x04*\xb7\x01\n" +
+	"\x16DELIVER_KIND_APP_EVENT\x10\x04*\xda\x01\n" +
 	"\x10DeliverEventType\x12\"\n" +
 	"\x1eDELIVER_EVENT_TYPE_UNSPECIFIED\x10\x00\x12\x1f\n" +
 	"\x1bDELIVER_EVENT_TYPE_ACCEPTED\x10\x01\x12\x1e\n" +
 	"\x1aDELIVER_EVENT_TYPE_WORKING\x10\x02\x12 \n" +
 	"\x1cDELIVER_EVENT_TYPE_TURN_DONE\x10\x03\x12\x1c\n" +
-	"\x18DELIVER_EVENT_TYPE_ERROR\x10\x042\x98\t\n" +
+	"\x18DELIVER_EVENT_TYPE_ERROR\x10\x04\x12!\n" +
+	"\x1dDELIVER_EVENT_TYPE_TEXT_DELTA\x10\x052\x98\t\n" +
 	"\tVmManager\x12J\n" +
 	"\rCreateSandbox\x12\x1b.vm.v1.CreateSandboxRequest\x1a\x1c.vm.v1.CreateSandboxResponse\x12D\n" +
 	"\vWakeSandbox\x12\x19.vm.v1.WakeSandboxRequest\x1a\x1a.vm.v1.WakeSandboxResponse\x127\n" +
