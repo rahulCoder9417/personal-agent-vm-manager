@@ -282,6 +282,26 @@ func TestStopRules(t *testing.T) {
 	}
 }
 
+func TestPoliteStopWaitsForAClaudeSignIn(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	e.create(t, "u1")
+	if _, err := e.m.StartClaudeLogin(ctx, "u1"); err != nil {
+		t.Fatal(err)
+	}
+	// The backend's polite stop after a crew job: refused, the sign-in keeps waiting.
+	if _, err := e.m.Stop(ctx, "u1", false, "crew job finished"); !errors.Is(err, ErrBusy) {
+		t.Fatalf("a polite stop while a sign-in waits must be refused, got %v", err)
+	}
+	if e.state(t, "u1") != store.StateAwake {
+		t.Fatalf("state %s, want awake", e.state(t, "u1"))
+	}
+	// A forced stop still stops it.
+	if sb, err := e.m.Stop(ctx, "u1", true, "stuck"); err != nil || sb.State != store.StateStopped {
+		t.Fatalf("forced stop: %+v %v", sb, err)
+	}
+}
+
 func TestDeleteRemovesContainerVolumeAndEgress(t *testing.T) {
 	e := newEnv(t)
 	sb, _ := e.create(t, "u1")
