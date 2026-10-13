@@ -442,7 +442,10 @@ func (m *Manager) waitHealthy(ctx context.Context, ip string) (bridge.Health, er
 }
 
 // Stop stops the sandbox. Polite unless force. A polite stop of a sandbox in a
-// turn is refused (never stop mid-turn); the stuck-turn path uses force.
+// turn is refused (never stop mid-turn); the stuck-turn path uses force. So is a
+// polite stop while a Claude sign-in waits for its code (stopping would end the
+// waiting CLI), the same rule the idle stop and eviction keep. The backend asks
+// for a polite stop after a crew job, to let the container sleep at once.
 func (m *Manager) Stop(ctx context.Context, userID string, force bool, reason string) (store.Sandbox, error) {
 	if err := validateUserID(userID); err != nil {
 		return store.Sandbox{}, err
@@ -458,6 +461,9 @@ func (m *Manager) Stop(ctx context.Context, userID string, force bool, reason st
 	}
 	if !force && (sb.State == store.StateBusy || m.inflightCount(userID) > 0) {
 		return store.Sandbox{}, fmt.Errorf("%w: use force to stop a stuck turn", ErrBusy)
+	}
+	if !force && m.loginPending(userID) {
+		return store.Sandbox{}, fmt.Errorf("%w: a Claude sign-in is waiting for its code", ErrBusy)
 	}
 	final := store.StateStopped
 	if sb.State == store.StateBroken {

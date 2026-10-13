@@ -22,10 +22,11 @@ import os
 import re
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Iterator, Optional, Protocol
 
 from . import crew
+from .jobs import CrewJob, JobFolders
 
 log = logging.getLogger("bridge.core")
 
@@ -82,6 +83,9 @@ class TurnOptions:
     claude_model: str = ""
     claude_effort: str = ""
     stream_text: bool = False
+    # Set by the Bridge, not read from the metadata: for a crew job's turn, what the engine's process adds to its
+    # environment (jobs.CrewJob.env), so everything started for the job is known as the job's and stopped after it.
+    job_env: tuple[tuple[str, str], ...] = ()
 
     @classmethod
     def from_metadata(cls, meta: Any) -> "TurnOptions":
@@ -158,6 +162,10 @@ class DeliverRequest:
     def options(self) -> TurnOptions:
         return TurnOptions.from_metadata(self.metadata)
 
+    def crew_job(self) -> Optional[CrewJob]:
+        """The crew job this delivery is (metadata "crew_job"), or None."""
+        return CrewJob.from_metadata(self.metadata)
+
 
 def build_input(req: DeliverRequest) -> str:
     parts: list[str] = []
@@ -231,10 +239,13 @@ def format_rules(channel: str) -> str:
     return FORMAT_WEB if channel == WEB_CHANNEL else FORMAT_PLAIN
 
 
-def build_instructions(req: DeliverRequest) -> str:
+def build_instructions(req: DeliverRequest, job_folder: str = "") -> str:
     """The lead's instructions for one turn. Each engine adds how it hands work to a specialist
-    (crew.CLAUDE_HANDOFF / crew.hermes_handoff)."""
+    (crew.CLAUDE_HANDOFF / crew.hermes_handoff). `job_folder`: the folder the Bridge made for this delivery's crew
+    job; the lead is told the job's rules (crew.job_instructions)."""
     channel = req.channel or "chat"
+    job = req.crew_job()
+    job_rules = f"\n\n{crew.job_instructions(job.member, job_folder)}" if job is not None and job_folder else ""
     return (
         f"The user is talking to you through {channel}. Your final answer for this turn is delivered to "
         "them automatically, so do not try to send it yourself. Keep replies suited to a chat app. "
@@ -247,6 +258,7 @@ def build_instructions(req: DeliverRequest) -> str:
         f"{format_rules(req.channel)}\n\n"
         f"{MEMORY_RULES}\n\n"
         + crew.lead_instructions()
+        + job_rules
     )
 
 
@@ -449,7 +461,8 @@ class Turn:
 class Bridge:
     def __init__(self, secret: str, runner: Runner, sender: Sender, store: DeliveryStore,
                  turn_timeout: float = 900, send_retries: int = 3, retry_delay: float = 1.0,
-                 browser: Optional[BrowserUsage] = None, draft_interval: float = DRAFT_INTERVAL):
+                 browser: Optional[BrowserUsage] = None, draft_interval: float = DRAFT_INTERVAL,
+                 jobs: Optional[JobFolders] = None):
         if not secret:
             raise ValueError("bridge secret is required")
         self._secret = secret.encode()
@@ -461,6 +474,7 @@ class Bridge:
         self.retry_delay = retry_delay
         self.browser = browser  # None: this container has no browser (it is not turned on for the user)
         self.draft_interval = draft_interval  # at most one text_delta per this many seconds
+        self.jobs = jobs  # crew jobs' folders and their clean-up (None: a delivery's crew job gets no folder)
         self._turns: dict[str, Turn] = {}
         self._ending: set[Turn] = set()  # turns whose run is over and which are reporting browser time
         self._lock = threading.Lock()
@@ -516,13 +530,20 @@ class Bridge:
                 attempts = int((rec or {}).get("attempts", 0)) + 1
                 self.store.put(req.delivery_id, state="running", attempts=attempts)
                 options = req.options()
+                # A crew job: a folder of its own, and after the run, whatever happened, every process of the job
+                # stopped and the folder deleted (jobs.py).
+                job = req.crew_job() if self.jobs is not None else None
+                folder = ""
                 # The draft of the answer, only where the answer can be shown as it is written (stream_text).
                 draft = Draft(lambda text: turn.publish(event(TEXT_DELTA, text)), self.draft_interval) \
                     if options.stream_text else None
                 try:
+                    if job is not None:
+                        folder = self.jobs.prepare(job)
+                        options = replace(options, job_env=tuple(job.env(folder).items()))
                     result = self.runner.run(
                         text=build_input(req),
-                        instructions=build_instructions(req),
+                        instructions=build_instructions(req, folder),
                         session_key=req.session_key,
                         idempotency_key=f"{req.delivery_id}#{attempts}",
                         on_progress=lambda msg: turn.publish(event(WORKING, msg)),
@@ -533,6 +554,8 @@ class Bridge:
                 finally:
                     if draft is not None:
                         draft.close()  # nothing after the run: the answer or the error takes its place
+                    if job is not None:
+                        self._clean_job(job, turn)
                 if result.status != "completed":
                     reason = getattr(result, "reason", "") or ""
                     fault = getattr(result, "platform_fault", None)
@@ -559,6 +582,16 @@ class Bridge:
                 self._ending.discard(turn)
                 if self._turns.get(req.delivery_id) is turn:  # not a newer attempt's turn
                     self._turns.pop(req.delivery_id, None)
+
+    def _clean_job(self, job: CrewJob, turn: Turn) -> None:
+        """After a crew job's run: stop what it left running and delete its folder (never raises), and say so in a
+        progress line of the specialist's."""
+        done = self.jobs.cleanup(job)
+        name = crew.BY_ID[job.member].name
+        stopped = done.get("stopped", 0)
+        programs = f"stopped {stopped} program{'s' if stopped != 1 else ''} and " if stopped else ""
+        turn.publish(event(WORKING, f"{name}: {programs}deleted the job folder"
+                           if done.get("removed") else f"{name}: {programs}cleaned up"))
 
     def _end(self, req: DeliverRequest, turn: Turn, ev: dict) -> None:
         """Publish a turn's last event, with the browser time to charge (when the browser was open)."""

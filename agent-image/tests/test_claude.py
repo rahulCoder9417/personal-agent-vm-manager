@@ -202,6 +202,18 @@ class ClaudeRunnerTest(unittest.TestCase):
         self.assertEqual(states[-1], "the crew is done")
         self.assertIn("Patch: done", self.progress)
 
+    def test_a_crew_jobs_mark_is_in_the_clis_environment(self):
+        # Everything the CLI starts for a crew job inherits the mark, so the Bridge can stop it after the turn.
+        self.e.sign_in()
+        job_env = (("TEXTCREW_JOB_ID", "crj_1"), ("TEXTCREW_JOB_DIR", "/data/workspace/jobs/crj_1"))
+        self.run_turn("review it", options=TurnOptions(chat_epoch=0, job_env=job_env))
+        self.run_turn("hello", options=TurnOptions(chat_epoch=0))
+        first, second = self.e.calls()
+        self.assertEqual(first["env"]["TEXTCREW_JOB_ID"], "crj_1")
+        self.assertEqual(first["env"]["TEXTCREW_JOB_DIR"], "/data/workspace/jobs/crj_1")
+        self.assertEqual(first["cwd"], os.path.join(self.e.data, "workspace"), "the chat's own session stays in reach")
+        self.assertIsNone(second["env"]["TEXTCREW_JOB_ID"], "an ordinary turn carries no mark")
+
     def test_no_partial_messages_without_a_draft(self):
         self.e.sign_in()
         self.run_turn("hello")

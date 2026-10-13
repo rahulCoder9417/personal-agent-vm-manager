@@ -6,7 +6,8 @@
 4. set up Claude Code (the official `claude` CLI, config dir on /data) as the second runtime
 5. when Scout's browser is turned on for the user (platform.json "browser_enabled"): write the browser
    server's settings and start the meter that measures browser time
-6. serve the Bridge HTTP API on 0.0.0.0:$BRIDGE_PORT
+6. delete crew job folders left from a turn that never finished (jobs.py)
+7. serve the Bridge HTTP API on 0.0.0.0:$BRIDGE_PORT
 
 Each delivery goes to the runtime named in platform.json ("runtime": hermes | claude_code).
 """
@@ -24,6 +25,7 @@ from . import browser, crew
 from .claude import RUNTIME_CLAUDE, RUNTIME_HERMES, ClaudeAuth, ClaudeRunner
 from .core import Bridge, DeliveryStore
 from .hermes import HermesClient, HermesProcess
+from .jobs import JobFolders
 from .mcp_client import PlatformMCP
 from .platform import (HERMES_API_PORT, load_platform_file, render_gitconfig, render_hermes_config, write_gitconfig,
                        write_hermes_config)
@@ -79,8 +81,12 @@ def main() -> int:
     runner = RuntimeRunner(reader.load, {RUNTIME_HERMES: client, RUNTIME_CLAUDE: claude})
     sender = PlatformMCP(env.get("PLATFORM_MCP_URL", "http://api:8080/mcp"), pf.mcp_token)
     store = DeliveryStore(os.path.join(data, ".platform", "deliveries.json"))
+    # Crew jobs: a folder each under the workspace, and nothing left behind after the job's turn. Folders left by a
+    # container that stopped in the middle of a job go now (no job runs yet). Hermes itself is never stopped.
+    jobs = JobFolders(os.path.join(data, "workspace"), protected=lambda: (hermes.pid,))
+    jobs.sweep()
     bridge = Bridge(pf.bridge_secret, runner, sender, store,
-                    turn_timeout=float(env.get("BRIDGE_TURN_TIMEOUT", "900")), browser=meter)
+                    turn_timeout=float(env.get("BRIDGE_TURN_TIMEOUT", "900")), browser=meter, jobs=jobs)
     if meter is not None:
         meter.busy = lambda: bridge.busy() > 0  # a browser left open with no turn running is closed
         meter.start()
