@@ -7,6 +7,15 @@ from typing import Callable
 
 from bridge.core import RunResult, TurnOptions
 
+# Every model id the backend offers for Claude Code (its CLAUDE_MODELS, 2026-10-13), as it sends them in a delivery's
+# `claude.model`: the current models, then the older ones Claude still offers. All are in the model table of the
+# pinned Claude Code 2.1.296.
+CLAUDE_CODE_MODELS = (
+    "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1",
+    "claude-fable-5", "claude-opus-5", "claude-sonnet-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6",
+    "claude-sonnet-4-6", "claude-opus-4-5", "claude-haiku-4-5",
+)
+
 
 class FakeRunner:
     def __init__(self, output: str = "Hi! How can I help?", status: str = "completed", reason: str = ""):

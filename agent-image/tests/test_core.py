@@ -8,7 +8,7 @@ from bridge import crew
 from bridge.core import (CLAUDE_EFFORTS, FORMAT_PLAIN, FORMAT_WEB, KINDS, MEMORY_RULES, Bridge, DeliverRequest,
                          DeliveryStore, TurnOptions, build_input, build_instructions, format_rules)
 
-from tests.fakes import FakeRunner, FakeSender
+from tests.fakes import CLAUDE_CODE_MODELS, FakeRunner, FakeSender
 
 SECRET = "s3cret-bridge"
 
@@ -183,7 +183,7 @@ class RequestTest(unittest.TestCase):
         self.assertEqual(req(metadata={"chat_epoch": 3, "claude": {"model": "claude-opus-5-5", "effort": "xhigh"},
                                        "source": "telegram"}).options(),
                          TurnOptions(chat_epoch=3, claude_model="claude-opus-5-5", claude_effort="xhigh"))
-        for model in ("claude-sonnet-5-5", "claude-haiku-4-5", "claude-fable-5-1", "opus", "claude-opus-4-8[1m]"):
+        for model in ("opus", "claude-opus-4-8[1m]", *CLAUDE_CODE_MODELS):
             self.assertEqual(req(metadata={"claude": {"model": model}}).options().claude_model, model)
         for effort in CLAUDE_EFFORTS:
             self.assertEqual(req(metadata={"claude": {"effort": effort}}).options().claude_effort, effort)
