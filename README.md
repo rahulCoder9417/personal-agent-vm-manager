@@ -253,8 +253,9 @@ of all at once at the end. The final answer still goes through `send_message`, b
      drop them; now it takes them.
 2. The draft starts over when the lead starts a new message, when it goes on to a tool (what it wrote before a
    tool call is only it saying what it is about to do; the final answer is the text of its last message), when
-   a Hermes follow-up round starts after the crew, and when a Claude Code turn starts again in a new session
-   (a lost session). Hermes also writes a notice into the text when the model's stream breaks during a tool
+   its words end while specialists it started still work in the background (they were a status, and the crew's
+   progress lines show meanwhile), when a Hermes follow-up round starts after the crew, and when a Claude Code
+   turn starts again in a new session (a lost session). Hermes also writes a notice into the text when the model's stream breaks during a tool
    call ("⚠ Connection dropped mid tool-call; reconnecting…") and then repeats the words before it; the draft
    starts over there too, without the notice.
 3. Each `text_delta` holds the **whole draft so far**, not only what was added. So whoever misses one (a
