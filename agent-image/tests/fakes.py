@@ -18,6 +18,11 @@ CLAUDE_CODE_MODELS = (
 )
 
 
+def without_timings(ev: dict) -> dict:
+    """An event without the stage times the Bridge adds to a turn's last event (timings.py)."""
+    return {k: v for k, v in ev.items() if k != "timings"}
+
+
 class FakeRunner:
     def __init__(self, output: str = "Hi! How can I help?", status: str = "completed", reason: str = ""):
         self.output = output

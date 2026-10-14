@@ -63,8 +63,12 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(headers["Content-Type"], "application/x-ndjson")
         lines = [json.loads(line) for line in body.decode().splitlines() if line.strip()]
         self.assertEqual([e["type"] for e in lines], ["accepted", "working", "turn_done"])
-        for e in lines:
+        for e in lines[:-1]:
             self.assertEqual(set(e), {"type", "message", "platform_fault"})
+        # The last event also says where the turn's time went (timings.py).
+        self.assertEqual(set(lines[-1]), {"type", "message", "platform_fault", "timings"})
+        self.assertEqual(lines[-1]["timings"]["v"], 1)
+        self.assertIn("answer_sent", lines[-1]["timings"]["marks"])
         self.assertEqual(self.sender.sent, [("Hi! How can I help?", "web")])
 
     def test_deliver_dedupes(self):

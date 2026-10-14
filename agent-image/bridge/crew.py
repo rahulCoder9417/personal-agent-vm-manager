@@ -567,8 +567,9 @@ class Progress:
     (Claude Code: the id of the Agent tool call; Hermes: the subagent id).
     """
 
-    def __init__(self, emit: Callable[[str], None]):
+    def __init__(self, emit: Callable[[str], None], clock: Any = None):
         self._emit = emit
+        self._clock = clock  # the turn's stage times (timings.TurnClock), or None
         self._open: dict[str, Member] = {}
         self._seen: set[str] = set()
 
@@ -578,6 +579,8 @@ class Progress:
             return
         self._seen.add(run_id)
         self._open[run_id] = member
+        if self._clock is not None:
+            self._clock.crew_start(run_id, member.id)
         what = _one_line(what)
         if what.lower().startswith(member.name.lower() + ":"):
             what = what[len(member.name) + 1:].strip()
@@ -586,6 +589,8 @@ class Progress:
     def finish(self, run_id: Any, outcome: str = DONE) -> None:
         member = self._open.pop(str(run_id or ""), None)
         if member is not None:
+            if self._clock is not None:
+                self._clock.crew_end(str(run_id or ""))
             self._emit(f"{member.name}: {outcome}")
 
     def finish_all(self, outcome: str = FINISHED) -> None:

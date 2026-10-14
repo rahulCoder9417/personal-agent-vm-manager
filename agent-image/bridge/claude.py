@@ -552,7 +552,8 @@ class ClaudeRunner:
                           text)
         # A crew job's turn: its mark in the CLI's environment, inherited by everything the CLI starts (jobs.py).
         job_env = dict(getattr(options, "job_env", ()) or ())
-        how = {"model": model, "effort": effort, "choice": choice, "on_text": on_text, "job_env": job_env}
+        how = {"model": model, "effort": effort, "choice": choice, "on_text": on_text, "job_env": job_env,
+               "clock": getattr(options, "clock", None)}
         with self._session_lock(session_key):
             # Which conversation of the chat this turn is in. The platform's memory is not part of a conversation.
             epoch, moved = self.sessions.enter(session_key, chat_epoch)
@@ -645,13 +646,16 @@ class ClaudeRunner:
                   redact: Optional["Redactor"] = None, model: str = "", effort: str = "",
                   choice: Optional[dict] = None,
                   on_text: Optional[Callable[[Optional[str]], None]] = None,
-                  job_env: Optional[dict] = None) -> tuple[RunResult, Optional[str]]:
+                  job_env: Optional[dict] = None, clock: Any = None) -> tuple[RunResult, Optional[str]]:
         """One CLI run. `model` / `effort` go on the command line; `choice` is what of them the user chose
         ({"model", "effort"}), so a refusal of it is not a platform fault. `on_text`: the draft (LeadText).
-        `job_env`: a crew job's mark, added to the CLI's environment."""
+        `job_env`: a crew job's mark, added to the CLI's environment. `clock`: the turn's stage times
+        (timings.TurnClock; ClaudeMarks), or None."""
         redact = redact or Redactor([], text)
         choice = choice or {}
+        marks = ClaudeMarks(clock)
         args = self._args(pf, instructions, session_id, resume, model, effort, stream_text=on_text is not None)
+        marks.run_started()
         proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 cwd=self.workdir, env={**self.env, **job_env} if job_env else self.env,
                                 start_new_session=True)
@@ -689,7 +693,7 @@ class ClaudeRunner:
         retry: dict = {}
         api_error: Optional[dict] = None  # the CLI's last own message for a failed API call (the lead's)
         refusal = ""  # the category of a refusal the CLI gave up on (system/model_refusal_no_fallback)
-        crew_events = CrewEvents(on_progress)
+        crew_events = CrewEvents(on_progress, clock)
         lead_text = LeadText(on_text, crew_busy=lambda: crew_events.progress.open_runs() > 0) \
             if on_text is not None else None
         if lead_text is not None:
@@ -703,6 +707,7 @@ class ClaudeRunner:
                 if not isinstance(ev, dict):
                     continue
                 typ, sub = ev.get("type"), ev.get("subtype")
+                marks.feed(ev)
                 if typ == "system" and sub == "init":
                     seen = ev.get("session_id") or seen
                 elif typ == "system" and sub == "api_retry":
@@ -724,9 +729,11 @@ class ClaudeRunner:
                             lead_text.restart()  # the lead went on to a tool: what it wrote before is not the answer
                         if not crew_events.started(ev, block):
                             on_progress(f"using {_tool_label(block.get('name'))}")
+                            marks.tool_started(ev, block)
                 elif typ == "user":
                     for block in _blocks(ev, "tool_result"):
                         crew_events.result(ev, block)
+                        marks.tool_ended(ev, block)
                 elif typ == "result":
                     final = ev
                     seen = ev.get("session_id") or seen
@@ -850,6 +857,68 @@ class LeadText:
             self.on_text(text)
 
 
+class ClaudeMarks:
+    """The turn's stage times (timings.TurnClock) from the CLI's stream-json events. Only the lead's events count
+    (a line with a `parent_tool_use_id` is a specialist's); the crew's runs are marked by CrewEvents.
+
+    engine_ready: the `system/init` event (the CLI is up and has asked its tool servers for their tools).
+    first_response, first_thinking: the model's first message began, and it began to think; these come from the
+    API's own stream events, which the CLI writes only with --include-partial-messages (web chat turns).
+    first_text, first_tool: the lead's first words and first tool call, from the stream events when there are
+    any, else from the lead's whole messages. engine_done: the `result` event, whose numbers are kept too."""
+
+    _TOOL_BLOCKS = ("tool_use", "server_tool_use", "mcp_tool_use")
+
+    def __init__(self, clock: Any = None):
+        self.clock = clock
+
+    def run_started(self) -> None:
+        if self.clock is not None:
+            self.clock.run_started(RUNTIME_CLAUDE)
+
+    def feed(self, ev: dict) -> None:
+        clock = self.clock
+        if clock is None or ev.get("parent_tool_use_id"):
+            return
+        typ = ev.get("type")
+        if typ == "system" and ev.get("subtype") == "init":
+            clock.mark("engine_ready", last=True)  # a run that starts again (a new session) is ready again
+        elif typ == "stream_event":
+            raw = ev.get("event") if isinstance(ev.get("event"), dict) else {}
+            kind = raw.get("type")
+            if kind == "message_start":
+                clock.mark("first_response")
+            elif kind == "content_block_start":
+                block = raw.get("content_block") if isinstance(raw.get("content_block"), dict) else {}
+                if block.get("type") in ("thinking", "redacted_thinking"):
+                    clock.mark("first_thinking")
+                elif block.get("type") in self._TOOL_BLOCKS:
+                    clock.mark("first_tool")
+                elif block.get("type") == "text" and block.get("text"):
+                    clock.mark("first_text")
+            elif kind == "content_block_delta":
+                delta = raw.get("delta") if isinstance(raw.get("delta"), dict) else {}
+                if delta.get("type") == "text_delta" and delta.get("text"):
+                    clock.mark("first_text")
+        elif typ == "assistant":
+            if any(b.get("text") for b in _blocks(ev, "text")):
+                clock.mark("first_text")
+            if _blocks(ev, "tool_use"):
+                clock.mark("first_tool")
+        elif typ == "result":
+            clock.mark("engine_done", last=True)
+            clock.cli_result(ev)
+
+    def tool_started(self, ev: dict, block: dict) -> None:
+        """The lead called a tool of its own (not a specialist: CrewEvents took those)."""
+        if self.clock is not None and not ev.get("parent_tool_use_id"):
+            self.clock.tool_start(block.get("id"))
+
+    def tool_ended(self, ev: dict, block: dict) -> None:
+        if self.clock is not None and not ev.get("parent_tool_use_id"):
+            self.clock.tool_end(block.get("tool_use_id"))
+
+
 class CrewEvents:
     """Crew progress lines from the stream-json events about sub-agents.
 
@@ -865,8 +934,8 @@ class CrewEvents:
 
     _OUTCOMES = {"completed": crew.DONE, "failed": crew.FAILED, "stopped": crew.STOPPED}
 
-    def __init__(self, on_progress: Callable[[str], None]):
-        self.progress = crew.Progress(on_progress)
+    def __init__(self, on_progress: Callable[[str], None], clock: Any = None):
+        self.progress = crew.Progress(on_progress, clock)
         self._tasks: dict[str, str] = {}  # background task id -> the Agent tool call that started it
 
     def started(self, ev: dict, block: dict) -> bool:

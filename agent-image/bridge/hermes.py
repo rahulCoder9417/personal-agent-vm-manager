@@ -354,7 +354,8 @@ class HermesClient:
         """
         instructions = f"{instructions}\n\n{crew.hermes_handoff(self.with_browser)}"
         deadline = time.monotonic() + timeout
-        progress = crew.Progress(on_progress)
+        clock = getattr(options, "clock", None)  # the turn's stage times (timings.TurnClock), or None
+        progress = crew.Progress(on_progress, clock)
         # The Hermes conversation of this turn's conversation of the chat; a new one for a new chat, and for a
         # conversation whose last turn failed (Conversations).
         epoch, key, moved = self.conversations.enter(session_key, getattr(options, "chat_epoch", None))
@@ -367,7 +368,7 @@ class HermesClient:
         draft = DraftText(on_text) if on_text is not None else None
         try:
             result, handed_over = self._run_once(text, instructions, key, idempotency_key, on_progress,
-                                                 progress, deadline, started, draft)
+                                                 progress, deadline, started, draft, clock)
             rounds = 0
             while result.status == "completed" and handed_over and rounds < MAX_CREW_ROUNDS:
                 if draft is not None:
@@ -378,7 +379,7 @@ class HermesClient:
                 rounds += 1
                 result, handed_over = self._run_once(CREW_FOLLOW_UP, instructions, key,
                                                      f"{idempotency_key}/crew{rounds}", on_progress, progress,
-                                                     deadline, started, draft)
+                                                     deadline, started, draft, clock)
         except Exception:
             if started:  # Hermes has the turn's message in its session: never continue that conversation
                 self._turn_failed(session_key, epoch, idempotency_key)
@@ -394,13 +395,20 @@ class HermesClient:
 
     def _run_once(self, text: str, instructions: str, session_key: str, idempotency_key: str, on_progress,
                   progress: crew.Progress, deadline: float,
-                  started: Optional[list] = None, draft: Optional[DraftText] = None) -> tuple[RunResult, bool]:
+                  started: Optional[list] = None, draft: Optional[DraftText] = None,
+                  clock: Any = None) -> tuple[RunResult, bool]:
         """One Hermes run. Returns (result, whether specialists are still working in the background).
         `session_key` is the conversation's X-Hermes-Session-Key; `started` gets the run id once Hermes has it;
-        `draft` gets the lead's words (None: no draft for this turn)."""
+        `draft` gets the lead's words (None: no draft for this turn); `clock` the turn's stage times (None: none):
+        engine_ready when Hermes created the run, the lead's first words and tool call, the time in its tools (the
+        hand-off to the crew is the crew's), engine_done when the run ended."""
         if draft is not None:
             draft.restart()  # a follow-up round writes a new answer
+        if clock is not None:
+            clock.run_started("hermes")
         run_id = self.start_run(text, instructions, session_key, idempotency_key)
+        if clock is not None:
+            clock.mark("engine_ready")
         if started is not None:
             started.append(run_id)
         children: set[str] = set()  # started and not yet finished
@@ -408,6 +416,8 @@ class HermesClient:
         try:
             for ev in self.events(run_id, timeout=max(deadline - time.monotonic(), 1)):
                 name = ev.get("event", "")
+                if clock is not None:
+                    _mark_hermes(clock, name, ev)
                 if name == "message.delta":
                     if draft is not None:
                         draft.delta(ev.get("delta"))
@@ -474,6 +484,23 @@ class HermesClient:
                     return True
             time.sleep(self.poll_interval)
         raise HermesError("the specialists did not finish in time")
+
+
+def _mark_hermes(clock: Any, name: str, ev: dict) -> None:
+    """The turn's stage times from one event of a Hermes run (HermesClient._run_once). A tool is known by its
+    call id when the event has one, else by its name; handing work to the crew is the crew's time, not a tool's."""
+    tool = str(ev.get("tool") or "")
+    key = str(ev.get("tool_call_id") or ev.get("call_id") or tool)
+    if name == "message.delta" and ev.get("delta"):
+        clock.mark("first_text")
+    elif name == "tool.started":
+        clock.mark("first_tool")
+        if tool != crew.HERMES_DELEGATE_TOOL:
+            clock.tool_start(key)
+    elif name == "tool.completed":
+        clock.tool_end(key)
+    elif name in TERMINAL_EVENTS:
+        clock.mark("engine_done", last=True)
 
 
 def _result(status: str, payload: dict) -> RunResult:

@@ -27,6 +27,7 @@ from typing import Any, Callable, Iterator, Optional, Protocol
 
 from . import crew
 from .jobs import CrewJob, JobFolders
+from .timings import TurnClock
 
 log = logging.getLogger("bridge.core")
 
@@ -86,6 +87,9 @@ class TurnOptions:
     # Set by the Bridge, not read from the metadata: for a crew job's turn, what the engine's process adds to its
     # environment (jobs.CrewJob.env), so everything started for the job is known as the job's and stopped after it.
     job_env: tuple[tuple[str, str], ...] = ()
+    # Set by the Bridge: the turn's stage times (timings.TurnClock), which the engine marks as it runs. Not part of
+    # what the delivery asked for, so it takes no part in comparing two options.
+    clock: Optional[TurnClock] = field(default=None, compare=False, repr=False)
 
     @classmethod
     def from_metadata(cls, meta: Any) -> "TurnOptions":
@@ -543,13 +547,14 @@ class Bridge:
         yield from turn.subscribe()
 
     def _run(self, req: DeliverRequest, turn: Turn, rec: Optional[dict]) -> None:
+        clock = TurnClock()  # where this delivery's time goes: reported on its last event
         try:
             turn.publish(event(ACCEPTED))
             output: Optional[str] = rec.get("output") if rec and rec.get("state") == "answered" else None
             if output is None:
                 attempts = int((rec or {}).get("attempts", 0)) + 1
                 self.store.put(req.delivery_id, state="running", attempts=attempts)
-                options = req.options()
+                options = replace(req.options(), clock=clock)
                 # A crew job: a folder of its own, and after the run, whatever happened, every process of the job
                 # stopped and the folder deleted (jobs.py).
                 job = req.crew_job() if self.jobs is not None else None
@@ -584,19 +589,20 @@ class Bridge:
                         fault = not reason.startswith("max_iterations")
                     message = getattr(result, "message", "") or f"the agent could not finish ({result.status})"
                     self.store.put(req.delivery_id, state="failed")
-                    self._end(req, turn, event(ERROR, message, platform_fault=fault))
+                    self._end(req, turn, event(ERROR, message, platform_fault=fault), clock)
                     return
                 output = result.output or ""
                 self.store.put(req.delivery_id, state="answered", output=output)
             if output.strip():
                 if not self._send(output, req.session_key):
-                    self._end(req, turn, event(ERROR, "could not deliver the reply", platform_fault=True))
+                    self._end(req, turn, event(ERROR, "could not deliver the reply", platform_fault=True), clock)
                     return
+                clock.mark("answer_sent")
             self.store.put(req.delivery_id, state="done", output=None)
-            self._end(req, turn, event(TURN_DONE))
+            self._end(req, turn, event(TURN_DONE), clock)
         except Exception as exc:  # noqa: BLE001 - every failure must end the stream
             log.exception("turn %s failed", req.delivery_id)
-            self._end(req, turn, event(ERROR, f"agent error: {type(exc).__name__}", platform_fault=True))
+            self._end(req, turn, event(ERROR, f"agent error: {type(exc).__name__}", platform_fault=True), clock)
         finally:
             with self._lock:
                 self._ending.discard(turn)
@@ -613,12 +619,18 @@ class Bridge:
         turn.publish(event(WORKING, f"{name}: {programs}deleted the job folder"
                            if done.get("removed") else f"{name}: {programs}cleaned up"))
 
-    def _end(self, req: DeliverRequest, turn: Turn, ev: dict) -> None:
-        """Publish a turn's last event, with the browser time to charge (when the browser was open)."""
+    def _end(self, req: DeliverRequest, turn: Turn, ev: dict, clock: Optional[TurnClock] = None) -> None:
+        """Publish a turn's last event, with the browser time to charge (when the browser was open) and the turn's
+        stage times (timings.py)."""
         try:
             ev.update(self._browser_report(req.delivery_id, turn))
         except Exception:  # noqa: BLE001 - the turn must end whatever the meter does
             log.exception("browser report for %s failed", req.delivery_id)
+        if clock is not None:
+            try:
+                ev["timings"] = clock.report()
+            except Exception:  # noqa: BLE001 - the turn must end whatever the clock does
+                log.exception("stage times for %s failed", req.delivery_id)
         turn.publish(ev)
 
     def _browser_report(self, delivery_id: str, turn: Turn) -> dict:

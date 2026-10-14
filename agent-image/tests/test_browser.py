@@ -21,7 +21,7 @@ import unittest
 from bridge import browser, browser_check, browser_mcp, crew
 from bridge.core import Bridge, DeliverRequest, DeliveryStore, Turn, browser_fields
 
-from tests.fakes import FakeRunner, FakeSender
+from tests.fakes import FakeRunner, FakeSender, without_timings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FAKE_SERVER = os.path.join(HERE, "fake_browser_server.py")
@@ -676,8 +676,8 @@ class BrowserTimeWithTheTurnTest(unittest.TestCase):
         meter = FakeMeter(73)
         events = list(self.bridge(meter).deliver(req()))
         self.assertEqual([e["type"] for e in events], ["accepted", "working", "turn_done"])
-        self.assertEqual(events[-1], {"type": "turn_done", "message": "", "platform_fault": False,
-                                      "browser_seconds": 73, "browser_report_id": "evt-1#1"})
+        self.assertEqual(without_timings(events[-1]), {"type": "turn_done", "message": "", "platform_fault": False,
+                                                       "browser_seconds": 73, "browser_report_id": "evt-1#1"})
         for ev in events[:-1]:
             self.assertNotIn("browser_seconds", ev)
         self.assertEqual(meter.calls, [True], "the only turn running: the browser is closed")
@@ -686,10 +686,12 @@ class BrowserTimeWithTheTurnTest(unittest.TestCase):
 
     def test_nothing_when_the_browser_never_started(self):
         events = list(self.bridge(FakeMeter(0)).deliver(req()))
-        self.assertEqual(events[-1], {"type": "turn_done", "message": "", "platform_fault": False})
+        self.assertEqual(without_timings(events[-1]),
+                         {"type": "turn_done", "message": "", "platform_fault": False})
         # And a container without the browser has no meter at all.
         events = list(self.bridge(None).deliver(req("evt-2")))
-        self.assertEqual(events[-1], {"type": "turn_done", "message": "", "platform_fault": False})
+        self.assertEqual(without_timings(events[-1]),
+                         {"type": "turn_done", "message": "", "platform_fault": False})
 
     def test_a_failed_turn_reports_what_it_used(self):
         self.runner.status = "failed"
@@ -717,7 +719,8 @@ class BrowserTimeWithTheTurnTest(unittest.TestCase):
         # The retry only sends the saved answer: no run, no browser, nothing new to report.
         self.sender.fail_times = 0
         events = list(bridge.deliver(req()))
-        self.assertEqual(events[-1], {"type": "turn_done", "message": "", "platform_fault": False})
+        self.assertEqual(without_timings(events[-1]),
+                         {"type": "turn_done", "message": "", "platform_fault": False})
         self.assertEqual(len(self.runner.calls), 1)
 
     def test_a_repeated_delivery_sends_the_same_report_again(self):
@@ -785,7 +788,8 @@ class BrowserTimeWithTheTurnTest(unittest.TestCase):
         meter = FakeMeter()
         meter.fail = True
         events = list(self.bridge(meter).deliver(req()))
-        self.assertEqual(events[-1], {"type": "turn_done", "message": "", "platform_fault": False})
+        self.assertEqual(without_timings(events[-1]),
+                         {"type": "turn_done", "message": "", "platform_fault": False})
         self.assertEqual(self.sender.sent, [("Hi! How can I help?", "telegram:42")])
 
     def test_saved_report_fields(self):
