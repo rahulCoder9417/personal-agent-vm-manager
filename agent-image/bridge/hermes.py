@@ -36,6 +36,9 @@ TERMINAL_EVENTS = {"run.completed", "run.failed", "run.cancelled", "run.interrup
 
 # The crew on Hermes: follow-up turns after specialists that ran in the background.
 MAX_CREW_ROUNDS = 3
+# After Hermes first reports no background work, it is asked again this soon (not after the full poll interval):
+# the second quiet answer is only there to catch a report that was still being stored.
+QUIET_RECHECK = 0.5
 CREW_FOLLOW_UP = ("[Crew update: the specialists you started have finished, and their reports are now in this "
                   "conversation. Use them to write the final answer for the user. Start another specialist only "
                   "if the job still needs one.]")
@@ -468,7 +471,9 @@ class HermesClient:
 
     def _wait_for_crew(self, deadline: float) -> bool:
         """Wait until the background specialists are done (two quiet checks in a row). False when
-        Hermes does not report it; HermesError when they are still working at the deadline."""
+        Hermes does not report it; HermesError when they are still working at the deadline. While they work,
+        Hermes is asked every poll_interval; after a first quiet answer the second check comes after
+        QUIET_RECHECK, so the answer is not held back a whole interval."""
         quiet = unknown = 0
         while time.monotonic() < deadline:
             work = self.background_work()
@@ -482,7 +487,7 @@ class HermesClient:
                 quiet = quiet + 1 if work == 0 else 0
                 if quiet >= 2:
                     return True
-            time.sleep(self.poll_interval)
+            time.sleep(min(self.poll_interval, QUIET_RECHECK) if quiet else self.poll_interval)
         raise HermesError("the specialists did not finish in time")
 
 
