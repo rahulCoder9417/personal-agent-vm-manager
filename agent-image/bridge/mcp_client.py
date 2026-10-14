@@ -22,12 +22,20 @@ class MCPError(Exception):
 
 
 class PlatformMCP:
+    """The answer of every turn goes through here, so the client does no more round trips than it must.
+
+    The platform's server is stateless (it gives no Mcp-Session-Id: every request is answered on its own), so
+    after one `initialize` per Bridge process the client calls the tool straight away: two round trips through
+    the egress proxy less per answer than initialising before every call. A server that does give a session id
+    keeps it; when it answers 404 to it (the session ended), the client initialises again once."""
+
     def __init__(self, url: str, token: str, timeout: float = 30):
         self.url = url
         self.token = token
         self.timeout = timeout
         self._ids = itertools.count(1)
         self._session: Optional[str] = None
+        self._ready = False  # initialised; with no session id, the server is stateless and that lasts
         self._lock = threading.Lock()
         self._opener = urllib.request.build_opener()  # env proxies apply
 
@@ -44,6 +52,7 @@ class PlatformMCP:
         except urllib.error.HTTPError as exc:
             if exc.code == 404 and self._session:
                 self._session = None  # session expired: caller re-initialises
+                self._ready = False
             raise MCPError(f"HTTP {exc.code}") from exc
         except OSError as exc:
             raise MCPError(str(exc)) from exc
@@ -76,18 +85,19 @@ class PlatformMCP:
         if not resp or "error" in resp:
             raise MCPError(f"initialize failed: {resp}")
         self._post({"jsonrpc": "2.0", "method": "notifications/initialized"}, expect_response=False)
+        self._ready = True
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> dict:
         with self._lock:
             for attempt in (1, 2):
-                if self._session is None:
+                if not self._ready:
                     self._initialize()
                 msg = {"jsonrpc": "2.0", "id": next(self._ids), "method": "tools/call",
                        "params": {"name": name, "arguments": arguments}}
                 try:
                     resp = self._post(msg)
                 except MCPError:
-                    if attempt == 1 and self._session is None:
+                    if attempt == 1 and not self._ready:
                         continue  # session expired; initialise again once
                     raise
                 if not resp:

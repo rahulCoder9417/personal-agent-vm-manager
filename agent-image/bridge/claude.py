@@ -370,6 +370,21 @@ def _chat_record(raw: dict) -> dict:
             "at": at if isinstance(at, (int, float)) and not isinstance(at, bool) else 0}
 
 
+def _write_if_changed(path: str, content: str) -> bool:
+    """Write a private file only when its content changes (False: it already held exactly this). The CLI's
+    tool-server and settings files are the same turn after turn, so most turns write nothing."""
+    try:
+        st = os.stat(path)
+        if st.st_mode & 0o777 == 0o600:
+            with open(path, encoding="utf-8") as fh:
+                if fh.read() == content:
+                    return False
+    except (OSError, UnicodeDecodeError):
+        pass
+    _write_private(path, content)
+    return True
+
+
 def _write_private(path: str, content: str) -> None:
     os.makedirs(os.path.dirname(path) or ".", mode=0o700, exist_ok=True)
     tmp = f"{path}.{secrets.token_hex(4)}.tmp"
@@ -544,9 +559,11 @@ class ClaudeRunner:
         os.makedirs(self.env["CLAUDE_CONFIG_DIR"], mode=0o700, exist_ok=True)
         if self.with_browser:
             browser.write_config(self.base_env, self.data_dir)
-        _write_private(self.mcp_path, json.dumps(render_mcp_config(pf, self.base_env, self.data_dir,
-                                                                   self.with_browser)))
-        _write_private(self.settings_path, json.dumps(render_settings()))
+        # Read by the CLI at its start: written when what they hold changed (a new token, the user's MCP servers),
+        # not at every turn.
+        _write_if_changed(self.mcp_path, json.dumps(render_mcp_config(pf, self.base_env, self.data_dir,
+                                                                      self.with_browser)))
+        _write_if_changed(self.settings_path, json.dumps(render_settings()))
         deadline = time.monotonic() + timeout
         redact = Redactor([pf.mcp_token, pf.bridge_secret, pf.litellm_key, *(s.auth_secret for s in pf.mcp_servers)],
                           text)
