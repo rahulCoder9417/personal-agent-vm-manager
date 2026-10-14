@@ -26,6 +26,25 @@ type Event struct {
 	Message       string
 	PlatformFault bool
 	At            time.Time
+	// Timings is the Bridge's report of where the turn's time went, on the last event only
+	// (TURN_DONE or ERROR): a JSON object, or "" when the Bridge sent none (see bridgeTimings).
+	Timings string
+}
+
+// MaxTimingsBytes is the largest stage-times report passed on; a bigger one is dropped.
+const MaxTimingsBytes = 16 * 1024
+
+// bridgeTimings is the Bridge's stage-times report as it is passed on: a JSON object of at most
+// MaxTimingsBytes, else "" (an older Bridge sends none; anything else is not passed on).
+func bridgeTimings(raw json.RawMessage) string {
+	if len(raw) == 0 || len(raw) > MaxTimingsBytes {
+		return ""
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
+		return ""
+	}
+	return string(raw)
 }
 
 // Deliver wakes the sandbox if needed, posts the message to the Bridge and
@@ -93,6 +112,13 @@ func (m *Manager) relay(parent context.Context, sb store.Sandbox, body bridge.De
 	defer cancel()
 	bg := context.WithoutCancel(parent)
 
+	emitEvent := func(ev Event) {
+		ev.At = m.clk.Now()
+		select {
+		case events <- ev:
+		case <-consumerGone:
+		}
+	}
 	emit := func(typ, msg string, fault bool) {
 		ev := Event{Type: typ, Message: msg, PlatformFault: fault, At: m.clk.Now()}
 		select {
@@ -169,12 +195,13 @@ func (m *Manager) relay(parent context.Context, sb store.Sandbox, body bridge.De
 			// a usage sync that follows the turn already sees it.
 			m.recordBrowser(bg, userID, body.DeliveryID, ev)
 			endTurn()
-			emit(ev.Type, ev.Message, false)
+			emitEvent(Event{Type: ev.Type, Message: ev.Message, Timings: bridgeTimings(ev.Timings)})
 			return
 		case bridge.EventError:
 			m.recordBrowser(bg, userID, body.DeliveryID, ev)
 			endTurn()
-			emit(ev.Type, ev.Message, ev.PlatformFault)
+			emitEvent(Event{Type: ev.Type, Message: ev.Message, PlatformFault: ev.PlatformFault,
+				Timings: bridgeTimings(ev.Timings)})
 			return
 		default:
 			m.log.Debug("ignoring unknown bridge event", "type", ev.Type)

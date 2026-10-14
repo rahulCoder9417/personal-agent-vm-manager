@@ -180,7 +180,7 @@ func (m *Manager) SetAgentRuntime(ctx context.Context, userID string, rt store.R
 		return store.Sandbox{}, err
 	}
 	if !sb.State.Running() {
-		if err := m.ensureContainerLocked(ctx, &sb); err != nil {
+		if err := m.ensureContainerLocked(ctx, &sb, nil); err != nil {
 			return store.Sandbox{}, err
 		}
 	}

@@ -125,7 +125,7 @@ func (m *Manager) SetEgressAllowlist(ctx context.Context, userID string, domains
 	// Update the MCP servers in the secrets file. A missing container is re-created
 	// (stopped) first so the file can be written; running containers are left as they are.
 	if !sb.State.Running() {
-		if err := m.ensureContainerLocked(ctx, &sb); err != nil {
+		if err := m.ensureContainerLocked(ctx, &sb, nil); err != nil {
 			return err
 		}
 	}
@@ -172,7 +172,7 @@ func (m *Manager) Snapshot(ctx context.Context, userID, destination string) (str
 		return "", 0, err
 	}
 	if !sb.State.Running() {
-		if err := m.ensureContainerLocked(ctx, &sb); err != nil {
+		if err := m.ensureContainerLocked(ctx, &sb, nil); err != nil {
 			return "", 0, err
 		}
 	}

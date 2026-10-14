@@ -31,7 +31,9 @@ func TestDeliverStreamsNDJSON(t *testing.T) {
 		for _, line := range []string{
 			`{"type":"accepted"}`, ``, `{"type":"working","message":"using tool"}`,
 			// The last event of a turn may carry the browser time, as the Bridge writes it.
-			`{"type":"turn_done","message":"","platform_fault":false,"browser_seconds":73,"browser_report_id":"d1#1"}`,
+			// ... and the Bridge's stage times.
+			`{"type":"turn_done","message":"","platform_fault":false,"browser_seconds":73,"browser_report_id":"d1#1",` +
+				`"timings":{"v":1,"marks":{"engine_ready":40}}}`,
 		} {
 			_, _ = fmt.Fprintln(w, line)
 			fl.Flush()
@@ -66,6 +68,9 @@ func TestDeliverStreamsNDJSON(t *testing.T) {
 	}
 	if last.BrowserSeconds != 73 || last.BrowserReportID != "d1#1" {
 		t.Fatalf("browser time on the last event: %+v", last)
+	}
+	if string(last.Timings) != `{"v":1,"marks":{"engine_ready":40}}` {
+		t.Fatalf("stage times on the last event: %s", last.Timings)
 	}
 	if got.DeliveryID != "d1" || got.Text != "hello" || got.Attachments == nil || string(got.Metadata) != "{}" {
 		t.Fatalf("request body: %+v", got)
