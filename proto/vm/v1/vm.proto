@@ -126,6 +126,25 @@ message WakeSandboxRequest {
 message WakeSandboxResponse {
   Sandbox sandbox = 1;
   bool was_stopped = 2;
+  // Where the wake's time went, for the backend's per-turn timings. All zero when the sandbox
+  // was already awake (apart from lock_wait_ms).
+  WakeTimings timings = 3;
+}
+
+// The parts of one WakeSandbox call, in milliseconds.
+message WakeTimings {
+  // Waiting for another operation on this user's sandbox to finish first (a health check, a stop).
+  int64 lock_wait_ms = 1;
+  // Finding room under the awake cap, including stopping another user's container politely.
+  int64 capacity_wait_ms = 2;
+  // Another user's container was stopped to make room (capacity_wait_ms holds that stop).
+  bool evicted = 3;
+  // The container was made again from the image first (new image, missing, browser switch changed).
+  bool recreated = 4;
+  // Making sure the container is right (re-creating it if needed) and starting it.
+  int64 container_start_ms = 5;
+  // From the start until the Bridge answered its ready check.
+  int64 bridge_ready_ms = 6;
 }
 
 enum DeliverKind {
@@ -184,6 +203,11 @@ message DeliverEvent {
   // For ERROR: true if caused by us (the turn is not charged).
   bool platform_fault = 3;
   int64 at_unix_ms = 4;
+  // On the last event (TURN_DONE or ERROR) when the Bridge reports where the turn's time went:
+  // a JSON object of stage times in milliseconds since the Bridge took the delivery (no message
+  // text). Empty from an older Bridge, and on a repeated delivery. Shape: README "Bridge contract",
+  // "Stage times".
+  string timings_json = 5;
 }
 
 message TouchRequest { string user_id = 1; }

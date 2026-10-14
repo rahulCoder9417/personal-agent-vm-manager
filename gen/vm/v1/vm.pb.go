@@ -707,9 +707,12 @@ func (x *WakeSandboxRequest) GetPriority() Priority {
 }
 
 type WakeSandboxResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Sandbox       *Sandbox               `protobuf:"bytes,1,opt,name=sandbox,proto3" json:"sandbox,omitempty"`
-	WasStopped    bool                   `protobuf:"varint,2,opt,name=was_stopped,json=wasStopped,proto3" json:"was_stopped,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	Sandbox    *Sandbox               `protobuf:"bytes,1,opt,name=sandbox,proto3" json:"sandbox,omitempty"`
+	WasStopped bool                   `protobuf:"varint,2,opt,name=was_stopped,json=wasStopped,proto3" json:"was_stopped,omitempty"`
+	// Where the wake's time went, for the backend's per-turn timings. All zero when the sandbox
+	// was already awake (apart from lock_wait_ms).
+	Timings       *WakeTimings `protobuf:"bytes,3,opt,name=timings,proto3" json:"timings,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -758,6 +761,104 @@ func (x *WakeSandboxResponse) GetWasStopped() bool {
 	return false
 }
 
+func (x *WakeSandboxResponse) GetTimings() *WakeTimings {
+	if x != nil {
+		return x.Timings
+	}
+	return nil
+}
+
+// The parts of one WakeSandbox call, in milliseconds.
+type WakeTimings struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Waiting for another operation on this user's sandbox to finish first (a health check, a stop).
+	LockWaitMs int64 `protobuf:"varint,1,opt,name=lock_wait_ms,json=lockWaitMs,proto3" json:"lock_wait_ms,omitempty"`
+	// Finding room under the awake cap, including stopping another user's container politely.
+	CapacityWaitMs int64 `protobuf:"varint,2,opt,name=capacity_wait_ms,json=capacityWaitMs,proto3" json:"capacity_wait_ms,omitempty"`
+	// Another user's container was stopped to make room (capacity_wait_ms holds that stop).
+	Evicted bool `protobuf:"varint,3,opt,name=evicted,proto3" json:"evicted,omitempty"`
+	// The container was made again from the image first (new image, missing, browser switch changed).
+	Recreated bool `protobuf:"varint,4,opt,name=recreated,proto3" json:"recreated,omitempty"`
+	// Making sure the container is right (re-creating it if needed) and starting it.
+	ContainerStartMs int64 `protobuf:"varint,5,opt,name=container_start_ms,json=containerStartMs,proto3" json:"container_start_ms,omitempty"`
+	// From the start until the Bridge answered its ready check.
+	BridgeReadyMs int64 `protobuf:"varint,6,opt,name=bridge_ready_ms,json=bridgeReadyMs,proto3" json:"bridge_ready_ms,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WakeTimings) Reset() {
+	*x = WakeTimings{}
+	mi := &file_vm_v1_vm_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WakeTimings) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WakeTimings) ProtoMessage() {}
+
+func (x *WakeTimings) ProtoReflect() protoreflect.Message {
+	mi := &file_vm_v1_vm_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WakeTimings.ProtoReflect.Descriptor instead.
+func (*WakeTimings) Descriptor() ([]byte, []int) {
+	return file_vm_v1_vm_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *WakeTimings) GetLockWaitMs() int64 {
+	if x != nil {
+		return x.LockWaitMs
+	}
+	return 0
+}
+
+func (x *WakeTimings) GetCapacityWaitMs() int64 {
+	if x != nil {
+		return x.CapacityWaitMs
+	}
+	return 0
+}
+
+func (x *WakeTimings) GetEvicted() bool {
+	if x != nil {
+		return x.Evicted
+	}
+	return false
+}
+
+func (x *WakeTimings) GetRecreated() bool {
+	if x != nil {
+		return x.Recreated
+	}
+	return false
+}
+
+func (x *WakeTimings) GetContainerStartMs() int64 {
+	if x != nil {
+		return x.ContainerStartMs
+	}
+	return 0
+}
+
+func (x *WakeTimings) GetBridgeReadyMs() int64 {
+	if x != nil {
+		return x.BridgeReadyMs
+	}
+	return 0
+}
+
 type Attachment struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
 	Id       string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
@@ -771,7 +872,7 @@ type Attachment struct {
 
 func (x *Attachment) Reset() {
 	*x = Attachment{}
-	mi := &file_vm_v1_vm_proto_msgTypes[6]
+	mi := &file_vm_v1_vm_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -783,7 +884,7 @@ func (x *Attachment) String() string {
 func (*Attachment) ProtoMessage() {}
 
 func (x *Attachment) ProtoReflect() protoreflect.Message {
-	mi := &file_vm_v1_vm_proto_msgTypes[6]
+	mi := &file_vm_v1_vm_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -796,7 +897,7 @@ func (x *Attachment) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Attachment.ProtoReflect.Descriptor instead.
 func (*Attachment) Descriptor() ([]byte, []int) {
-	return file_vm_v1_vm_proto_rawDescGZIP(), []int{6}
+	return file_vm_v1_vm_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *Attachment) GetId() string {
@@ -851,7 +952,7 @@ type DeliverRequest struct {
 
 func (x *DeliverRequest) Reset() {
 	*x = DeliverRequest{}
-	mi := &file_vm_v1_vm_proto_msgTypes[7]
+	mi := &file_vm_v1_vm_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -863,7 +964,7 @@ func (x *DeliverRequest) String() string {
 func (*DeliverRequest) ProtoMessage() {}
 
 func (x *DeliverRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vm_v1_vm_proto_msgTypes[7]
+	mi := &file_vm_v1_vm_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -876,7 +977,7 @@ func (x *DeliverRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeliverRequest.ProtoReflect.Descriptor instead.
 func (*DeliverRequest) Descriptor() ([]byte, []int) {
-	return file_vm_v1_vm_proto_rawDescGZIP(), []int{7}
+	return file_vm_v1_vm_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *DeliverRequest) GetUserId() string {
@@ -964,13 +1065,18 @@ type DeliverEvent struct {
 	// For ERROR: true if caused by us (the turn is not charged).
 	PlatformFault bool  `protobuf:"varint,3,opt,name=platform_fault,json=platformFault,proto3" json:"platform_fault,omitempty"`
 	AtUnixMs      int64 `protobuf:"varint,4,opt,name=at_unix_ms,json=atUnixMs,proto3" json:"at_unix_ms,omitempty"`
+	// On the last event (TURN_DONE or ERROR) when the Bridge reports where the turn's time went:
+	// a JSON object of stage times in milliseconds since the Bridge took the delivery (no message
+	// text). Empty from an older Bridge, and on a repeated delivery. Shape: README "Bridge contract",
+	// "Stage times".
+	TimingsJson   string `protobuf:"bytes,5,opt,name=timings_json,json=timingsJson,proto3" json:"timings_json,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *DeliverEvent) Reset() {
 	*x = DeliverEvent{}
-	mi := &file_vm_v1_vm_proto_msgTypes[8]
+	mi := &file_vm_v1_vm_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -982,7 +1088,7 @@ func (x *DeliverEvent) String() string {
 func (*DeliverEvent) ProtoMessage() {}
 
 func (x *DeliverEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_vm_v1_vm_proto_msgTypes[8]
+	mi := &file_vm_v1_vm_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -995,7 +1101,7 @@ func (x *DeliverEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeliverEvent.ProtoReflect.Descriptor instead.
 func (*DeliverEvent) Descriptor() ([]byte, []int) {
-	return file_vm_v1_vm_proto_rawDescGZIP(), []int{8}
+	return file_vm_v1_vm_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *DeliverEvent) GetType() DeliverEventType {
@@ -1026,6 +1132,13 @@ func (x *DeliverEvent) GetAtUnixMs() int64 {
 	return 0
 }
 
+func (x *DeliverEvent) GetTimingsJson() string {
+	if x != nil {
+		return x.TimingsJson
+	}
+	return ""
+}
+
 type TouchRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	UserId        string                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
@@ -1035,7 +1148,7 @@ type TouchRequest struct {
 
 func (x *TouchRequest) Reset() {
 	*x = TouchRequest{}
-	mi := &file_vm_v1_vm_proto_msgTypes[9]
+	mi := &file_vm_v1_vm_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1047,7 +1160,7 @@ func (x *TouchRequest) String() string {
 func (*TouchRequest) ProtoMessage() {}
 
 func (x *TouchRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vm_v1_vm_proto_msgTypes[9]
+	mi := &file_vm_v1_vm_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1060,7 +1173,7 @@ func (x *TouchRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TouchRequest.ProtoReflect.Descriptor instead.
 func (*TouchRequest) Descriptor() ([]byte, []int) {
-	return file_vm_v1_vm_proto_rawDescGZIP(), []int{9}
+	return file_vm_v1_vm_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *TouchRequest) GetUserId() string {
@@ -1078,7 +1191,7 @@ type TouchResponse struct {
 
 func (x *TouchResponse) Reset() {
 	*x = TouchResponse{}
-	mi := &file_vm_v1_vm_proto_msgTypes[10]
+	mi := &file_vm_v1_vm_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1090,7 +1203,7 @@ func (x *TouchResponse) String() string {
 func (*TouchResponse) ProtoMessage() {}
 
 func (x *TouchResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vm_v1_vm_proto_msgTypes[10]
+	mi := &file_vm_v1_vm_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1103,7 +1216,7 @@ func (x *TouchResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TouchResponse.ProtoReflect.Descriptor instead.
 func (*TouchResponse) Descriptor() ([]byte, []int) {
-	return file_vm_v1_vm_proto_rawDescGZIP(), []int{10}
+	return file_vm_v1_vm_proto_rawDescGZIP(), []int{11}
 }
 
 type StopSandboxRequest struct {
@@ -1117,7 +1230,7 @@ type StopSandboxRequest struct {
 
 func (x *StopSandboxRequest) Reset() {
 	*x = StopSandboxRequest{}
-	mi := &file_vm_v1_vm_proto_msgTypes[11]
+	mi := &file_vm_v1_vm_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1129,7 +1242,7 @@ func (x *StopSandboxRequest) String() string {
 func (*StopSandboxRequest) ProtoMessage() {}
 
 func (x *StopSandboxRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vm_v1_vm_proto_msgTypes[11]
+	mi := &file_vm_v1_vm_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1142,7 +1255,7 @@ func (x *StopSandboxRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StopSandboxRequest.ProtoReflect.Descriptor instead.
 func (*StopSandboxRequest) Descriptor() ([]byte, []int) {
-	return file_vm_v1_vm_proto_rawDescGZIP(), []int{11}
+	return file_vm_v1_vm_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *StopSandboxRequest) GetUserId() string {
@@ -1175,7 +1288,7 @@ type StopSandboxResponse struct {
 
 func (x *StopSandboxResponse) Reset() {
 	*x = StopSandboxResponse{}
-	mi := &file_vm_v1_vm_proto_msgTypes[12]
+	mi := &file_vm_v1_vm_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1187,7 +1300,7 @@ func (x *StopSandboxResponse) String() string {
 func (*StopSandboxResponse) ProtoMessage() {}
 
 func (x *StopSandboxResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vm_v1_vm_proto_msgTypes[12]
+	mi := &file_vm_v1_vm_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1200,7 +1313,7 @@ func (x *StopSandboxResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StopSandboxResponse.ProtoReflect.Descriptor instead.
 func (*StopSandboxResponse) Descriptor() ([]byte, []int) {
-	return file_vm_v1_vm_proto_rawDescGZIP(), []int{12}
+	return file_vm_v1_vm_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *StopSandboxResponse) GetSandbox() *Sandbox {
@@ -1219,7 +1332,7 @@ type DeleteSandboxRequest struct {
 
 func (x *DeleteSandboxRequest) Reset() {
 	*x = DeleteSandboxRequest{}
-	mi := &file_vm_v1_vm_proto_msgTypes[13]
+	mi := &file_vm_v1_vm_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1231,7 +1344,7 @@ func (x *DeleteSandboxRequest) String() string {
 func (*DeleteSandboxRequest) ProtoMessage() {}
 
 func (x *DeleteSandboxRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vm_v1_vm_proto_msgTypes[13]
+	mi := &file_vm_v1_vm_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1244,7 +1357,7 @@ func (x *DeleteSandboxRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteSandboxRequest.ProtoReflect.Descriptor instead.
 func (*DeleteSandboxRequest) Descriptor() ([]byte, []int) {
-	return file_vm_v1_vm_proto_rawDescGZIP(), []int{13}
+	return file_vm_v1_vm_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *DeleteSandboxRequest) GetUserId() string {
@@ -1262,7 +1375,7 @@ type DeleteSandboxResponse struct {
 
 func (x *DeleteSandboxResponse) Reset() {
 	*x = DeleteSandboxResponse{}
-	mi := &file_vm_v1_vm_proto_msgTypes[14]
+	mi := &file_vm_v1_vm_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1274,7 +1387,7 @@ func (x *DeleteSandboxResponse) String() string {
 func (*DeleteSandboxResponse) ProtoMessage() {}
 
 func (x *DeleteSandboxResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vm_v1_vm_proto_msgTypes[14]
+	mi := &file_vm_v1_vm_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1287,7 +1400,7 @@ func (x *DeleteSandboxResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteSandboxResponse.ProtoReflect.Descriptor instead.
 func (*DeleteSandboxResponse) Descriptor() ([]byte, []int) {
-	return file_vm_v1_vm_proto_rawDescGZIP(), []int{14}
+	return file_vm_v1_vm_proto_rawDescGZIP(), []int{15}
 }
 
 type GetSandboxRequest struct {
@@ -1299,7 +1412,7 @@ type GetSandboxRequest struct {
 
 func (x *GetSandboxRequest) Reset() {
 	*x = GetSandboxRequest{}
-	mi := &file_vm_v1_vm_proto_msgTypes[15]
+	mi := &file_vm_v1_vm_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1311,7 +1424,7 @@ func (x *GetSandboxRequest) String() string {
 func (*GetSandboxRequest) ProtoMessage() {}
 
 func (x *GetSandboxRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vm_v1_vm_proto_msgTypes[15]
+	mi := &file_vm_v1_vm_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1324,7 +1437,7 @@ func (x *GetSandboxRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetSandboxRequest.ProtoReflect.Descriptor instead.
 func (*GetSandboxRequest) Descriptor() ([]byte, []int) {
-	return file_vm_v1_vm_proto_rawDescGZIP(), []int{15}
+	return file_vm_v1_vm_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *GetSandboxRequest) GetUserId() string {
@@ -1344,7 +1457,7 @@ type ListSandboxesRequest struct {
 
 func (x *ListSandboxesRequest) Reset() {
 	*x = ListSandboxesRequest{}
-	mi := &file_vm_v1_vm_proto_msgTypes[16]
+	mi := &file_vm_v1_vm_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1356,7 +1469,7 @@ func (x *ListSandboxesRequest) String() string {
 func (*ListSandboxesRequest) ProtoMessage() {}
 
 func (x *ListSandboxesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vm_v1_vm_proto_msgTypes[16]
+	mi := &file_vm_v1_vm_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1369,7 +1482,7 @@ func (x *ListSandboxesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListSandboxesRequest.ProtoReflect.Descriptor instead.
 func (*ListSandboxesRequest) Descriptor() ([]byte, []int) {
-	return file_vm_v1_vm_proto_rawDescGZIP(), []int{16}
+	return file_vm_v1_vm_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *ListSandboxesRequest) GetStates() []SandboxState {
@@ -1388,7 +1501,7 @@ type ListSandboxesResponse struct {
 
 func (x *ListSandboxesResponse) Reset() {
 	*x = ListSandboxesResponse{}
-	mi := &file_vm_v1_vm_proto_msgTypes[17]
+	mi := &file_vm_v1_vm_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1400,7 +1513,7 @@ func (x *ListSandboxesResponse) String() string {
 func (*ListSandboxesResponse) ProtoMessage() {}
 
 func (x *ListSandboxesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vm_v1_vm_proto_msgTypes[17]
+	mi := &file_vm_v1_vm_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1413,7 +1526,7 @@ func (x *ListSandboxesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListSandboxesResponse.ProtoReflect.Descriptor instead.
 func (*ListSandboxesResponse) Descriptor() ([]byte, []int) {
-	return file_vm_v1_vm_proto_rawDescGZIP(), []int{17}
+	return file_vm_v1_vm_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *ListSandboxesResponse) GetSandboxes() []*Sandbox {
@@ -1435,7 +1548,7 @@ type GetUsageRequest struct {
 
 func (x *GetUsageRequest) Reset() {
 	*x = GetUsageRequest{}
-	mi := &file_vm_v1_vm_proto_msgTypes[18]
+	mi := &file_vm_v1_vm_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1447,7 +1560,7 @@ func (x *GetUsageRequest) String() string {
 func (*GetUsageRequest) ProtoMessage() {}
 
 func (x *GetUsageRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vm_v1_vm_proto_msgTypes[18]
+	mi := &file_vm_v1_vm_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1460,7 +1573,7 @@ func (x *GetUsageRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetUsageRequest.ProtoReflect.Descriptor instead.
 func (*GetUsageRequest) Descriptor() ([]byte, []int) {
-	return file_vm_v1_vm_proto_rawDescGZIP(), []int{18}
+	return file_vm_v1_vm_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *GetUsageRequest) GetSinceUnixMs() int64 {
@@ -1498,7 +1611,7 @@ type UserUsage struct {
 
 func (x *UserUsage) Reset() {
 	*x = UserUsage{}
-	mi := &file_vm_v1_vm_proto_msgTypes[19]
+	mi := &file_vm_v1_vm_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1510,7 +1623,7 @@ func (x *UserUsage) String() string {
 func (*UserUsage) ProtoMessage() {}
 
 func (x *UserUsage) ProtoReflect() protoreflect.Message {
-	mi := &file_vm_v1_vm_proto_msgTypes[19]
+	mi := &file_vm_v1_vm_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1523,7 +1636,7 @@ func (x *UserUsage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UserUsage.ProtoReflect.Descriptor instead.
 func (*UserUsage) Descriptor() ([]byte, []int) {
-	return file_vm_v1_vm_proto_rawDescGZIP(), []int{19}
+	return file_vm_v1_vm_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *UserUsage) GetUserId() string {
@@ -1556,7 +1669,7 @@ type GetUsageResponse struct {
 
 func (x *GetUsageResponse) Reset() {
 	*x = GetUsageResponse{}
-	mi := &file_vm_v1_vm_proto_msgTypes[20]
+	mi := &file_vm_v1_vm_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1568,7 +1681,7 @@ func (x *GetUsageResponse) String() string {
 func (*GetUsageResponse) ProtoMessage() {}
 
 func (x *GetUsageResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vm_v1_vm_proto_msgTypes[20]
+	mi := &file_vm_v1_vm_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1581,7 +1694,7 @@ func (x *GetUsageResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetUsageResponse.ProtoReflect.Descriptor instead.
 func (*GetUsageResponse) Descriptor() ([]byte, []int) {
-	return file_vm_v1_vm_proto_rawDescGZIP(), []int{20}
+	return file_vm_v1_vm_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *GetUsageResponse) GetUsage() []*UserUsage {
@@ -1603,7 +1716,7 @@ type SetEgressAllowlistRequest struct {
 
 func (x *SetEgressAllowlistRequest) Reset() {
 	*x = SetEgressAllowlistRequest{}
-	mi := &file_vm_v1_vm_proto_msgTypes[21]
+	mi := &file_vm_v1_vm_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1615,7 +1728,7 @@ func (x *SetEgressAllowlistRequest) String() string {
 func (*SetEgressAllowlistRequest) ProtoMessage() {}
 
 func (x *SetEgressAllowlistRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vm_v1_vm_proto_msgTypes[21]
+	mi := &file_vm_v1_vm_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1628,7 +1741,7 @@ func (x *SetEgressAllowlistRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetEgressAllowlistRequest.ProtoReflect.Descriptor instead.
 func (*SetEgressAllowlistRequest) Descriptor() ([]byte, []int) {
-	return file_vm_v1_vm_proto_rawDescGZIP(), []int{21}
+	return file_vm_v1_vm_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *SetEgressAllowlistRequest) GetUserId() string {
@@ -1660,7 +1773,7 @@ type SetEgressAllowlistResponse struct {
 
 func (x *SetEgressAllowlistResponse) Reset() {
 	*x = SetEgressAllowlistResponse{}
-	mi := &file_vm_v1_vm_proto_msgTypes[22]
+	mi := &file_vm_v1_vm_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1672,7 +1785,7 @@ func (x *SetEgressAllowlistResponse) String() string {
 func (*SetEgressAllowlistResponse) ProtoMessage() {}
 
 func (x *SetEgressAllowlistResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vm_v1_vm_proto_msgTypes[22]
+	mi := &file_vm_v1_vm_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1685,7 +1798,7 @@ func (x *SetEgressAllowlistResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetEgressAllowlistResponse.ProtoReflect.Descriptor instead.
 func (*SetEgressAllowlistResponse) Descriptor() ([]byte, []int) {
-	return file_vm_v1_vm_proto_rawDescGZIP(), []int{22}
+	return file_vm_v1_vm_proto_rawDescGZIP(), []int{23}
 }
 
 type SnapshotVolumeRequest struct {
@@ -1699,7 +1812,7 @@ type SnapshotVolumeRequest struct {
 
 func (x *SnapshotVolumeRequest) Reset() {
 	*x = SnapshotVolumeRequest{}
-	mi := &file_vm_v1_vm_proto_msgTypes[23]
+	mi := &file_vm_v1_vm_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1711,7 +1824,7 @@ func (x *SnapshotVolumeRequest) String() string {
 func (*SnapshotVolumeRequest) ProtoMessage() {}
 
 func (x *SnapshotVolumeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vm_v1_vm_proto_msgTypes[23]
+	mi := &file_vm_v1_vm_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1724,7 +1837,7 @@ func (x *SnapshotVolumeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SnapshotVolumeRequest.ProtoReflect.Descriptor instead.
 func (*SnapshotVolumeRequest) Descriptor() ([]byte, []int) {
-	return file_vm_v1_vm_proto_rawDescGZIP(), []int{23}
+	return file_vm_v1_vm_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *SnapshotVolumeRequest) GetUserId() string {
@@ -1751,7 +1864,7 @@ type SnapshotVolumeResponse struct {
 
 func (x *SnapshotVolumeResponse) Reset() {
 	*x = SnapshotVolumeResponse{}
-	mi := &file_vm_v1_vm_proto_msgTypes[24]
+	mi := &file_vm_v1_vm_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1763,7 +1876,7 @@ func (x *SnapshotVolumeResponse) String() string {
 func (*SnapshotVolumeResponse) ProtoMessage() {}
 
 func (x *SnapshotVolumeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vm_v1_vm_proto_msgTypes[24]
+	mi := &file_vm_v1_vm_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1776,7 +1889,7 @@ func (x *SnapshotVolumeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SnapshotVolumeResponse.ProtoReflect.Descriptor instead.
 func (*SnapshotVolumeResponse) Descriptor() ([]byte, []int) {
-	return file_vm_v1_vm_proto_rawDescGZIP(), []int{24}
+	return file_vm_v1_vm_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *SnapshotVolumeResponse) GetLocation() string {
@@ -1803,7 +1916,7 @@ type SetAgentRuntimeRequest struct {
 
 func (x *SetAgentRuntimeRequest) Reset() {
 	*x = SetAgentRuntimeRequest{}
-	mi := &file_vm_v1_vm_proto_msgTypes[25]
+	mi := &file_vm_v1_vm_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1815,7 +1928,7 @@ func (x *SetAgentRuntimeRequest) String() string {
 func (*SetAgentRuntimeRequest) ProtoMessage() {}
 
 func (x *SetAgentRuntimeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vm_v1_vm_proto_msgTypes[25]
+	mi := &file_vm_v1_vm_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1828,7 +1941,7 @@ func (x *SetAgentRuntimeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetAgentRuntimeRequest.ProtoReflect.Descriptor instead.
 func (*SetAgentRuntimeRequest) Descriptor() ([]byte, []int) {
-	return file_vm_v1_vm_proto_rawDescGZIP(), []int{25}
+	return file_vm_v1_vm_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *SetAgentRuntimeRequest) GetUserId() string {
@@ -1854,7 +1967,7 @@ type SetAgentRuntimeResponse struct {
 
 func (x *SetAgentRuntimeResponse) Reset() {
 	*x = SetAgentRuntimeResponse{}
-	mi := &file_vm_v1_vm_proto_msgTypes[26]
+	mi := &file_vm_v1_vm_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1866,7 +1979,7 @@ func (x *SetAgentRuntimeResponse) String() string {
 func (*SetAgentRuntimeResponse) ProtoMessage() {}
 
 func (x *SetAgentRuntimeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vm_v1_vm_proto_msgTypes[26]
+	mi := &file_vm_v1_vm_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1879,7 +1992,7 @@ func (x *SetAgentRuntimeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetAgentRuntimeResponse.ProtoReflect.Descriptor instead.
 func (*SetAgentRuntimeResponse) Descriptor() ([]byte, []int) {
-	return file_vm_v1_vm_proto_rawDescGZIP(), []int{26}
+	return file_vm_v1_vm_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *SetAgentRuntimeResponse) GetSandbox() *Sandbox {
@@ -1898,7 +2011,7 @@ type StartClaudeLoginRequest struct {
 
 func (x *StartClaudeLoginRequest) Reset() {
 	*x = StartClaudeLoginRequest{}
-	mi := &file_vm_v1_vm_proto_msgTypes[27]
+	mi := &file_vm_v1_vm_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1910,7 +2023,7 @@ func (x *StartClaudeLoginRequest) String() string {
 func (*StartClaudeLoginRequest) ProtoMessage() {}
 
 func (x *StartClaudeLoginRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vm_v1_vm_proto_msgTypes[27]
+	mi := &file_vm_v1_vm_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1923,7 +2036,7 @@ func (x *StartClaudeLoginRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartClaudeLoginRequest.ProtoReflect.Descriptor instead.
 func (*StartClaudeLoginRequest) Descriptor() ([]byte, []int) {
-	return file_vm_v1_vm_proto_rawDescGZIP(), []int{27}
+	return file_vm_v1_vm_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *StartClaudeLoginRequest) GetUserId() string {
@@ -1944,7 +2057,7 @@ type StartClaudeLoginResponse struct {
 
 func (x *StartClaudeLoginResponse) Reset() {
 	*x = StartClaudeLoginResponse{}
-	mi := &file_vm_v1_vm_proto_msgTypes[28]
+	mi := &file_vm_v1_vm_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1956,7 +2069,7 @@ func (x *StartClaudeLoginResponse) String() string {
 func (*StartClaudeLoginResponse) ProtoMessage() {}
 
 func (x *StartClaudeLoginResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vm_v1_vm_proto_msgTypes[28]
+	mi := &file_vm_v1_vm_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1969,7 +2082,7 @@ func (x *StartClaudeLoginResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartClaudeLoginResponse.ProtoReflect.Descriptor instead.
 func (*StartClaudeLoginResponse) Descriptor() ([]byte, []int) {
-	return file_vm_v1_vm_proto_rawDescGZIP(), []int{28}
+	return file_vm_v1_vm_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *StartClaudeLoginResponse) GetLoginId() string {
@@ -2005,7 +2118,7 @@ type CompleteClaudeLoginRequest struct {
 
 func (x *CompleteClaudeLoginRequest) Reset() {
 	*x = CompleteClaudeLoginRequest{}
-	mi := &file_vm_v1_vm_proto_msgTypes[29]
+	mi := &file_vm_v1_vm_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2017,7 +2130,7 @@ func (x *CompleteClaudeLoginRequest) String() string {
 func (*CompleteClaudeLoginRequest) ProtoMessage() {}
 
 func (x *CompleteClaudeLoginRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vm_v1_vm_proto_msgTypes[29]
+	mi := &file_vm_v1_vm_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2030,7 +2143,7 @@ func (x *CompleteClaudeLoginRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CompleteClaudeLoginRequest.ProtoReflect.Descriptor instead.
 func (*CompleteClaudeLoginRequest) Descriptor() ([]byte, []int) {
-	return file_vm_v1_vm_proto_rawDescGZIP(), []int{29}
+	return file_vm_v1_vm_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *CompleteClaudeLoginRequest) GetUserId() string {
@@ -2065,7 +2178,7 @@ type CompleteClaudeLoginResponse struct {
 
 func (x *CompleteClaudeLoginResponse) Reset() {
 	*x = CompleteClaudeLoginResponse{}
-	mi := &file_vm_v1_vm_proto_msgTypes[30]
+	mi := &file_vm_v1_vm_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2077,7 +2190,7 @@ func (x *CompleteClaudeLoginResponse) String() string {
 func (*CompleteClaudeLoginResponse) ProtoMessage() {}
 
 func (x *CompleteClaudeLoginResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vm_v1_vm_proto_msgTypes[30]
+	mi := &file_vm_v1_vm_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2090,7 +2203,7 @@ func (x *CompleteClaudeLoginResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CompleteClaudeLoginResponse.ProtoReflect.Descriptor instead.
 func (*CompleteClaudeLoginResponse) Descriptor() ([]byte, []int) {
-	return file_vm_v1_vm_proto_rawDescGZIP(), []int{30}
+	return file_vm_v1_vm_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *CompleteClaudeLoginResponse) GetConnected() bool {
@@ -2116,7 +2229,7 @@ type ClaudeLogoutRequest struct {
 
 func (x *ClaudeLogoutRequest) Reset() {
 	*x = ClaudeLogoutRequest{}
-	mi := &file_vm_v1_vm_proto_msgTypes[31]
+	mi := &file_vm_v1_vm_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2128,7 +2241,7 @@ func (x *ClaudeLogoutRequest) String() string {
 func (*ClaudeLogoutRequest) ProtoMessage() {}
 
 func (x *ClaudeLogoutRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vm_v1_vm_proto_msgTypes[31]
+	mi := &file_vm_v1_vm_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2141,7 +2254,7 @@ func (x *ClaudeLogoutRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClaudeLogoutRequest.ProtoReflect.Descriptor instead.
 func (*ClaudeLogoutRequest) Descriptor() ([]byte, []int) {
-	return file_vm_v1_vm_proto_rawDescGZIP(), []int{31}
+	return file_vm_v1_vm_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *ClaudeLogoutRequest) GetUserId() string {
@@ -2159,7 +2272,7 @@ type ClaudeLogoutResponse struct {
 
 func (x *ClaudeLogoutResponse) Reset() {
 	*x = ClaudeLogoutResponse{}
-	mi := &file_vm_v1_vm_proto_msgTypes[32]
+	mi := &file_vm_v1_vm_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2171,7 +2284,7 @@ func (x *ClaudeLogoutResponse) String() string {
 func (*ClaudeLogoutResponse) ProtoMessage() {}
 
 func (x *ClaudeLogoutResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vm_v1_vm_proto_msgTypes[32]
+	mi := &file_vm_v1_vm_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2184,7 +2297,7 @@ func (x *ClaudeLogoutResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClaudeLogoutResponse.ProtoReflect.Descriptor instead.
 func (*ClaudeLogoutResponse) Descriptor() ([]byte, []int) {
-	return file_vm_v1_vm_proto_rawDescGZIP(), []int{32}
+	return file_vm_v1_vm_proto_rawDescGZIP(), []int{33}
 }
 
 type SetBrowserRequest struct {
@@ -2197,7 +2310,7 @@ type SetBrowserRequest struct {
 
 func (x *SetBrowserRequest) Reset() {
 	*x = SetBrowserRequest{}
-	mi := &file_vm_v1_vm_proto_msgTypes[33]
+	mi := &file_vm_v1_vm_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2209,7 +2322,7 @@ func (x *SetBrowserRequest) String() string {
 func (*SetBrowserRequest) ProtoMessage() {}
 
 func (x *SetBrowserRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_vm_v1_vm_proto_msgTypes[33]
+	mi := &file_vm_v1_vm_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2222,7 +2335,7 @@ func (x *SetBrowserRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetBrowserRequest.ProtoReflect.Descriptor instead.
 func (*SetBrowserRequest) Descriptor() ([]byte, []int) {
-	return file_vm_v1_vm_proto_rawDescGZIP(), []int{33}
+	return file_vm_v1_vm_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *SetBrowserRequest) GetUserId() string {
@@ -2248,7 +2361,7 @@ type SetBrowserResponse struct {
 
 func (x *SetBrowserResponse) Reset() {
 	*x = SetBrowserResponse{}
-	mi := &file_vm_v1_vm_proto_msgTypes[34]
+	mi := &file_vm_v1_vm_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2260,7 +2373,7 @@ func (x *SetBrowserResponse) String() string {
 func (*SetBrowserResponse) ProtoMessage() {}
 
 func (x *SetBrowserResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_vm_v1_vm_proto_msgTypes[34]
+	mi := &file_vm_v1_vm_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2273,7 +2386,7 @@ func (x *SetBrowserResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetBrowserResponse.ProtoReflect.Descriptor instead.
 func (*SetBrowserResponse) Descriptor() ([]byte, []int) {
-	return file_vm_v1_vm_proto_rawDescGZIP(), []int{34}
+	return file_vm_v1_vm_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *SetBrowserResponse) GetSandbox() *Sandbox {
@@ -2323,11 +2436,20 @@ const file_vm_v1_vm_proto_rawDesc = "" +
 	"\x0emcp_token_hash\x18\x02 \x01(\tR\fmcpTokenHash\"Z\n" +
 	"\x12WakeSandboxRequest\x12\x17\n" +
 	"\auser_id\x18\x01 \x01(\tR\x06userId\x12+\n" +
-	"\bpriority\x18\x02 \x01(\x0e2\x0f.vm.v1.PriorityR\bpriority\"`\n" +
+	"\bpriority\x18\x02 \x01(\x0e2\x0f.vm.v1.PriorityR\bpriority\"\x8e\x01\n" +
 	"\x13WakeSandboxResponse\x12(\n" +
 	"\asandbox\x18\x01 \x01(\v2\x0e.vm.v1.SandboxR\asandbox\x12\x1f\n" +
 	"\vwas_stopped\x18\x02 \x01(\bR\n" +
-	"wasStopped\"_\n" +
+	"wasStopped\x12,\n" +
+	"\atimings\x18\x03 \x01(\v2\x12.vm.v1.WakeTimingsR\atimings\"\xe7\x01\n" +
+	"\vWakeTimings\x12 \n" +
+	"\flock_wait_ms\x18\x01 \x01(\x03R\n" +
+	"lockWaitMs\x12(\n" +
+	"\x10capacity_wait_ms\x18\x02 \x01(\x03R\x0ecapacityWaitMs\x12\x18\n" +
+	"\aevicted\x18\x03 \x01(\bR\aevicted\x12\x1c\n" +
+	"\trecreated\x18\x04 \x01(\bR\trecreated\x12,\n" +
+	"\x12container_start_ms\x18\x05 \x01(\x03R\x10containerStartMs\x12&\n" +
+	"\x0fbridge_ready_ms\x18\x06 \x01(\x03R\rbridgeReadyMs\"_\n" +
 	"\n" +
 	"Attachment\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
@@ -2349,13 +2471,14 @@ const file_vm_v1_vm_proto_rawDesc = "" +
 	"\bapproved\x18\t \x01(\bR\bapproved\x12#\n" +
 	"\rmetadata_json\x18\n" +
 	" \x01(\tR\fmetadataJson\x12'\n" +
-	"\x0ftimeout_seconds\x18\v \x01(\x05R\x0etimeoutSeconds\"\x9a\x01\n" +
+	"\x0ftimeout_seconds\x18\v \x01(\x05R\x0etimeoutSeconds\"\xbd\x01\n" +
 	"\fDeliverEvent\x12+\n" +
 	"\x04type\x18\x01 \x01(\x0e2\x17.vm.v1.DeliverEventTypeR\x04type\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x12%\n" +
 	"\x0eplatform_fault\x18\x03 \x01(\bR\rplatformFault\x12\x1c\n" +
 	"\n" +
-	"at_unix_ms\x18\x04 \x01(\x03R\batUnixMs\"'\n" +
+	"at_unix_ms\x18\x04 \x01(\x03R\batUnixMs\x12!\n" +
+	"\ftimings_json\x18\x05 \x01(\tR\vtimingsJson\"'\n" +
 	"\fTouchRequest\x12\x17\n" +
 	"\auser_id\x18\x01 \x01(\tR\x06userId\"\x0f\n" +
 	"\rTouchResponse\"[\n" +
@@ -2485,7 +2608,7 @@ func file_vm_v1_vm_proto_rawDescGZIP() []byte {
 }
 
 var file_vm_v1_vm_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
-var file_vm_v1_vm_proto_msgTypes = make([]protoimpl.MessageInfo, 35)
+var file_vm_v1_vm_proto_msgTypes = make([]protoimpl.MessageInfo, 36)
 var file_vm_v1_vm_proto_goTypes = []any{
 	(AgentRuntime)(0),                   // 0: vm.v1.AgentRuntime
 	(SandboxState)(0),                   // 1: vm.v1.SandboxState
@@ -2498,35 +2621,36 @@ var file_vm_v1_vm_proto_goTypes = []any{
 	(*CreateSandboxResponse)(nil),       // 8: vm.v1.CreateSandboxResponse
 	(*WakeSandboxRequest)(nil),          // 9: vm.v1.WakeSandboxRequest
 	(*WakeSandboxResponse)(nil),         // 10: vm.v1.WakeSandboxResponse
-	(*Attachment)(nil),                  // 11: vm.v1.Attachment
-	(*DeliverRequest)(nil),              // 12: vm.v1.DeliverRequest
-	(*DeliverEvent)(nil),                // 13: vm.v1.DeliverEvent
-	(*TouchRequest)(nil),                // 14: vm.v1.TouchRequest
-	(*TouchResponse)(nil),               // 15: vm.v1.TouchResponse
-	(*StopSandboxRequest)(nil),          // 16: vm.v1.StopSandboxRequest
-	(*StopSandboxResponse)(nil),         // 17: vm.v1.StopSandboxResponse
-	(*DeleteSandboxRequest)(nil),        // 18: vm.v1.DeleteSandboxRequest
-	(*DeleteSandboxResponse)(nil),       // 19: vm.v1.DeleteSandboxResponse
-	(*GetSandboxRequest)(nil),           // 20: vm.v1.GetSandboxRequest
-	(*ListSandboxesRequest)(nil),        // 21: vm.v1.ListSandboxesRequest
-	(*ListSandboxesResponse)(nil),       // 22: vm.v1.ListSandboxesResponse
-	(*GetUsageRequest)(nil),             // 23: vm.v1.GetUsageRequest
-	(*UserUsage)(nil),                   // 24: vm.v1.UserUsage
-	(*GetUsageResponse)(nil),            // 25: vm.v1.GetUsageResponse
-	(*SetEgressAllowlistRequest)(nil),   // 26: vm.v1.SetEgressAllowlistRequest
-	(*SetEgressAllowlistResponse)(nil),  // 27: vm.v1.SetEgressAllowlistResponse
-	(*SnapshotVolumeRequest)(nil),       // 28: vm.v1.SnapshotVolumeRequest
-	(*SnapshotVolumeResponse)(nil),      // 29: vm.v1.SnapshotVolumeResponse
-	(*SetAgentRuntimeRequest)(nil),      // 30: vm.v1.SetAgentRuntimeRequest
-	(*SetAgentRuntimeResponse)(nil),     // 31: vm.v1.SetAgentRuntimeResponse
-	(*StartClaudeLoginRequest)(nil),     // 32: vm.v1.StartClaudeLoginRequest
-	(*StartClaudeLoginResponse)(nil),    // 33: vm.v1.StartClaudeLoginResponse
-	(*CompleteClaudeLoginRequest)(nil),  // 34: vm.v1.CompleteClaudeLoginRequest
-	(*CompleteClaudeLoginResponse)(nil), // 35: vm.v1.CompleteClaudeLoginResponse
-	(*ClaudeLogoutRequest)(nil),         // 36: vm.v1.ClaudeLogoutRequest
-	(*ClaudeLogoutResponse)(nil),        // 37: vm.v1.ClaudeLogoutResponse
-	(*SetBrowserRequest)(nil),           // 38: vm.v1.SetBrowserRequest
-	(*SetBrowserResponse)(nil),          // 39: vm.v1.SetBrowserResponse
+	(*WakeTimings)(nil),                 // 11: vm.v1.WakeTimings
+	(*Attachment)(nil),                  // 12: vm.v1.Attachment
+	(*DeliverRequest)(nil),              // 13: vm.v1.DeliverRequest
+	(*DeliverEvent)(nil),                // 14: vm.v1.DeliverEvent
+	(*TouchRequest)(nil),                // 15: vm.v1.TouchRequest
+	(*TouchResponse)(nil),               // 16: vm.v1.TouchResponse
+	(*StopSandboxRequest)(nil),          // 17: vm.v1.StopSandboxRequest
+	(*StopSandboxResponse)(nil),         // 18: vm.v1.StopSandboxResponse
+	(*DeleteSandboxRequest)(nil),        // 19: vm.v1.DeleteSandboxRequest
+	(*DeleteSandboxResponse)(nil),       // 20: vm.v1.DeleteSandboxResponse
+	(*GetSandboxRequest)(nil),           // 21: vm.v1.GetSandboxRequest
+	(*ListSandboxesRequest)(nil),        // 22: vm.v1.ListSandboxesRequest
+	(*ListSandboxesResponse)(nil),       // 23: vm.v1.ListSandboxesResponse
+	(*GetUsageRequest)(nil),             // 24: vm.v1.GetUsageRequest
+	(*UserUsage)(nil),                   // 25: vm.v1.UserUsage
+	(*GetUsageResponse)(nil),            // 26: vm.v1.GetUsageResponse
+	(*SetEgressAllowlistRequest)(nil),   // 27: vm.v1.SetEgressAllowlistRequest
+	(*SetEgressAllowlistResponse)(nil),  // 28: vm.v1.SetEgressAllowlistResponse
+	(*SnapshotVolumeRequest)(nil),       // 29: vm.v1.SnapshotVolumeRequest
+	(*SnapshotVolumeResponse)(nil),      // 30: vm.v1.SnapshotVolumeResponse
+	(*SetAgentRuntimeRequest)(nil),      // 31: vm.v1.SetAgentRuntimeRequest
+	(*SetAgentRuntimeResponse)(nil),     // 32: vm.v1.SetAgentRuntimeResponse
+	(*StartClaudeLoginRequest)(nil),     // 33: vm.v1.StartClaudeLoginRequest
+	(*StartClaudeLoginResponse)(nil),    // 34: vm.v1.StartClaudeLoginResponse
+	(*CompleteClaudeLoginRequest)(nil),  // 35: vm.v1.CompleteClaudeLoginRequest
+	(*CompleteClaudeLoginResponse)(nil), // 36: vm.v1.CompleteClaudeLoginResponse
+	(*ClaudeLogoutRequest)(nil),         // 37: vm.v1.ClaudeLogoutRequest
+	(*ClaudeLogoutResponse)(nil),        // 38: vm.v1.ClaudeLogoutResponse
+	(*SetBrowserRequest)(nil),           // 39: vm.v1.SetBrowserRequest
+	(*SetBrowserResponse)(nil),          // 40: vm.v1.SetBrowserResponse
 }
 var file_vm_v1_vm_proto_depIdxs = []int32{
 	1,  // 0: vm.v1.Sandbox.state:type_name -> vm.v1.SandboxState
@@ -2537,54 +2661,55 @@ var file_vm_v1_vm_proto_depIdxs = []int32{
 	6,  // 5: vm.v1.CreateSandboxResponse.sandbox:type_name -> vm.v1.Sandbox
 	2,  // 6: vm.v1.WakeSandboxRequest.priority:type_name -> vm.v1.Priority
 	6,  // 7: vm.v1.WakeSandboxResponse.sandbox:type_name -> vm.v1.Sandbox
-	3,  // 8: vm.v1.DeliverRequest.kind:type_name -> vm.v1.DeliverKind
-	11, // 9: vm.v1.DeliverRequest.attachments:type_name -> vm.v1.Attachment
-	4,  // 10: vm.v1.DeliverEvent.type:type_name -> vm.v1.DeliverEventType
-	6,  // 11: vm.v1.StopSandboxResponse.sandbox:type_name -> vm.v1.Sandbox
-	1,  // 12: vm.v1.ListSandboxesRequest.states:type_name -> vm.v1.SandboxState
-	6,  // 13: vm.v1.ListSandboxesResponse.sandboxes:type_name -> vm.v1.Sandbox
-	24, // 14: vm.v1.GetUsageResponse.usage:type_name -> vm.v1.UserUsage
-	5,  // 15: vm.v1.SetEgressAllowlistRequest.mcp_servers:type_name -> vm.v1.UserMcpServer
-	0,  // 16: vm.v1.SetAgentRuntimeRequest.runtime:type_name -> vm.v1.AgentRuntime
-	6,  // 17: vm.v1.SetAgentRuntimeResponse.sandbox:type_name -> vm.v1.Sandbox
-	6,  // 18: vm.v1.SetBrowserResponse.sandbox:type_name -> vm.v1.Sandbox
-	7,  // 19: vm.v1.VmManager.CreateSandbox:input_type -> vm.v1.CreateSandboxRequest
-	9,  // 20: vm.v1.VmManager.WakeSandbox:input_type -> vm.v1.WakeSandboxRequest
-	12, // 21: vm.v1.VmManager.Deliver:input_type -> vm.v1.DeliverRequest
-	14, // 22: vm.v1.VmManager.Touch:input_type -> vm.v1.TouchRequest
-	16, // 23: vm.v1.VmManager.StopSandbox:input_type -> vm.v1.StopSandboxRequest
-	18, // 24: vm.v1.VmManager.DeleteSandbox:input_type -> vm.v1.DeleteSandboxRequest
-	20, // 25: vm.v1.VmManager.GetSandbox:input_type -> vm.v1.GetSandboxRequest
-	21, // 26: vm.v1.VmManager.ListSandboxes:input_type -> vm.v1.ListSandboxesRequest
-	23, // 27: vm.v1.VmManager.GetUsage:input_type -> vm.v1.GetUsageRequest
-	26, // 28: vm.v1.VmManager.SetEgressAllowlist:input_type -> vm.v1.SetEgressAllowlistRequest
-	28, // 29: vm.v1.VmManager.SnapshotVolume:input_type -> vm.v1.SnapshotVolumeRequest
-	30, // 30: vm.v1.VmManager.SetAgentRuntime:input_type -> vm.v1.SetAgentRuntimeRequest
-	32, // 31: vm.v1.VmManager.StartClaudeLogin:input_type -> vm.v1.StartClaudeLoginRequest
-	34, // 32: vm.v1.VmManager.CompleteClaudeLogin:input_type -> vm.v1.CompleteClaudeLoginRequest
-	36, // 33: vm.v1.VmManager.ClaudeLogout:input_type -> vm.v1.ClaudeLogoutRequest
-	38, // 34: vm.v1.VmManager.SetBrowser:input_type -> vm.v1.SetBrowserRequest
-	8,  // 35: vm.v1.VmManager.CreateSandbox:output_type -> vm.v1.CreateSandboxResponse
-	10, // 36: vm.v1.VmManager.WakeSandbox:output_type -> vm.v1.WakeSandboxResponse
-	13, // 37: vm.v1.VmManager.Deliver:output_type -> vm.v1.DeliverEvent
-	15, // 38: vm.v1.VmManager.Touch:output_type -> vm.v1.TouchResponse
-	17, // 39: vm.v1.VmManager.StopSandbox:output_type -> vm.v1.StopSandboxResponse
-	19, // 40: vm.v1.VmManager.DeleteSandbox:output_type -> vm.v1.DeleteSandboxResponse
-	6,  // 41: vm.v1.VmManager.GetSandbox:output_type -> vm.v1.Sandbox
-	22, // 42: vm.v1.VmManager.ListSandboxes:output_type -> vm.v1.ListSandboxesResponse
-	25, // 43: vm.v1.VmManager.GetUsage:output_type -> vm.v1.GetUsageResponse
-	27, // 44: vm.v1.VmManager.SetEgressAllowlist:output_type -> vm.v1.SetEgressAllowlistResponse
-	29, // 45: vm.v1.VmManager.SnapshotVolume:output_type -> vm.v1.SnapshotVolumeResponse
-	31, // 46: vm.v1.VmManager.SetAgentRuntime:output_type -> vm.v1.SetAgentRuntimeResponse
-	33, // 47: vm.v1.VmManager.StartClaudeLogin:output_type -> vm.v1.StartClaudeLoginResponse
-	35, // 48: vm.v1.VmManager.CompleteClaudeLogin:output_type -> vm.v1.CompleteClaudeLoginResponse
-	37, // 49: vm.v1.VmManager.ClaudeLogout:output_type -> vm.v1.ClaudeLogoutResponse
-	39, // 50: vm.v1.VmManager.SetBrowser:output_type -> vm.v1.SetBrowserResponse
-	35, // [35:51] is the sub-list for method output_type
-	19, // [19:35] is the sub-list for method input_type
-	19, // [19:19] is the sub-list for extension type_name
-	19, // [19:19] is the sub-list for extension extendee
-	0,  // [0:19] is the sub-list for field type_name
+	11, // 8: vm.v1.WakeSandboxResponse.timings:type_name -> vm.v1.WakeTimings
+	3,  // 9: vm.v1.DeliverRequest.kind:type_name -> vm.v1.DeliverKind
+	12, // 10: vm.v1.DeliverRequest.attachments:type_name -> vm.v1.Attachment
+	4,  // 11: vm.v1.DeliverEvent.type:type_name -> vm.v1.DeliverEventType
+	6,  // 12: vm.v1.StopSandboxResponse.sandbox:type_name -> vm.v1.Sandbox
+	1,  // 13: vm.v1.ListSandboxesRequest.states:type_name -> vm.v1.SandboxState
+	6,  // 14: vm.v1.ListSandboxesResponse.sandboxes:type_name -> vm.v1.Sandbox
+	25, // 15: vm.v1.GetUsageResponse.usage:type_name -> vm.v1.UserUsage
+	5,  // 16: vm.v1.SetEgressAllowlistRequest.mcp_servers:type_name -> vm.v1.UserMcpServer
+	0,  // 17: vm.v1.SetAgentRuntimeRequest.runtime:type_name -> vm.v1.AgentRuntime
+	6,  // 18: vm.v1.SetAgentRuntimeResponse.sandbox:type_name -> vm.v1.Sandbox
+	6,  // 19: vm.v1.SetBrowserResponse.sandbox:type_name -> vm.v1.Sandbox
+	7,  // 20: vm.v1.VmManager.CreateSandbox:input_type -> vm.v1.CreateSandboxRequest
+	9,  // 21: vm.v1.VmManager.WakeSandbox:input_type -> vm.v1.WakeSandboxRequest
+	13, // 22: vm.v1.VmManager.Deliver:input_type -> vm.v1.DeliverRequest
+	15, // 23: vm.v1.VmManager.Touch:input_type -> vm.v1.TouchRequest
+	17, // 24: vm.v1.VmManager.StopSandbox:input_type -> vm.v1.StopSandboxRequest
+	19, // 25: vm.v1.VmManager.DeleteSandbox:input_type -> vm.v1.DeleteSandboxRequest
+	21, // 26: vm.v1.VmManager.GetSandbox:input_type -> vm.v1.GetSandboxRequest
+	22, // 27: vm.v1.VmManager.ListSandboxes:input_type -> vm.v1.ListSandboxesRequest
+	24, // 28: vm.v1.VmManager.GetUsage:input_type -> vm.v1.GetUsageRequest
+	27, // 29: vm.v1.VmManager.SetEgressAllowlist:input_type -> vm.v1.SetEgressAllowlistRequest
+	29, // 30: vm.v1.VmManager.SnapshotVolume:input_type -> vm.v1.SnapshotVolumeRequest
+	31, // 31: vm.v1.VmManager.SetAgentRuntime:input_type -> vm.v1.SetAgentRuntimeRequest
+	33, // 32: vm.v1.VmManager.StartClaudeLogin:input_type -> vm.v1.StartClaudeLoginRequest
+	35, // 33: vm.v1.VmManager.CompleteClaudeLogin:input_type -> vm.v1.CompleteClaudeLoginRequest
+	37, // 34: vm.v1.VmManager.ClaudeLogout:input_type -> vm.v1.ClaudeLogoutRequest
+	39, // 35: vm.v1.VmManager.SetBrowser:input_type -> vm.v1.SetBrowserRequest
+	8,  // 36: vm.v1.VmManager.CreateSandbox:output_type -> vm.v1.CreateSandboxResponse
+	10, // 37: vm.v1.VmManager.WakeSandbox:output_type -> vm.v1.WakeSandboxResponse
+	14, // 38: vm.v1.VmManager.Deliver:output_type -> vm.v1.DeliverEvent
+	16, // 39: vm.v1.VmManager.Touch:output_type -> vm.v1.TouchResponse
+	18, // 40: vm.v1.VmManager.StopSandbox:output_type -> vm.v1.StopSandboxResponse
+	20, // 41: vm.v1.VmManager.DeleteSandbox:output_type -> vm.v1.DeleteSandboxResponse
+	6,  // 42: vm.v1.VmManager.GetSandbox:output_type -> vm.v1.Sandbox
+	23, // 43: vm.v1.VmManager.ListSandboxes:output_type -> vm.v1.ListSandboxesResponse
+	26, // 44: vm.v1.VmManager.GetUsage:output_type -> vm.v1.GetUsageResponse
+	28, // 45: vm.v1.VmManager.SetEgressAllowlist:output_type -> vm.v1.SetEgressAllowlistResponse
+	30, // 46: vm.v1.VmManager.SnapshotVolume:output_type -> vm.v1.SnapshotVolumeResponse
+	32, // 47: vm.v1.VmManager.SetAgentRuntime:output_type -> vm.v1.SetAgentRuntimeResponse
+	34, // 48: vm.v1.VmManager.StartClaudeLogin:output_type -> vm.v1.StartClaudeLoginResponse
+	36, // 49: vm.v1.VmManager.CompleteClaudeLogin:output_type -> vm.v1.CompleteClaudeLoginResponse
+	38, // 50: vm.v1.VmManager.ClaudeLogout:output_type -> vm.v1.ClaudeLogoutResponse
+	40, // 51: vm.v1.VmManager.SetBrowser:output_type -> vm.v1.SetBrowserResponse
+	36, // [36:52] is the sub-list for method output_type
+	20, // [20:36] is the sub-list for method input_type
+	20, // [20:20] is the sub-list for extension type_name
+	20, // [20:20] is the sub-list for extension extendee
+	0,  // [0:20] is the sub-list for field type_name
 }
 
 func init() { file_vm_v1_vm_proto_init() }
@@ -2598,7 +2723,7 @@ func file_vm_v1_vm_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_vm_v1_vm_proto_rawDesc), len(file_vm_v1_vm_proto_rawDesc)),
 			NumEnums:      5,
-			NumMessages:   35,
+			NumMessages:   36,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
