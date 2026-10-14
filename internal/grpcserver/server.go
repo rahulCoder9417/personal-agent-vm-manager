@@ -27,7 +27,7 @@ const SecretHeader = "x-internal-secret"
 // Manager is the part of *sandbox.Manager the server uses.
 type Manager interface {
 	Create(ctx context.Context, req sandbox.CreateRequest) (store.Sandbox, string, error)
-	Wake(ctx context.Context, userID string, priority int32) (store.Sandbox, bool, error)
+	WakeTimed(ctx context.Context, userID string, priority int32) (store.Sandbox, bool, sandbox.WakeTimings, error)
 	Deliver(ctx context.Context, req sandbox.DeliverRequest, send func(sandbox.Event) error) error
 	Touch(ctx context.Context, userID string) error
 	Stop(ctx context.Context, userID string, force bool, reason string) (store.Sandbox, error)
@@ -268,11 +268,15 @@ func (s *Server) CreateSandbox(ctx context.Context, req *vmv1.CreateSandboxReque
 
 // WakeSandbox implements vmv1.VmManagerServer.
 func (s *Server) WakeSandbox(ctx context.Context, req *vmv1.WakeSandboxRequest) (*vmv1.WakeSandboxResponse, error) {
-	sb, was, err := s.m.Wake(ctx, req.GetUserId(), int32(req.GetPriority()))
+	sb, was, t, err := s.m.WakeTimed(ctx, req.GetUserId(), int32(req.GetPriority()))
 	if err != nil {
 		return nil, s.toStatus(err)
 	}
-	return &vmv1.WakeSandboxResponse{Sandbox: toProto(sb, 0), WasStopped: was}, nil
+	return &vmv1.WakeSandboxResponse{Sandbox: toProto(sb, 0), WasStopped: was, Timings: &vmv1.WakeTimings{
+		LockWaitMs: t.LockWait.Milliseconds(), CapacityWaitMs: t.CapacityWait.Milliseconds(), Evicted: t.Evicted,
+		Recreated: t.Recreated, ContainerStartMs: t.ContainerStart.Milliseconds(),
+		BridgeReadyMs: t.BridgeReady.Milliseconds(),
+	}}, nil
 }
 
 // Deliver implements vmv1.VmManagerServer.
@@ -300,6 +304,7 @@ func (s *Server) Deliver(req *vmv1.DeliverRequest, stream grpc.ServerStreamingSe
 	err := s.m.Deliver(stream.Context(), dr, func(ev sandbox.Event) error {
 		return stream.Send(&vmv1.DeliverEvent{
 			Type: eventToProto[ev.Type], Message: ev.Message, PlatformFault: ev.PlatformFault, AtUnixMs: ev.At.UnixMilli(),
+			TimingsJson: ev.Timings,
 		})
 	})
 	return s.toStatus(err)

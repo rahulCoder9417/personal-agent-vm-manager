@@ -74,6 +74,9 @@ type Event struct {
 	// browser never started. BrowserReportID names the report, so the same one is counted once.
 	BrowserSeconds  int64  `json:"browser_seconds,omitempty"`
 	BrowserReportID string `json:"browser_report_id,omitempty"`
+	// Timings, on the last event of a turn: the Bridge's own stage times (a JSON object of
+	// milliseconds since it took the delivery; README "Stage times"). Passed on as it is.
+	Timings json.RawMessage `json:"timings,omitempty"`
 }
 
 // Health is the /healthz answer.

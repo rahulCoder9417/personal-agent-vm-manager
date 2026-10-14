@@ -156,6 +156,11 @@ func TestEndToEndOverGRPC(t *testing.T) {
 	if err != nil || !wr.GetWasStopped() || wr.GetSandbox().GetState() != vmv1.SandboxState_SANDBOX_STATE_AWAKE {
 		t.Fatalf("wake: %v %v", wr, err)
 	}
+	// Where the wake's time went: a cold start, nothing evicted, nothing re-created.
+	if tm := wr.GetTimings(); tm == nil || tm.GetEvicted() || tm.GetRecreated() || tm.GetContainerStartMs() < 0 ||
+		tm.GetBridgeReadyMs() < 0 {
+		t.Fatalf("wake timings: %v", tm)
+	}
 
 	st, err := h.client.Deliver(ctx, &vmv1.DeliverRequest{
 		UserId: "u1", DeliveryId: "evt-1", Kind: vmv1.DeliverKind_DELIVER_KIND_MESSAGE,
@@ -240,7 +245,8 @@ func TestDeliverStreamsTextDeltas(t *testing.T) {
 	}
 	h.br.Script = func(string, bridge.DeliverRequest) []bridge.Event {
 		return []bridge.Event{{Type: "accepted"}, {Type: "text_delta", Message: "Hel"},
-			{Type: "text_delta", Message: "Hello there"}, {Type: "turn_done"}}
+			{Type: "text_delta", Message: "Hello there"},
+			{Type: "turn_done", Timings: []byte(`{"v":1,"marks":{"first_text":900}}`)}}
 	}
 	st, err := h.client.Deliver(ctx, &vmv1.DeliverRequest{
 		UserId: "u1", DeliveryId: "evt-1", Kind: vmv1.DeliverKind_DELIVER_KIND_MESSAGE,
@@ -261,6 +267,10 @@ func TestDeliverStreamsTextDeltas(t *testing.T) {
 		"DELIVER_EVENT_TYPE_TURN_DONE="
 	if strings.Join(got, ",") != want {
 		t.Fatalf("events: %v", got)
+	}
+	// The Bridge's stage times reach the backend on the last event, as the Bridge wrote them.
+	if last := evs[len(evs)-1]; last.GetTimingsJson() != `{"v":1,"marks":{"first_text":900}}` || evs[1].GetTimingsJson() != "" {
+		t.Fatalf("timings_json: %q", last.GetTimingsJson())
 	}
 	if d := h.br.Delivered()[0]; string(d.Metadata) != `{"stream_text":true}` {
 		t.Fatalf("the metadata goes to the Bridge as it came: %s", d.Metadata)

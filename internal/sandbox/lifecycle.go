@@ -116,31 +116,62 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (store.Sandbox,
 	return sb, sb.MCPTokenHash, nil
 }
 
+// WakeTimings says where one wake's time went (WakeSandboxResponse.timings). Measured on the
+// real clock: these are for people reading where a turn's time went, not for decisions.
+type WakeTimings struct {
+	// LockWait: waiting for another operation on this user's sandbox (a health check, a stop).
+	LockWait time.Duration
+	// CapacityWait: finding room under the awake cap, including stopping another container.
+	CapacityWait time.Duration
+	// Evicted: another user's container was stopped to make room.
+	Evicted bool
+	// Recreated: the container was made again from the image before it started.
+	Recreated bool
+	// ContainerStart: making sure the container is right (re-creating it if needed) and starting it.
+	ContainerStart time.Duration
+	// BridgeReady: from the start until the Bridge answered its ready check.
+	BridgeReady time.Duration
+}
+
 // Wake starts the container if needed and waits for its Bridge to be healthy.
 // Returns ErrCapacity when the awake cap is reached and nothing can be evicted.
 func (m *Manager) Wake(ctx context.Context, userID string, priority int32) (store.Sandbox, bool, error) {
-	return m.wake(ctx, userID, priority, false)
+	sb, was, _, err := m.wakeTimed(ctx, userID, priority, false)
+	return sb, was, err
+}
+
+// WakeTimed is Wake, and says where the time went.
+func (m *Manager) WakeTimed(ctx context.Context, userID string, priority int32) (store.Sandbox, bool, WakeTimings, error) {
+	return m.wakeTimed(ctx, userID, priority, false)
 }
 
 // wake is Wake; forDeliver also counts a Deliver in flight before releasing the
 // user lock, so the reaper / capacity guard can't stop the container in between.
 func (m *Manager) wake(ctx context.Context, userID string, priority int32, forDeliver bool) (store.Sandbox, bool, error) {
+	sb, was, _, err := m.wakeTimed(ctx, userID, priority, forDeliver)
+	return sb, was, err
+}
+
+func (m *Manager) wakeTimed(ctx context.Context, userID string, priority int32, forDeliver bool) (store.Sandbox, bool, WakeTimings, error) {
+	var t WakeTimings
 	if err := validateUserID(userID); err != nil {
-		return store.Sandbox{}, false, err
+		return store.Sandbox{}, false, t, err
 	}
 	l := m.userLock(userID)
+	locking := time.Now()
 	l.Lock()
 	defer l.Unlock()
+	t.LockWait = time.Since(locking)
 	ctx, cancel := detached(ctx, m.cfg.WakeTimeout*3+m.cfg.ShutdownGrace+time.Minute)
 	defer cancel()
 
 	sb, err := m.getSandbox(ctx, userID)
 	if err != nil {
-		return store.Sandbox{}, false, err
+		return store.Sandbox{}, false, t, err
 	}
 	if priority != 0 && normPriority(priority) != sb.Priority {
 		if err := m.store.SetPriority(ctx, userID, normPriority(priority), m.clk.Now()); err != nil {
-			return store.Sandbox{}, false, err
+			return store.Sandbox{}, false, t, err
 		}
 		sb.Priority = normPriority(priority)
 	}
@@ -151,40 +182,47 @@ func (m *Manager) wake(ctx context.Context, userID string, priority int32, forDe
 			if forDeliver {
 				m.addInflight(userID, 1)
 			}
-			return sb, false, nil
+			return sb, false, t, nil
 		}
 		// The table says awake but the container is gone or stopped (crash): treat as stopped.
 		m.log.Warn("awake sandbox not running; restarting it", "user_id", userID)
 		if err := m.markStoppedLocked(ctx, sb, store.StateStopped); err != nil {
-			return store.Sandbox{}, false, err
+			return store.Sandbox{}, false, t, err
 		}
 		sb.State = store.StateStopped
 	}
 
-	if err := m.reserveCapacity(ctx, sb); err != nil {
-		return store.Sandbox{}, false, err
+	reserving := time.Now()
+	evicted, err := m.reserveCapacity(ctx, sb)
+	t.CapacityWait, t.Evicted = time.Since(reserving), evicted
+	if err != nil {
+		return store.Sandbox{}, false, t, err
 	}
-	if err := m.startLocked(ctx, &sb); err != nil {
+	if err := m.startLocked(ctx, &sb, &t); err != nil {
 		m.log.Error("sandbox failed to wake; marked broken", "user_id", userID, "err", err, "alert", true)
 		_ = m.store.SetState(ctx, userID, store.StateBroken, m.clk.Now())
-		return store.Sandbox{}, false, fmt.Errorf("%w: %v", ErrUnavailable, err)
+		return store.Sandbox{}, false, t, fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
 	if forDeliver {
 		m.addInflight(userID, 1)
 	}
+	m.log.Info("wake timings", "user_id", userID, "lock_wait_ms", t.LockWait.Milliseconds(),
+		"capacity_wait_ms", t.CapacityWait.Milliseconds(), "evicted", t.Evicted, "recreated", t.Recreated,
+		"container_start_ms", t.ContainerStart.Milliseconds(), "bridge_ready_ms", t.BridgeReady.Milliseconds())
 	sb, err = m.getSandbox(ctx, userID)
-	return sb, true, err
+	return sb, true, t, err
 }
 
 // reserveCapacity marks self as waking if there is room under the awake cap,
 // evicting the longest-idle, not-busy container (lowest priority first) when needed.
-func (m *Manager) reserveCapacity(ctx context.Context, self store.Sandbox) error {
+// evicted: another container was stopped to make the room.
+func (m *Manager) reserveCapacity(ctx context.Context, self store.Sandbox) (evicted bool, err error) {
 	for attempt := 0; attempt < 5; attempt++ {
 		m.capMu.Lock()
 		active, err := m.store.List(ctx, store.StateWaking, store.StateAwake, store.StateBusy)
 		if err != nil {
 			m.capMu.Unlock()
-			return err
+			return evicted, err
 		}
 		count := 0
 		for _, a := range active {
@@ -195,34 +233,35 @@ func (m *Manager) reserveCapacity(ctx context.Context, self store.Sandbox) error
 		if count < m.cfg.AwakeCap {
 			err := m.store.SetState(ctx, self.UserID, store.StateWaking, m.clk.Now())
 			m.capMu.Unlock()
-			return err
+			return evicted, err
 		}
 		victim, unlock := m.pickVictim(active, self.UserID)
 		if unlock == nil {
 			m.capMu.Unlock()
 			m.log.Warn("awake cap reached and nothing is evictable", "user_id", self.UserID, "cap", m.cfg.AwakeCap)
-			return ErrCapacity
+			return evicted, ErrCapacity
 		}
 		// Reserve our slot now; the victim still counts until it is stopped, so
 		// concurrent wakers pick other victims instead of overshooting the cap.
 		if err := m.store.SetState(ctx, self.UserID, store.StateWaking, m.clk.Now()); err != nil {
 			unlock()
 			m.capMu.Unlock()
-			return err
+			return evicted, err
 		}
 		m.capMu.Unlock()
 
 		m.log.Info("capacity guard evicting sandbox", "victim", victim.UserID, "for", self.UserID)
+		evicted = true
 		err = m.stopLocked(ctx, victim, false, "capacity", store.StateStopped)
 		unlock()
 		if err == nil {
-			return nil
+			return evicted, nil
 		}
 		m.log.Error("eviction failed", "victim", victim.UserID, "err", err)
 		// Give the slot back and try again.
 		_ = m.store.SetState(ctx, self.UserID, self.State, m.clk.Now())
 	}
-	return ErrCapacity
+	return evicted, ErrCapacity
 }
 
 // pickVictim chooses an evictable sandbox and returns it with its user lock held.
@@ -258,8 +297,8 @@ func (m *Manager) pickVictim(active []store.Sandbox, self string) (store.Sandbox
 // current image with the limits it should have, re-creating it (keeping /data)
 // when it is missing, outdated, or was created with or without Scout's browser
 // and the switch has changed since (memory and process limits are fixed at creation).
-// The container must not be running when it has to be re-created.
-func (m *Manager) ensureContainerLocked(ctx context.Context, sb *store.Sandbox) error {
+// The container must not be running when it has to be re-created. t (may be nil) notes a re-create.
+func (m *Manager) ensureContainerLocked(ctx context.Context, sb *store.Sandbox, t *WakeTimings) error {
 	if sb.ContainerID != "" {
 		c, err := m.eng.InspectContainer(ctx, sb.ContainerID)
 		switch {
@@ -276,6 +315,9 @@ func (m *Manager) ensureContainerLocked(ctx context.Context, sb *store.Sandbox) 
 		default:
 			return err
 		}
+	}
+	if t != nil {
+		t.Recreated = true
 	}
 	return m.recreateLocked(ctx, sb)
 }
@@ -345,8 +387,9 @@ func (m *Manager) bridgeSecret(ctx context.Context, sb store.Sandbox) (string, e
 
 // startLocked starts the container and waits for the Bridge. HLD 10.1:
 // retry -> re-create from the image (keep /data) -> give up (caller marks broken).
-func (m *Manager) startLocked(ctx context.Context, sb *store.Sandbox) error {
-	if err := m.ensureContainerLocked(ctx, sb); err != nil {
+func (m *Manager) startLocked(ctx context.Context, sb *store.Sandbox, t *WakeTimings) error {
+	starting := time.Now()
+	if err := m.ensureContainerLocked(ctx, sb, t); err != nil {
 		return err
 	}
 	// The Bridge reads platform.json when it boots: the browser switch in it must match the
@@ -358,6 +401,7 @@ func (m *Manager) startLocked(ctx context.Context, sb *store.Sandbox) error {
 	for attempt := 1; attempt <= 2; attempt++ {
 		if attempt == 2 {
 			m.log.Warn("sandbox did not start; re-creating from the image", "user_id", sb.UserID, "err", lastErr)
+			t.Recreated = true
 			if err := m.recreateLocked(ctx, sb); err != nil {
 				return err
 			}
@@ -367,8 +411,11 @@ func (m *Manager) startLocked(ctx context.Context, sb *store.Sandbox) error {
 			lastErr = err
 			continue
 		}
+		started := time.Now()
+		t.ContainerStart = started.Sub(starting)
 		ip := c.IPs[m.cfg.SandboxNetwork]
 		h, err := m.waitHealthy(ctx, ip)
+		t.BridgeReady = time.Since(started)
 		if err != nil {
 			lastErr = err
 			_ = m.eng.StopContainer(ctx, sb.ContainerID, 0)
