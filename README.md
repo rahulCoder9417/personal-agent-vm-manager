@@ -116,7 +116,15 @@ Notes on behaviour the proto leaves open:
   It does not change the runtime (the backend switches back to Hermes).
 - `Deliver` events: `ACCEPTED`, then any number of `WORKING` (a progress line in `message`) and
   `TEXT_DELTA` (the whole draft of the answer so far in `message`; only when `metadata_json` has
-  `"stream_text": true`), then `TURN_DONE` or `ERROR`. See "The answer as it is written".
+  `"stream_text": true`), then `TURN_DONE` or `ERROR`. See "The answer as it is written". The last
+  one carries `timings_json`, the Bridge's stage times, when the Bridge sent them (a JSON object of
+  at most 16 KiB; anything else is not passed on). See "Stage times".
+- `WakeSandbox.timings` says where the wake's time went, in milliseconds: `lock_wait_ms` (another
+  operation on the same sandbox, such as a health check, held its lock), `capacity_wait_ms` (finding
+  room under the awake cap; `evicted` when another container was stopped for it), `recreated` (the
+  container was made again first), `container_start_ms` (making sure the container is right and
+  starting it) and `bridge_ready_ms` (the start until `/healthz` answered). An awake sandbox has
+  only `lock_wait_ms`. Each cold wake also writes one `wake timings` log line with them.
 
 ## Lifecycle
 
@@ -174,7 +182,7 @@ Header `X-Bridge-Secret: <secret>` on every call except health.
 | Call | Behaviour |
 |---|---|
 | `GET /healthz` | `200 {"ok":true,"busy":N,"runtime":"hermes\|claude_code","claude_connected":bool\|null,"claude_login_pending":bool,"browser":bool}` when the current runtime answers (Hermes API / `claude` installed), else `503`. `busy` = turns in progress; `claude_connected` is `null` until `claude auth status` has answered once; `browser` = Scout's browser is turned on in this container |
-| `POST /deliver` | Body `{"delivery_id","kind","session_key","channel","text","attachments":[{"id","name","mime_type","url"}],"approval_id","approved","metadata":{}}`, `kind` = `message` / `approval_answer` / `automation` / `app_event`. `200` with `Content-Type: application/x-ndjson`, one line per event: `{"type":"accepted\|working\|text_delta\|turn_done\|error","message":"...","platform_fault":bool}`, ending with `turn_done` or `error`. A `working` message is `using <tool>`, or a crew line that starts with the member's name and a colon (`Scout: researching flight options`, `Scout: done`; see "The crew"). A `text_delta` message is the whole draft of the answer so far, sent only when the metadata asks for it; see "The answer as it is written" below. The last event also has `"browser_seconds":N,"browser_report_id":"<delivery_id>#<n>"` when Scout's browser was open: whole seconds since the Bridge's last report, and an id under which the vm-manager stores the report once (both are left out when the browser never started). `metadata` is `DeliverRequest.metadata_json` as the backend sent it; the Bridge reads three fields of it, see "What the Bridge reads in `metadata`". `channel` is where the user reads the answer (`web`, `telegram`, `whatsapp`, `imessage`); it decides how the lead formats it, see "How the answer is formatted, by channel". `401` bad secret, `400` bad body |
+| `POST /deliver` | Body `{"delivery_id","kind","session_key","channel","text","attachments":[{"id","name","mime_type","url"}],"approval_id","approved","metadata":{}}`, `kind` = `message` / `approval_answer` / `automation` / `app_event`. `200` with `Content-Type: application/x-ndjson`, one line per event: `{"type":"accepted\|working\|text_delta\|turn_done\|error","message":"...","platform_fault":bool}`, ending with `turn_done` or `error`; the last event also has `"timings":{...}`, the turn's stage times (see "Stage times" below; left out on a repeat of a finished delivery). A `working` message is `using <tool>`, or a crew line that starts with the member's name and a colon (`Scout: researching flight options`, `Scout: done`; see "The crew"). A `text_delta` message is the whole draft of the answer so far, sent only when the metadata asks for it; see "The answer as it is written" below. The last event also has `"browser_seconds":N,"browser_report_id":"<delivery_id>#<n>"` when Scout's browser was open: whole seconds since the Bridge's last report, and an id under which the vm-manager stores the report once (both are left out when the browser never started). `metadata` is `DeliverRequest.metadata_json` as the backend sent it; the Bridge reads three fields of it, see "What the Bridge reads in `metadata`". `channel` is where the user reads the answer (`web`, `telegram`, `whatsapp`, `imessage`); it decides how the lead formats it, see "How the answer is formatted, by channel". `401` bad secret, `400` bad body |
 | `POST /shutdown` | Stop taking work, stop Hermes (it saves to /data), `200` when done (< 20 s) |
 | `POST /claude/login/start` | Starts `claude auth login` (in a pty). `200 {"login_id","authorize_url","expires_at"}` (unix ms, +10 min). One pending sign-in per container; a new start replaces it. `502` no link shown, `503` Claude Code not installed |
 | `POST /claude/login/complete` | Body `{"login_id","code"}`. Types the code into the waiting CLI, waits (<= 60 s) and asks `claude auth status`. `200 {"connected":bool,"message":"..."}`; `409` unknown / expired / used; `400` missing or multi-line code. Bodies are never logged |
@@ -244,6 +252,42 @@ A repeat of a finished delivery also sends that delivery's browser report again,
 The Bridge never returns the final answer in the event stream. It sends it itself by calling the
 Platform MCP tool `send_message` `{"text","session_key"}` with the container's bearer
 token. The agent (Hermes or Claude Code) sees the other Platform MCP tools but not `send_message`.
+The platform's MCP server is stateless (it gives no `Mcp-Session-Id`), so the Bridge sends
+`initialize` once per process and then each answer as one `tools/call`: one round trip through the
+egress proxy per answer instead of three. A server that gives a session id keeps it, and a 404 for
+it means a new `initialize`, once.
+
+**Stage times (`timings`).** The Bridge times each delivery from the moment it takes it
+(`bridge/timings.py`) and puts the report on the turn's last event. Every time is whole milliseconds
+since then, on the Bridge's monotonic clock. Only names and numbers: never text the user or the
+agent wrote.
+
+```json
+{"v": 1, "engine": "claude_code", "runs": 1,
+ "marks": {"engine_start": 12, "engine_ready": 1840, "first_response": 3410, "first_thinking": 3420,
+           "first_tool": 4200, "first_text": 6120, "engine_done": 9300, "answer_sent": 9380},
+ "tools_ms": 640, "crew_ms": 0, "crew": [{"member": "scout", "start": 5000, "end": 61000}],
+ "cli": {"duration_ms": 7400, "duration_api_ms": 6100, "num_turns": 2, "input_tokens": 12,
+         "cache_read_input_tokens": 41000, "cache_creation_input_tokens": 900, "output_tokens": 310}}
+```
+
+| Field | What it is |
+|---|---|
+| `engine_start` | Claude Code's process is started / the Hermes run is asked for (the first run of the turn) |
+| `engine_ready` | Claude Code's `system/init` event (the CLI is up and has asked its tool servers for their tools; the last run's when a lost session started again) / Hermes created the run |
+| `first_response`, `first_thinking` | Claude Code only, and only with `--include-partial-messages` (web chat): the model's first message began (`message_start`), and its first thinking block |
+| `first_text`, `first_tool` | The lead's first words and first tool call (a specialist's never count) |
+| `engine_done` | Claude Code's `result` event / the last Hermes run's terminal event |
+| `answer_sent` | `send_message` returned; missing when the turn failed or had no answer |
+| `tools_ms` | The time at least one of the lead's own tool calls was running (overlaps count once). Starting a specialist is the crew's time, not a tool's |
+| `crew_ms`, `crew` | The same for specialists, and each run's member id, start and end (at most 20 listed) |
+| `cli` | Claude Code only: the numbers of its `result` event (its total, the time in API calls, the model rounds, the token counts). Never its text |
+| `runs` | Engine runs in the turn: 2 when a lost Claude session started again, more for Hermes's crew rounds |
+
+A mark that did not happen is left out. A repeat of a finished delivery runs nothing and reports
+nothing. The vm-manager passes the object on as `DeliverEvent.timings_json`; the backend stores it
+in its `turn_timings` table with its own stage times. What the CLI's `init` waits for (whether it
+connects every tool server before it answers) was not checked against the real binary.
 
 **The answer as it is written (`text_delta`).** When the delivery's metadata has `"stream_text": true`, the
 Bridge also sends the lead's answer while the model writes it, so the web chat can show it word by word instead
@@ -459,8 +503,8 @@ Bash,Read,Edit,Write,Glob,Grep,NotebookEdit,TodoWrite,WebSearch,mcp__platform,mc
 [--include-partial-messages] (--session-id <new uuid> | --resume <id> --fork-session)`
 with the message on stdin (`--model` / `--effort`: see "Model and effort" below; `--include-partial-messages`
 only when the delivery asks for the answer as it is written, see "The answer as it is written"). The MCP
-config (0600, rewritten every turn) has the Platform MCP with the container's bearer token and
-the user's own MCP servers. The settings file (0600, rewritten every turn) has one hook, which
+config (0600, written when its content changes) has the Platform MCP with the container's bearer
+token and the user's own MCP servers. The settings file (0600, written when its content changes) has one hook, which
 keeps the lead off the web tools; `WebSearch` is in the allow list for Scout, not for the lead
 (see "The crew"). Each conversation of a chat (the `session_key` and the delivery's `chat_epoch`) has its own
 Claude session (`/data/.platform/claude-sessions.json`; see "Conversations of a chat" under "Bridge contract").
@@ -682,7 +726,8 @@ and each `context` with that member's brief.
 - **Follow-up runs:** on the Runs API Hermes runs the lead's children in the background. The run
   ends with a short status, and the reports are stored in the session for the next turn, which
   the client has to start. So after a run that handed work over, the Bridge waits until `GET
-  /health/detailed` reports no background delegations (twice in a row) and starts a follow-up run
+  /health/detailed` reports no background delegations (twice in a row: every 2 s while they work,
+  and the second check half a second after the first quiet one) and starts a follow-up run
   in the same session (at most 3, inside the turn's time limit). The last run's answer is the
   turn's answer. If Hermes does not report its background work, the lead's status is the answer.
 
@@ -989,4 +1034,7 @@ after the turn, the start-up sweep, the mark in Claude Code's environment) are t
 (SIGTERM, SIGKILL for one that ignores it, a process in a session of its own, two jobs at once) and a fake runner and
 CLI. Not run: inside gVisor (whether its `/proc` gives every process's `cwd` and `environ` the same way), a real
 Claude Code or Hermes turn starting a server in the folder, and the image on the server. The polite stop that waits
-for a Claude sign-in is tested with the fake Docker and Bridge.
+for a Claude sign-in is tested with the fake Docker and Bridge. The stage times of a turn and of a wake (2026-10-14) are
+tested against the fake CLI, a fake Hermes and the fake Docker; not run with the real Claude Code binary (the exact
+moment of its `init` event, and the fields of its `result`, were read in its docs and in earlier runs of 2.1.283), not
+in an image on the server.
