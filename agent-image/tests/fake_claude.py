@@ -272,8 +272,11 @@ def print_mode(args) -> int:
                  for p in pieces),
                {"type": "content_block_stop", "index": 0}, {"type": "message_stop"})
     out({"type": "assistant", "session_id": sid, "message": {"content": [{"type": "text", "text": "done"}]}})
+    # The numbers the real CLI's result gives about the run (2.1.283's stream-json result).
     out({"type": "result", "subtype": "success", "is_error": False, "result": answer,
-         "session_id": sid, "total_cost_usd": 0.01})
+         "session_id": sid, "total_cost_usd": 0.01, "duration_ms": 7400, "duration_api_ms": 6100, "num_turns": 2,
+         "usage": {"input_tokens": 12, "cache_read_input_tokens": 41000, "cache_creation_input_tokens": 900,
+                   "output_tokens": 310, "service_tier": "standard"}})
     return 0
 
 

@@ -26,7 +26,7 @@ from bridge.platform import load_platform_file
 from bridge.runtime import PlatformReader, RuntimeRunner
 from bridge.server import BridgeHTTPServer
 
-from tests.fakes import CLAUDE_CODE_MODELS, FakeRunner, FakeSender
+from tests.fakes import CLAUDE_CODE_MODELS, FakeRunner, FakeSender, without_timings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SECRET = "s3cret-bridge"
@@ -1280,7 +1280,8 @@ class BridgeWithRuntimesTest(unittest.TestCase):
     def test_not_signed_in_error_event(self):
         self.e.write_platform("claude_code")
         events = self.deliver("d1")
-        self.assertEqual(events[-1], {"type": "error", "message": MSG_NOT_SIGNED_IN, "platform_fault": False})
+        self.assertEqual(without_timings(events[-1]),
+                         {"type": "error", "message": MSG_NOT_SIGNED_IN, "platform_fault": False})
         self.assertEqual(self.sender.sent, [])
 
     def test_crash_is_platform_fault(self):
@@ -1297,7 +1298,8 @@ class BridgeWithRuntimesTest(unittest.TestCase):
         self.e.write_platform("claude_code")
         self.e.mode("refusal")
         events = self.deliver("d1", "Ask Scout to read http://169.254.169.254/")
-        self.assertEqual(events[-1], {"type": "error", "message": MSG_REFUSED, "platform_fault": False})
+        self.assertEqual(without_timings(events[-1]),
+                         {"type": "error", "message": MSG_REFUSED, "platform_fault": False})
         self.e.mode("limit")
         events = self.deliver("d2", "hello")
         self.assertEqual((events[-1]["type"], events[-1]["platform_fault"]), ("error", False))
