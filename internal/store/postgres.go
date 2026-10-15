@@ -207,6 +207,12 @@ func (p *Postgres) Touch(ctx context.Context, userID string, at time.Time) error
 		userID, at)
 }
 
+// MarkAwake implements Store.
+func (p *Postgres) MarkAwake(ctx context.Context, userID string, at time.Time) error {
+	return p.exec1(ctx, `UPDATE sandboxes SET state = $2, last_active_at = GREATEST(last_active_at, $3), updated_at = $3
+		WHERE user_id = $1`, userID, string(StateAwake), at)
+}
+
 // SetAllowlist implements Store.
 func (p *Postgres) SetAllowlist(ctx context.Context, userID string, domains []string, at time.Time) error {
 	if domains == nil {

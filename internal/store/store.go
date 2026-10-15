@@ -95,6 +95,9 @@ type Store interface {
 	SetContainer(ctx context.Context, userID, containerID, imageVersion string, at time.Time) error
 	// Touch moves last_active_at forward to at (never backwards).
 	Touch(ctx context.Context, userID string, at time.Time) error
+	// MarkAwake is SetState(awake) and Touch in one write (one round trip): a wake that has just
+	// finished.
+	MarkAwake(ctx context.Context, userID string, at time.Time) error
 	// SetAllowlist replaces the egress allowlist.
 	SetAllowlist(ctx context.Context, userID string, domains []string, at time.Time) error
 	// SetPriority changes the awake-cap priority.

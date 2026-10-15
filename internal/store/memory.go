@@ -123,6 +123,17 @@ func (m *Memory) Touch(_ context.Context, userID string, at time.Time) error {
 	})
 }
 
+// MarkAwake implements Store.
+func (m *Memory) MarkAwake(_ context.Context, userID string, at time.Time) error {
+	return m.update(userID, func(sb *Sandbox) {
+		sb.State = StateAwake
+		if at.After(sb.LastActiveAt) {
+			sb.LastActiveAt = at
+		}
+		sb.UpdatedAt = at
+	})
+}
+
 // SetAllowlist implements Store.
 func (m *Memory) SetAllowlist(_ context.Context, userID string, domains []string, at time.Time) error {
 	return m.update(userID, func(sb *Sandbox) { sb.Allowlist = slices.Clone(domains); sb.UpdatedAt = at })
