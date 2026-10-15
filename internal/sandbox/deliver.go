@@ -80,10 +80,18 @@ func (m *Manager) Deliver(ctx context.Context, req DeliverRequest, send func(Eve
 		return err
 	}
 	userID := req.UserID
-	if err := m.store.Touch(ctx, userID, m.clk.Now()); err != nil {
-		m.addInflight(userID, -1)
-		return err
-	}
+	// The turn's start counts as activity. It is written beside the hand-over, not before it: the
+	// Bridge gets the message one database round trip sooner. Nothing waits for it: the delivery
+	// is in flight (the reaper and the capacity guard leave the container alone), and the turn's
+	// end writes the last activity again. Touch never moves it backwards.
+	touchedAt := m.clk.Now()
+	go func() {
+		tctx, cancel := detached(ctx, 30*time.Second)
+		defer cancel()
+		if err := m.store.Touch(tctx, userID, touchedAt); err != nil {
+			m.log.Warn("could not record the turn's start as activity", "user_id", userID, "err", err)
+		}
+	}()
 
 	events := make(chan Event, 16)
 	consumerGone := make(chan struct{})

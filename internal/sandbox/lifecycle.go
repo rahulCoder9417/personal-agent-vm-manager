@@ -426,11 +426,9 @@ func (m *Manager) startLocked(ctx context.Context, sb *store.Sandbox, t *WakeTim
 		if err := m.eg.Write(sb.UserID, ip, m.egressRule(*sb, c)); err != nil {
 			m.log.Error("egress allowlist write failed", "user_id", sb.UserID, "err", err, "alert", true)
 		}
-		now := m.clk.Now()
-		if err := m.store.SetState(ctx, sb.UserID, store.StateAwake, now); err != nil {
-			return err
-		}
-		if err := m.store.Touch(ctx, sb.UserID, now); err != nil {
+		// Awake, and active now: one write, so the wake waits for one round trip to the database
+		// instead of two (Neon is about 0.2 s away from the server).
+		if err := m.store.MarkAwake(ctx, sb.UserID, m.clk.Now()); err != nil {
 			return err
 		}
 		m.resetHealth(sb.UserID)

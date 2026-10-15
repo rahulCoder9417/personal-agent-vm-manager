@@ -121,6 +121,9 @@ func runSuite(t *testing.T, newStore func(t *testing.T) Store) {
 		if err := s.SetState(ctx, "nobody", StateAwake, later); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("want ErrNotFound, got %v", err)
 		}
+		if err := s.MarkAwake(ctx, "nobody", later); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("MarkAwake: want ErrNotFound, got %v", err)
+		}
 		if err := s.SetRuntime(ctx, "nobody", RuntimeHermes, later); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("SetRuntime: want ErrNotFound, got %v", err)
 		}
@@ -263,6 +266,24 @@ func runSuite(t *testing.T, newStore func(t *testing.T) Store) {
 		got, _ = s.Usage(ctx, "u2", t0, now, now)
 		if !slices.Equal(got, []Usage{{UserID: "u2", BrowserSeconds: 7}}) {
 			t.Fatalf("usage must survive delete: %+v", got)
+		}
+	})
+
+	t.Run("mark awake", func(t *testing.T) {
+		s := newStore(t)
+		sb := newSandbox("u1")
+		sb.State = StateWaking
+		must(t, s.Insert(ctx, sb))
+		later := t0.Add(time.Minute)
+		must(t, s.MarkAwake(ctx, "u1", later))
+		got, _ := s.Get(ctx, "u1")
+		if got.State != StateAwake || !got.LastActiveAt.Equal(later) || !got.UpdatedAt.Equal(later) {
+			t.Fatalf("after MarkAwake: %+v", got)
+		}
+		// Like Touch, the last activity never moves backwards.
+		must(t, s.MarkAwake(ctx, "u1", t0))
+		if got, _ := s.Get(ctx, "u1"); got.State != StateAwake || !got.LastActiveAt.Equal(later) {
+			t.Fatalf("an older MarkAwake moved the last activity back: %+v", got)
 		}
 	})
 }
