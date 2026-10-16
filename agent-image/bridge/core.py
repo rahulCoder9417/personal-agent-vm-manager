@@ -307,6 +307,17 @@ def format_rules(channel: str) -> str:
     return FORMAT_WEB if channel == WEB_CHANNEL else FORMAT_PLAIN
 
 
+# Approvals for the agent's own actions: pushes the git gateway asks about, and on Claude Code the commands and file
+# changes the gate hook asks about (cc_gate.py). Either way the call is refused and the user asked; the answer comes as
+# a new turn, and the same call then goes through once.
+OWN_ACTION_RULES = (
+    "A push to a branch that already existed (one you did not make), or a force push, needs the user's OK: git "
+    "refuses it, the user is asked in the chat, and you end your turn; after their yes, run the same push again. "
+    "Some of your own commands and file changes need their OK the same way (the refusal says so): end your turn, "
+    "and after the yes make exactly the same call again."
+)
+
+
 def build_instructions(req: DeliverRequest, job_folder: str = "") -> str:
     """The lead's instructions for one turn, starting with who it is (IDENTITY). Each engine adds how it hands work to a specialist
     (crew.CLAUDE_HANDOFF / crew.hermes_handoff). `job_folder`: the folder the Bridge made for this delivery's crew
@@ -323,7 +334,7 @@ def build_instructions(req: DeliverRequest, job_folder: str = "") -> str:
         "When the user's GitHub is connected, git works for their repositories: clone "
         "https://github.com/<owner>/<repo> into your workspace, commit on a new branch and push it, "
         "then open the pull request with the GitHub app action. Pushing to a repository's default "
-        "branch is refused, so always work on a branch.\n\n"
+        f"branch is refused, so always work on a branch. {OWN_ACTION_RULES}\n\n"
         f"{APP_RULES}\n\n"
         f"{ANSWER_RULES}\n\n"
         f"{format_rules(req.channel)}\n\n"

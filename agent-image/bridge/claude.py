@@ -14,9 +14,13 @@ Two parts:
   the user's plan or account, or of the model or effort the user chose, is never a platform fault
   (classify_failure).
   The Platform MCP is passed with --mcp-config (this container's bearer
-  token, the same as Hermes gets). Permissions: dontAsk mode with an allow list (file and
-  shell work inside the sandbox, our MCP tools), so nothing ever waits for a prompt; risky
-  real-world actions go through the platform's request_approval tool. The crew (crew.py) is
+  token, the same as Hermes gets). Permissions: dontAsk mode, so nothing ever waits for a prompt.
+  Reading, searching and our MCP tools are on the allow list; commands and file changes are not:
+  each one goes through Textcrew's gate hook (cc_gate.py), which lets it run, refuses it, or has
+  the user asked first (an approval card; the turn ends; after the yes the same call runs once).
+  A gate that crashes or times out leaves such a call refused. The credential and platform files
+  are in the deny rules too (never_rules). Risky real-world actions in apps go through the
+  platform's request_approval tool. The crew (crew.py) is
   passed as sub-agents with --agents; the lead starts one with the Agent tool, and a
   specialist cannot start another (code.claude.com/docs/en/sub-agents). The lead has no web
   tool: the web is Scout's, and a hook passed with --settings refuses the lead's own calls
@@ -77,10 +81,16 @@ AUTO_MEMORY_ENV = "CLAUDE_CODE_DISABLE_AUTO_MEMORY"
 EFFORT_ENV = "CLAUDE_CODE_EFFORT_LEVEL"
 
 # The lead's built-in tools, allowed without a prompt (everything else is denied in dontAsk mode). No web
-# tool: the web is Scout's (crew.py).
-DEFAULT_ALLOWED_TOOLS = ("Bash", "Read", "Edit", "Write", "Glob", "Grep", "NotebookEdit", "TodoWrite")
+# tool: the web is Scout's (crew.py). Bash, Edit, Write and NotebookEdit are not here: each call of theirs runs
+# only when the gate hook says so (GATED_TOOLS, cc_gate.py), so a gate that fails refuses it.
+DEFAULT_ALLOWED_TOOLS = ("Read", "Glob", "Grep", "TodoWrite")
 LEAD_GATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lead_gate.py")
 LEAD_GATE_TIMEOUT = 10  # seconds; a hook that times out does not block the call
+CC_GATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cc_gate.py")
+# The tools the gate hook decides on: the writes it lets through (they are on no allow list), and the reads it
+# checks for the platform's own files (they are allowed, and the deny rules hold those files too).
+GATED_TOOLS = ("Bash", "Edit", "Write", "NotebookEdit", "Read", "Glob", "Grep")
+CC_GATE_TIMEOUT = 30  # seconds: the gate may ask the backend (15 s at most); a timeout refuses the call
 
 MSG_NOT_SIGNED_IN = "Connect your Claude plan again"
 MSG_LIMIT = "Your Claude plan's usage limit was reached"
@@ -418,7 +428,50 @@ def render_mcp_config(pf: PlatformFile, env: dict[str, str], data_dir: str = "/d
     return {"mcpServers": servers}
 
 
-def render_settings() -> dict[str, Any]:
+@dataclass(frozen=True)
+class GateConfig:
+    """What the gate hook is told on its command line (nothing secret: it reads the token from the platform file)."""
+
+    data_dir: str = "/data"
+    workspace: str = "/data/workspace"
+    gate_url: str = "http://api:8080/mcp/gate"
+    platform_file: str = "/data/.platform/platform.json"
+    tmp: tuple[str, ...] = ("/data/tmp", "/tmp")
+    home: str = "/data/home"
+    browser: bool = False
+
+    @classmethod
+    def from_env(cls, env: dict[str, str], data_dir: str, browser: bool) -> "GateConfig":
+        mcp = env.get("PLATFORM_MCP_URL", "http://api:8080/mcp").rstrip("/")
+        tmp = tuple(dict.fromkeys(t for t in (env.get("TMPDIR") or os.path.join(data_dir, "tmp"), "/tmp") if t))
+        return cls(data_dir=data_dir, workspace=os.path.join(data_dir, "workspace"), gate_url=f"{mcp}/gate",
+                   platform_file=env.get("PLATFORM_FILE") or os.path.join(data_dir, ".platform", "platform.json"),
+                   tmp=tmp, home=env.get("HOME") or os.path.join(data_dir, "home"), browser=browser)
+
+    def argv(self) -> list[str]:
+        out = ["--data", self.data_dir, "--workspace", self.workspace, "--gate-url", self.gate_url,
+               "--platform-file", self.platform_file, "--home", self.home]
+        for t in self.tmp:
+            out += ["--tmp", t]
+        return out + (["--browser"] if self.browser else [])
+
+
+def never_rules(data_dir: str = "/data") -> list[str]:
+    """Deny rules for the session's --disallowedTools: the platform's own and the credential files, for reading
+    and for changing. They hold whatever the gate hook does (Claude Code also applies the Read rules to read-only
+    shell commands such as cat). `//` starts an absolute path in a rule (code.claude.com/docs/en/permissions).
+    Claude Code's saved tool output, under its config folder's projects/, stays readable."""
+    d = "/" + data_dir.rstrip("/")
+    claude = f"{d}/claude"
+    rules = []
+    for folder in (f"{d}/.platform", f"{d}/hermes"):
+        rules += [f"Read({folder}/**)", f"Edit({folder}/**)"]
+    rules += [f"Read({claude}/.credentials.json)", f"Read({claude}/.claude.json)", f"Read({claude}/*.json)",
+              f"Read({claude}/backups/**)", f"Edit({claude}/**)", "Read(//proc/*/environ)"]
+    return rules
+
+
+def render_settings(gate: Optional[GateConfig] = None) -> dict[str, Any]:
     """--settings for Claude Code: one `PreToolUse` hook that keeps the lead off Scout's web tools (the
     built-in search, the platform's `web_search` and `read_page`, and the browser tools). The hook is the
     same whether or not the browser is turned on for the user.
@@ -436,9 +489,16 @@ def render_settings() -> dict[str, Any]:
     """
     guarded = crew.claude_lead_gate(PLATFORM_SERVER_NAME)
     command = shlex.join([sys.executable or "python3", "-I", LEAD_GATE, *guarded])
+    gate = gate or GateConfig()
     return {"hooks": {"PreToolUse": [{
         "matcher": "|".join(guarded),
         "hooks": [{"type": "command", "command": command, "timeout": LEAD_GATE_TIMEOUT}],
+    }, {
+        # Textcrew's gate (cc_gate.py): every command and file change, in the lead and in a sub-agent alike.
+        "matcher": "|".join(GATED_TOOLS),
+        "hooks": [{"type": "command", "command": shlex.join([sys.executable or "python3", "-I", CC_GATE,
+                                                             *gate.argv()]),
+                   "timeout": CC_GATE_TIMEOUT}],
     }]}}
 
 
@@ -465,6 +525,8 @@ class ClaudeRunner:
         self.with_browser = with_browser  # Scout's browser is turned on for this user (read at boot)
         self.base_env = env
         self.data_dir = data_dir
+        # The gate's rules depend on the browser: with it on, the container can reach any website.
+        self.gate = GateConfig.from_env(env, data_dir, with_browser)
         self.workdir = os.path.join(data_dir, "workspace")
         self.mcp_path = os.path.join(data_dir, ".platform", "claude-mcp.json")
         self.settings_path = os.path.join(data_dir, ".platform", "claude-settings.json")
@@ -503,7 +565,7 @@ class ClaudeRunner:
                 "--mcp-config", self.mcp_path, "--strict-mcp-config",
                 "--permission-mode", "dontAsk", "--permission-prompts", "none",
                 "--allowedTools", ",".join(allowed),
-                "--disallowedTools", *crew.claude_session_denied(PLATFORM_SERVER_NAME),
+                "--disallowedTools", *crew.claude_session_denied(PLATFORM_SERVER_NAME), *never_rules(self.data_dir),
                 "--setting-sources", "user", "--settings", self.settings_path,
                 # The crew as sub-agents of this (lead) session; each has its own tool list.
                 "--agents", json.dumps(crew.claude_agents(PLATFORM_SERVER_NAME, self.crew_model, self.with_browser,
@@ -574,7 +636,7 @@ class ClaudeRunner:
         # not at every turn.
         _write_if_changed(self.mcp_path, json.dumps(render_mcp_config(pf, self.base_env, self.data_dir,
                                                                       self.with_browser)))
-        _write_if_changed(self.settings_path, json.dumps(render_settings()))
+        _write_if_changed(self.settings_path, json.dumps(render_settings(self.gate)))
         deadline = time.monotonic() + timeout
         redact = Redactor([pf.mcp_token, pf.bridge_secret, pf.litellm_key, *(s.auth_secret for s in pf.mcp_servers)],
                           text)
