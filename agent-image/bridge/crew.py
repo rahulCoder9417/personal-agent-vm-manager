@@ -36,6 +36,9 @@ CLAUDE_CODE, HERMES = "claude_code", "hermes"
 ENGINES = (CLAUDE_CODE, HERMES)
 MAX_PER_JOB = 3  # specialists the lead may use for one job
 DEFAULT_MAX_PARALLEL = 3  # specialists running at the same time (BRIDGE_CREW_MAX_PARALLEL)
+# Where the user switches on review of every new pull request in a repository. No agent tool can: the lead
+# sends the user there (backend-report, "Pull-request review").
+PR_REVIEW_PAGE = "https://app.textcrew.in/automations/reviews"
 
 # Tool groups a member may use; each engine maps them to its own tool names.
 READ, WRITE, SEARCH, SHELL = "read", "write", "search", "shell"
@@ -312,6 +315,11 @@ def lead_instructions() -> str:
         "available yet, so when a job needs a sign-in, tell the user that. "
         "Do small jobs that need no web yourself, without a specialist: a quick answer, a look at the user's files "
         "or apps, a small edit. "
+        "A change to the code or files of a repository goes to Byte however small it is, even a typo in a README, "
+        "and every review of a pull request goes to Patch: the user asks for both in chat, and the web app has no "
+        "other place for them. Automatic review of every new pull request in a repository is not set up in chat: "
+        "only the user can switch it on, in the web app under Automations, Pull-request review "
+        f"({PR_REVIEW_PAGE}), so send them there for it. "
         f"Use at most {MAX_PER_JOB} specialists for one job. A specialist knows nothing about this chat, so tell it "
         "everything it needs, and write the final answer yourself from what it reports. "
         "Scout has no access to files, so what it needs goes in the task; when you hand a job to Scout, pass only "
