@@ -58,7 +58,8 @@ backend's compose sets: `GRPC_ADDR` (:9090), `SANDBOX_NETWORK` (personal-agent_s
 browser: `SANDBOX_BROWSER_MEMORY_MB` (2048) and `SANDBOX_BROWSER_PIDS_LIMIT` (1024), the limits of a
 container with the browser turned on (see "Scout's browser"). Tunables: `AWAKE_CAP`, `IDLE_TIMEOUT`,
 `SANDBOX_MEMORY_MB`, `SANDBOX_CPUS`, `SANDBOX_PIDS_LIMIT`, `DELIVER_TIMEOUT`, `AGENT_IMAGE`,
-`AGENT_IMAGE_VERSION`, ...
+`AGENT_IMAGE_VERSION`, `LITELLM_MODEL` (agent-default, the name the lead calls), `LITELLM_CREW_MODEL`
+(agent-crew, the name Hermes's crew calls; see "The crew's model"), ...
 
 Deployment: mount the Docker socket (only here), the allowlist dir shared with the
 egress proxy, and a backup dir at `SNAPSHOT_ROOT`. Put it on the platform and sandbox
@@ -771,6 +772,17 @@ and each `context` with that member's brief.
   level deep; no child gets `delegate_task` back; a child's dangerous command is denied.
   `max_concurrent_children` is the most tasks one `delegate_task` call may carry and the most calls
   running in the background at once (a call over that runs inside the lead's turn instead).
+- **The crew's model** (16 October): `delegation.model` is `LITELLM_CREW_MODEL` (the vm-manager's
+  setting, default `agent-crew`). A child keeps the lead's LiteLLM address and key and asks for that
+  name instead of `agent-default`, so LiteLLM can tell the crew's calls from the lead's. The backend
+  aliases it on each user's key: the cheap model on Free, on Pro and Max the same Claude at a medium
+  effort (the lead's is low), and on the user's own key the same model and key at a medium effort. The
+  name has its context size given too (`model_overrides.custom.<name>.context_window`, the same value
+  as `model.context_length`), because `model.context_length` holds for the lead's name only. One name
+  for all three: Hermes has one `delegation` section. With `LITELLM_CREW_MODEL` set to `LITELLM_MODEL`,
+  or in a container made before this, the crew calls the lead's model, as before. Deploy the backend
+  first: a key that does not have the name yet refuses the crew's calls (the backend adds it to every
+  key at its next 5-minute sync).
 - **Follow-up runs:** on the Runs API Hermes runs the lead's children in the background. The run
   ends with a short status, and the reports are stored in the session for the next turn, which
   the client has to start. So after a run that handed work over, the Bridge waits until `GET

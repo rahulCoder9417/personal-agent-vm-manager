@@ -36,6 +36,25 @@ class PlatformTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             load_platform_file(self.path)
 
+    def test_crew_model(self):
+        # The crew calls a name of its own, so LiteLLM can give it a medium effort while the lead's is low; the
+        # child keeps the lead's endpoint and key (only `delegation.model` is set), and its context size is given
+        # as for the lead, so it does not probe LiteLLM either.
+        pf = load_platform_file(self.path)
+        cfg = render_hermes_config(pf, {"LITELLM_MODEL": "agent-default", "LITELLM_CREW_MODEL": " agent-crew ",
+                                        "BRIDGE_HERMES_CONTEXT_LENGTH": "200000"})
+        self.assertEqual(cfg["delegation"]["model"], "agent-crew")
+        for key in ("provider", "base_url", "api_key"):
+            self.assertNotIn(key, cfg["delegation"])
+        self.assertEqual(cfg["model"]["default"], "agent-default")
+        self.assertEqual(cfg["model_overrides"], {"custom": {"agent-crew": {"context_window": 200_000}}})
+        # The same name as the lead's, or none: the crew calls the lead's model, as before.
+        for env in ({"LITELLM_MODEL": "agent-default", "LITELLM_CREW_MODEL": "agent-default"},
+                    {"LITELLM_CREW_MODEL": "agent-default"}, {"LITELLM_CREW_MODEL": "  "}, {}):
+            cfg = render_hermes_config(pf, env)
+            self.assertNotIn("model", cfg["delegation"], env)
+            self.assertNotIn("model_overrides", cfg, env)
+
     def test_render(self):
         pf = load_platform_file(self.path)
         cfg = render_hermes_config(pf, {"LITELLM_BASE_URL": "http://litellm:4000/", "LITELLM_MODEL": "cheap",
@@ -46,6 +65,9 @@ class PlatformTest(unittest.TestCase):
         for raw, want in (("200000", 200_000), ("64000", 64_000), ("1000", 128_000), ("lots", 128_000), ("", 128_000)):
             self.assertEqual(render_hermes_config(pf, {"BRIDGE_HERMES_CONTEXT_LENGTH": raw})["model"]["context_length"],
                              want, raw)
+        # No crew name given (a container made before it existed): the crew calls the lead's model.
+        self.assertNotIn("model", cfg["delegation"])
+        self.assertNotIn("model_overrides", cfg)
         platform = cfg["mcp_servers"]["platform"]
         self.assertEqual(platform["url"], "http://api:8080/mcp")
         self.assertEqual(platform["headers"], {"Authorization": "Bearer tok-123"})

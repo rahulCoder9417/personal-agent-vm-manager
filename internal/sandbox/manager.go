@@ -237,6 +237,7 @@ func (m *Manager) spec(userID string, browser bool) docker.ContainerSpec {
 			"BRIDGE_PORT=" + strconv.Itoa(c.BridgePort),
 			"LITELLM_BASE_URL=" + c.LiteLLMBaseURL,
 			"LITELLM_MODEL=" + c.LiteLLMModel,
+			"LITELLM_CREW_MODEL=" + c.LiteLLMCrewModel,
 			"PLATFORM_MCP_URL=" + c.PlatformMCPURL,
 			"HTTP_PROXY=" + proxy, "HTTPS_PROXY=" + proxy, "http_proxy=" + proxy, "https_proxy=" + proxy,
 			"NO_PROXY=" + noProxy, "no_proxy=" + noProxy,

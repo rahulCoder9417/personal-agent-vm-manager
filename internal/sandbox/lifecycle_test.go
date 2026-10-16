@@ -59,6 +59,10 @@ func TestCreateMakesStoppedSandboxWithHashedSecrets(t *testing.T) {
 	if !slices.Contains(s.Env, "HTTPS_PROXY="+e.cfg.EgressProxyURL) || !slices.Contains(s.Env, "USER_ID=u1") {
 		t.Fatalf("env: %v", s.Env)
 	}
+	// The lead and Hermes's crew call LiteLLM by different names (the crew thinks at another effort).
+	if !slices.Contains(s.Env, "LITELLM_MODEL=agent-default") || !slices.Contains(s.Env, "LITELLM_CREW_MODEL=agent-crew") {
+		t.Fatalf("env: %v", s.Env)
+	}
 
 	// Idempotent: same sandbox, same hash, no new container.
 	sb2, hash2 := e.create(t, "u1")

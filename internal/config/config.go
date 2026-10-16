@@ -52,8 +52,12 @@ type Config struct {
 	// Where the container talks to (all through the egress proxy)
 	LiteLLMBaseURL string // LITELLM_BASE_URL (default "http://litellm:4000")
 	LiteLLMModel   string // LITELLM_MODEL (default "agent-default"): model name Hermes asks LiteLLM for
-	PlatformMCPURL string // PLATFORM_MCP_URL (default "http://api:8080/mcp")
-	EgressProxyURL string // EGRESS_PROXY_URL (default "http://172.30.0.2:3128"): HTTP(S)_PROXY in containers
+	// LITELLM_CREW_MODEL (default "agent-crew"): the model name Hermes's crew (Byte, Patch, Scout) asks
+	// LiteLLM for, so LiteLLM can tell the crew's calls from the lead's (the crew thinks at medium effort,
+	// the lead at low). Set it to LITELLM_MODEL to have the crew call the lead's model, as before.
+	LiteLLMCrewModel string
+	PlatformMCPURL   string // PLATFORM_MCP_URL (default "http://api:8080/mcp")
+	EgressProxyURL   string // EGRESS_PROXY_URL (default "http://172.30.0.2:3128"): HTTP(S)_PROXY in containers
 
 	// Egress allowlists (Squid)
 	EgressAllowlistDir      string        // EGRESS_ALLOWLIST_DIR (default "/allowlists")
@@ -110,10 +114,11 @@ func Load(getenv func(string) string) (*Config, error) {
 		BrowserMemoryBytes: int64(p.int("SANDBOX_BROWSER_MEMORY_MB", 2048)) * 1024 * 1024,
 		BrowserPidsLimit:   int64(p.int("SANDBOX_BROWSER_PIDS_LIMIT", 1024)),
 
-		LiteLLMBaseURL: p.str("LITELLM_BASE_URL", "http://litellm:4000"),
-		LiteLLMModel:   p.str("LITELLM_MODEL", "agent-default"),
-		PlatformMCPURL: p.str("PLATFORM_MCP_URL", "http://api:8080/mcp"),
-		EgressProxyURL: p.str("EGRESS_PROXY_URL", "http://172.30.0.2:3128"),
+		LiteLLMBaseURL:   p.str("LITELLM_BASE_URL", "http://litellm:4000"),
+		LiteLLMModel:     p.str("LITELLM_MODEL", "agent-default"),
+		LiteLLMCrewModel: p.str("LITELLM_CREW_MODEL", "agent-crew"),
+		PlatformMCPURL:   p.str("PLATFORM_MCP_URL", "http://api:8080/mcp"),
+		EgressProxyURL:   p.str("EGRESS_PROXY_URL", "http://172.30.0.2:3128"),
 
 		EgressAllowlistDir:      p.str("EGRESS_ALLOWLIST_DIR", "/allowlists"),
 		EgressProxyContainer:    p.str("EGRESS_PROXY_CONTAINER", "egress-proxy"),
@@ -157,7 +162,7 @@ func Load(getenv func(string) string) (*Config, error) {
 	}
 	nonEmpty := map[string]string{
 		"AGENT_IMAGE": c.AgentImage, "SANDBOX_NETWORK": c.SandboxNetwork, "SANDBOX_RUNTIME": c.Runtime,
-		"LITELLM_MODEL": c.LiteLLMModel, "EGRESS_PROXY_CONTAINER": c.EgressProxyContainer,
+		"LITELLM_MODEL": c.LiteLLMModel, "LITELLM_CREW_MODEL": c.LiteLLMCrewModel, "EGRESS_PROXY_CONTAINER": c.EgressProxyContainer,
 		"GRPC_ADDR": c.GRPCAddr, "SANDBOX_VOLUME_DRIVER": c.VolumeDriver,
 	}
 	for name, v := range nonEmpty {

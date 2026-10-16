@@ -538,8 +538,17 @@ def claude_env(parallel: int = DEFAULT_MAX_PARALLEL) -> dict[str, str]:
 HERMES_DELEGATE_TOOL = "delegate_task"
 
 
-def hermes_delegation(parallel: int = DEFAULT_MAX_PARALLEL) -> dict[str, Any]:
-    """The `delegation` section of the Hermes config: one level deep, a cap on parallel children.
+def hermes_delegation(parallel: int = DEFAULT_MAX_PARALLEL, model: Optional[str] = None) -> dict[str, Any]:
+    """The `delegation` section of the Hermes config: one level deep, a cap on parallel children, and the
+    model name the children call when `model` is given.
+
+    `model` (LITELLM_CREW_MODEL, see platform.crew_model): with only `delegation.model` set, a child keeps the
+    lead's endpoint and key and asks for this name instead (tools/delegate_tool_config.py
+    `_resolve_delegation_credentials`, the "pure inherit" branch, and `_resolve_child_runtime`, at the pinned
+    commit). So LiteLLM can tell the crew's calls from the lead's: the backend aliases the name per key, to the
+    same model at a medium effort where the lead has a low one. One name for all three: Hermes has one
+    `delegation` section, not one per child. A child on a pinned model does not borrow the lead's fallback
+    chain; LiteLLM falls back by itself (the backend's infra/litellm/config.yaml).
 
     Setting names as in the pinned Hermes (cli-config.yaml.example, hermes_cli/config_defaults.py,
     tools/delegate_tool_config.py). `max_concurrent_children` is the most tasks one delegate_task call may
@@ -551,12 +560,15 @@ def hermes_delegation(parallel: int = DEFAULT_MAX_PARALLEL) -> dict[str, Any]:
     in its brief, not a lock. That holds for the web and the browser too: the lead, Byte and Patch are told
     the web tools and the browser tools are Scout's, and nothing in Hermes stops them from calling one.
     """
-    return {
+    out: dict[str, Any] = {
         "max_concurrent_children": max(1, parallel),
         "max_spawn_depth": 1,  # the lead delegates; a child cannot
         "orchestrator_enabled": False,  # no child is ever given delegate_task back
         "subagent_auto_approve": False,  # a child's dangerous command is denied, like the lead's
     }
+    if model:
+        out["model"] = model
+    return out
 
 
 def hermes_handoff(browser: bool = False) -> str:

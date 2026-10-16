@@ -11,7 +11,7 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional
 
 from . import browser, crew
 
@@ -105,6 +105,19 @@ def hermes_context_length(env: dict[str, str]) -> int:
     return value if value >= HERMES_MIN_CONTEXT_LENGTH else HERMES_CONTEXT_LENGTH
 
 
+def crew_model(env: dict[str, str]) -> Optional[str]:
+    """The model name Hermes's crew (Byte, Patch, Scout) calls, or None for the lead's own.
+
+    LITELLM_CREW_MODEL, given by the vm-manager (default `agent-crew`). The backend aliases it on each user's
+    LiteLLM key like `agent-default`: the cheap model on Free, on Pro and Max the same Claude at a medium effort
+    (the lead's is low, for a quick answer; code is written and reviewed by the crew, where thinking pays), and
+    on the user's own key the same model and key at a medium effort. None when it is not set (a container made
+    before it existed) or names the lead's model: the crew then calls the lead's model, as before."""
+    name = (env.get("LITELLM_CREW_MODEL") or "").strip()
+    lead = (env.get("LITELLM_MODEL") or "agent-default").strip()
+    return name if name and name != lead else None
+
+
 # What Hermes's system prompt says about where its answers appear, in place of its built-in hint for the API
 # server. The Bridge reaches Hermes only through that API (`/v1/runs`), so every agent it builds has the platform
 # `api_server` (gateway/platforms/api_server.py `_create_agent`), and the built-in hint for it asks for plain text
@@ -173,6 +186,7 @@ def render_hermes_config(pf: PlatformFile, env: dict[str, str], data_dir: str = 
     if browser.enabled(pf, env):
         servers[browser.SERVER_NAME] = browser.hermes_server(env, data_dir)
 
+    crew_name = crew_model(env)
     cfg: dict[str, Any] = {
         "model": {
             "provider": "custom",
@@ -182,13 +196,21 @@ def render_hermes_config(pf: PlatformFile, env: dict[str, str], data_dir: str = 
             # The model's context size, given instead of detected (hermes_context_length).
             "context_length": hermes_context_length(env),
         },
+        # The crew's name has its context size given too: `model.context_length` holds for the lead's name only
+        # (agent/agent_init.py `_scope_context_length_to_default_runtime`), so without this a child would probe
+        # LiteLLM for it like the lead used to (hermes_context_length). An explicit per-model override is read
+        # before any probe (agent/model_metadata.py `_config_override_context_length`, agent/models_dev.py
+        # `_explicit_model_override`); the children's provider is the lead's, `custom`.
+        **({"model_overrides": {"custom": {crew_name: {"context_window": hermes_context_length(env)}}}}
+           if crew_name else {}),
         "mcp_servers": servers,
         # No Hermes-side scheduling or outbound messaging: the platform owns both.
         "cron": {"enabled": False},
         # Nor Hermes's built-in browser toolset (toolsets.py "browser": its own browser_* tools).
         "agent": {"disabled_toolsets": ["cronjob", "messaging", "browser"]},
-        # The crew: the lead hands work over with delegate_task, one level deep, a few at a time.
-        "delegation": crew.hermes_delegation(crew.max_parallel(env)),
+        # The crew: the lead hands work over with delegate_task, one level deep, a few at a time, on a model name
+        # of its own (crew_model), so LiteLLM gives the crew its own effort.
+        "delegation": crew.hermes_delegation(crew.max_parallel(env), crew_name),
         "terminal": {"backend": "local", "cwd": os.path.join(data_dir, "workspace"), "timeout": 180},
         # One memory, the platform's (remember / recall / forget; core.MEMORY_RULES). Hermes's own (MEMORY.md
         # and USER.md under HERMES_HOME/memories, its `memory` tool) is off: with both stores off no store is
