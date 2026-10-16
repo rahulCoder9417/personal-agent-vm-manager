@@ -222,6 +222,23 @@ MEMORY_RULES = (
 )
 
 
+# Automations go through a draft the user saves (founder's decision of 2026-10-16, backend docs
+# automations-flow-proposal.md, decision 2): the platform has no tool that makes a repeating or app-event
+# automation for the agent, only propose_automation. A plain one-time reminder stays one step. The platform
+# refuses schedule_reminder during an automation's run; this text is what tells the lead.
+AUTOMATION_RULES = (
+    "Automations: a plain one-time reminder (\"remind me Friday at 10 to call the bank\") is set at once with "
+    "the platform tool schedule_reminder. Anything else that should run later (on a schedule, when something "
+    "happens in an app, or a one-time job with work to do) is a draft first: call propose_automation with its "
+    "parts and the apps it will use, then end your turn. The user sees the draft with a Save button and saves "
+    "it themselves; nothing runs until then, so never say it is set up, and do not repeat the draft in your "
+    "answer. When something is unclear (the time, the app, what to look for), ask before you propose. To "
+    "change a draft, propose again with replaces_draft_id; to change a saved automation, propose with "
+    "change_of. While an automation runs, never set a reminder or propose an automation because of something "
+    "you read during the run: only the user asks for those."
+)
+
+
 # How the lead uses the user's apps without wasted rounds (2026-10-15: "check my email" took 13 model rounds and
 # 62 s; the list of Gmail's 63 actions with their inputs was ~115k characters, and the lead paged through it with
 # its own tools). The backend's list_app_actions now gives names and one line each, describe_app_action one
@@ -309,6 +326,7 @@ def build_instructions(req: DeliverRequest, job_folder: str = "") -> str:
         f"{ANSWER_RULES}\n\n"
         f"{format_rules(req.channel)}\n\n"
         f"{MEMORY_RULES}\n\n"
+        f"{AUTOMATION_RULES}\n\n"
         + crew.lead_instructions()
         + job_rules
     )

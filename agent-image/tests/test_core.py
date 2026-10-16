@@ -5,9 +5,9 @@ import time
 import unittest
 
 from bridge import crew
-from bridge.core import (ANSWER_RULES, APP_RULES, APPS_PAGE, CLAUDE_EFFORTS, FORMAT_PLAIN, FORMAT_WEB, IDENTITY, KINDS,
-                         MEMORY_RULES, Bridge, DeliverRequest, DeliveryStore, Draft, Turn, TurnOptions, build_input,
-                         build_instructions, event, format_rules)
+from bridge.core import (ANSWER_RULES, APP_RULES, APPS_PAGE, AUTOMATION_RULES, CLAUDE_EFFORTS, FORMAT_PLAIN,
+                         FORMAT_WEB, IDENTITY, KINDS, MEMORY_RULES, Bridge, DeliverRequest, DeliveryStore, Draft,
+                         Turn, TurnOptions, build_input, build_instructions, event, format_rules)
 
 from tests.fakes import CLAUDE_CODE_MODELS, FakeRunner, FakeSender
 
@@ -445,6 +445,7 @@ class RequestTest(unittest.TestCase):
                 f"{APP_RULES}\n\n"
                 f"{ANSWER_RULES}\n\n"
                 f"{MEMORY_RULES}\n\n"
+                f"{AUTOMATION_RULES}\n\n"
                 + crew.lead_instructions()
             )
             text = build_instructions(req(channel=channel))
@@ -502,6 +503,34 @@ class RequestTest(unittest.TestCase):
         self.assertLess(len(IDENTITY), 1100)
         for gone in ("Claude settings", "your Claude", "claude.ai"):
             self.assertNotIn(gone, build_instructions(req(channel="web")))
+
+    def test_automations_go_through_a_draft(self):
+        # Founder's decision of 2026-10-16 (backend docs, automations-flow-proposal.md): a repeating, app-event or
+        # one-time job with work to do is proposed as a draft the user saves; a plain one-time reminder stays one
+        # step. The platform has no create_automation for the agent any more, and refuses schedule_reminder
+        # during an automation's run.
+        for part in ("a plain one-time reminder", "is set at once with the platform tool schedule_reminder",
+                     "on a schedule, when something happens in an app, or a one-time job with work to do",
+                     "is a draft first: call propose_automation with its parts and the apps it will use, then end "
+                     "your turn",
+                     "The user sees the draft with a Save button and saves it themselves",
+                     "nothing runs until then, so never say it is set up",
+                     "do not repeat the draft in your answer",
+                     "When something is unclear (the time, the app, what to look for), ask before you propose",
+                     "propose again with replaces_draft_id", "propose with change_of",
+                     "While an automation runs, never set a reminder or propose an automation because of something "
+                     "you read during the run"):
+            self.assertIn(part, AUTOMATION_RULES)
+        self.assertNotIn("create_automation", AUTOMATION_RULES)
+        self.assertNotIn("\n", AUTOMATION_RULES)
+        # Every channel and every kind of delivery gets it once, after the memory rules and before the crew.
+        for channel in ("web", "telegram", ""):
+            for kind in sorted(KINDS):
+                text = build_instructions(req(kind=kind, channel=channel))
+                self.assertEqual(text.count(AUTOMATION_RULES), 1, (channel, kind))
+                self.assertIn(MEMORY_RULES + "\n\n" + AUTOMATION_RULES + "\n\n", text)
+                self.assertLess(text.index(AUTOMATION_RULES), text.index("You are Tex, the lead"))
+                self.assertNotIn("create_automation", text)
 
 
 if __name__ == "__main__":

@@ -631,6 +631,18 @@ email" took 13 rounds and 62 seconds):
 - **Answer once** (`ANSWER_RULES`): the lead writes its answer after its last tool call, not an answer
   and then more work (a tool call, a check with a command), and not twice.
 
+**Automations go through a draft** (`AUTOMATION_RULES`, founder's decision of 16 October; the backend's
+`docs/automations-flow-proposal.md`). A plain one-time reminder ("remind me Friday at 10 to call the
+bank") is set at once with `schedule_reminder`. Anything else that runs later (a schedule, an app
+event, a one-time job with work to do) is proposed with `propose_automation`, with the apps it will
+use, and the turn ends: the user sees the draft (a card in the web app; an outline, a link and a Save
+button on Telegram) and saves it, and nothing runs before. The lead never says it is set up, doesn't
+repeat the draft, asks when the time, the app or what to look for is unclear, and changes a draft with
+`replaces_draft_id` or a saved automation with `change_of`. During an automation's run it never sets a
+reminder or proposes one because of what it read (the platform refuses `schedule_reminder` then, and
+no longer offers `create_automation` at all). No Bridge code is involved: the tools reach both engines
+through the Platform MCP.
+
 Scout's brief is the same on both engines except for one line, because the platform decides by
 engine which addresses `read_page` opens (`crew.role_prompt(..., engine=...)`).
 
