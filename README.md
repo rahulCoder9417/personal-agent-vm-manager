@@ -595,7 +595,7 @@ runtimes. The ids `byte`, `patch`, `scout` are fixed. No proto or Go change.
 
 The lead's instructions (`build_instructions` in `bridge/core.py`, the same on both runtimes)
 open with who the lead is (`IDENTITY`): Tex, the user's own agent in Textcrew. The user connects
-apps on Textcrew's Apps page (https://app.textcrew.in/apps); the lead sees them with the platform
+apps on Textcrew's Apps page (https://app.textcrew.in/integrations/apps); the lead sees them with the platform
 tools `get_profile` and `list_app_actions`, and when an app the user calls connected is missing it
 says the app may still be finishing or needs connecting again on that page. It never sends the
 user to Claude's settings or connectors, never calls itself Claude or Claude Code, and names the

@@ -488,7 +488,7 @@ class RequestTest(unittest.TestCase):
                      "do not mention the engine, the model or the company behind you unless the user asks",
                      "Where other guidance you have names you differently, this takes its place"):
             self.assertIn(part, IDENTITY)
-        self.assertEqual(APPS_PAGE, "https://app.textcrew.in/apps")
+        self.assertEqual(APPS_PAGE, "https://app.textcrew.in/integrations/apps")
         for channel in ("web", "telegram", "whatsapp", "imessage", ""):
             for kind in sorted(KINDS):
                 text = build_instructions(req(kind=kind, channel=channel))

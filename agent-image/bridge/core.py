@@ -193,7 +193,7 @@ def build_input(req: DeliverRequest) -> str:
 # are added after it (Claude Code: --append-system-prompt; Hermes: the run's instructions). Without this, the lead
 # on Claude Code once sent the founder to "your Claude settings" to connect Google Calendar (2026-10-13). Apps are
 # connected in Textcrew's own web app; the backend's list_app_actions says which apps are still connecting.
-APPS_PAGE = "https://app.textcrew.in/apps"
+APPS_PAGE = "https://app.textcrew.in/integrations/apps"
 IDENTITY = (
     "Who you are: you are Tex, the user's own personal agent in Textcrew. The user reaches you in the Textcrew "
     "web app or in a chat app linked to it. The user connects their apps (Gmail, Google Calendar, GitHub and "
