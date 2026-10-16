@@ -31,6 +31,10 @@ func TestLoadDefaults(t *testing.T) {
 	if c.LiteLLMBaseURL != "http://litellm:4000" || c.PlatformMCPURL != "http://api:8080/mcp" {
 		t.Errorf("unexpected url defaults: %+v", c)
 	}
+	// The lead and the crew call different names, so LiteLLM can give them different efforts.
+	if c.LiteLLMModel != "agent-default" || c.LiteLLMCrewModel != "agent-crew" {
+		t.Errorf("unexpected model names: %q, %q", c.LiteLLMModel, c.LiteLLMCrewModel)
+	}
 	if c.MemoryBytes != 600*1024*1024 || c.NanoCPUs != 1e9 || c.PidsLimit != 256 {
 		t.Errorf("unexpected limits: mem=%d cpu=%d pids=%d", c.MemoryBytes, c.NanoCPUs, c.PidsLimit)
 	}
@@ -59,12 +63,16 @@ func TestLoadOverrides(t *testing.T) {
 	e["CLAUDE_EGRESS_DOMAINS"] = " api.anthropic.com, *.claude.ai "
 	e["SANDBOX_BROWSER_MEMORY_MB"] = "3072"
 	e["SANDBOX_BROWSER_PIDS_LIMIT"] = "2048"
+	e["LITELLM_CREW_MODEL"] = "agent-default"
 	c, err := Load(env(e))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	if c.BrowserMemoryBytes != 3072*1024*1024 || c.BrowserPidsLimit != 2048 || c.MemoryBytes != 600*1024*1024 || c.PidsLimit != 256 {
 		t.Errorf("browser limits: mem=%d pids=%d (others %d, %d)", c.BrowserMemoryBytes, c.BrowserPidsLimit, c.MemoryBytes, c.PidsLimit)
+	}
+	if c.LiteLLMCrewModel != "agent-default" {
+		t.Errorf("crew model: %q", c.LiteLLMCrewModel)
 	}
 	if c.AwakeCap != 7 || c.NanoCPUs != 5e8 || c.IdleTimeout != 90*time.Second || c.AgentImageVersion != "v42" {
 		t.Errorf("overrides not applied: %+v", c)

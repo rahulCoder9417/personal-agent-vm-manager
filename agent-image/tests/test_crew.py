@@ -366,6 +366,8 @@ class HermesCrewTest(unittest.TestCase):
         self.assertEqual(crew.hermes_delegation(), {"max_concurrent_children": 3, "max_spawn_depth": 1,
                                                     "orchestrator_enabled": False, "subagent_auto_approve": False})
         self.assertEqual(crew.hermes_delegation(5)["max_concurrent_children"], 5)
+        self.assertEqual(crew.hermes_delegation(3, "agent-crew")["model"], "agent-crew")
+        self.assertNotIn("model", crew.hermes_delegation(3, None))
 
     def test_handoff_carries_the_same_role_prompts(self):
         text = crew.hermes_handoff()
