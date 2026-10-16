@@ -18,7 +18,8 @@ import urllib.request
 from bridge import browser, crew
 from bridge.claude import (LEAD_GATE, MSG_CHOICE, MSG_NOT_SIGNED_IN, MSG_REFUSED, ClaudeAuth, ClaudeError,
                            ClaudeRunner, CrewEvents, LoginNotFound, Redactor, SessionMap, classify_failure,
-                           find_authorize_url, render_settings)
+                           find_authorize_url, render_settings, GateConfig, never_rules, CC_GATE,
+                           GATED_TOOLS)
 from bridge.core import (ANSWER_RULES, APP_RULES, FORMAT_PLAIN, FORMAT_WEB, IDENTITY, MEMORY_RULES, Bridge,
                          DeliverRequest, DeliveryStore, TurnOptions)
 from bridge.lead_gate import BLOCK, PASS, REFUSAL
@@ -245,16 +246,20 @@ class ClaudeRunnerTest(unittest.TestCase):
         self.assertEqual(flag(argv, "--output-format"), "stream-json")
         self.assertEqual(flag(argv, "--permission-mode"), "dontAsk")
         self.assertEqual(flag(argv, "--permission-prompts"), "none")
-        # The session's permission rules (the lead and the specialists share them). Denied: what nobody has.
-        # Allowed: the lead's tools, plus WebSearch, which only Scout uses (see the hook below).
-        self.assertEqual(flags(argv, "--disallowedTools"), ["mcp__platform__send_message", "WebFetch"])
+        # The session's permission rules (the lead and the specialists share them). Denied: what nobody has, and
+        # the platform's own and the credential files. Allowed: reading and searching, plus WebSearch, which only
+        # Scout uses (see the hook below). Not allowed: Bash, Edit, Write, NotebookEdit, which run only when the
+        # gate hook says so.
+        self.assertEqual(flags(argv, "--disallowedTools"),
+                         ["mcp__platform__send_message", "WebFetch", *never_rules(self.e.data)])
         self.assertEqual(flag(argv, "--allowedTools"),
-                         "Bash,Read,Edit,Write,Glob,Grep,NotebookEdit,TodoWrite,WebSearch,mcp__platform,"
-                         "mcp__user_notes,Agent")
+                         "Read,Glob,Grep,TodoWrite,WebSearch,mcp__platform,mcp__user_notes,Agent")
+        for tool in ("Bash", "Edit", "Write", "NotebookEdit"):
+            self.assertNotIn(tool, flag(argv, "--allowedTools").split(","))
         self.assertEqual(flag(argv, "--setting-sources"), "user")
-        # The hook that refuses the lead's own calls to Scout's web tools: a private settings file.
+        # The hooks (the lead's web gate and Textcrew's gate): a private settings file.
         self.assertEqual(flag(argv, "--settings"), os.path.join(self.e.data, ".platform", "claude-settings.json"))
-        self.assertEqual(call["settings"], render_settings())
+        self.assertEqual(call["settings"], render_settings(GateConfig.from_env(self.e.env, self.e.data, False)))
         self.assertEqual(call["settings_mode"], oct(0o600))
         self.assertIn("telegram", flag(argv, "--append-system-prompt"))
         self.assertIsNotNone(flag(argv, "--session-id"))
@@ -314,10 +319,11 @@ class ClaudeRunnerTest(unittest.TestCase):
         # The session allows Scout's browser tools one by one (never the whole server), next to what it
         # allowed before; nothing more is denied, because a session deny would take a tool from Scout too.
         self.assertEqual(flag(argv, "--allowedTools"),
-                         "Bash,Read,Edit,Write,Glob,Grep,NotebookEdit,TodoWrite,WebSearch,"
+                         "Read,Glob,Grep,TodoWrite,WebSearch,"
                          + ",".join(BROWSER_TOOLS) + ",mcp__platform,mcp__user_notes,Agent")
         self.assertNotIn("mcp__scout_browser", flag(argv, "--allowedTools").split(","))
-        self.assertEqual(flags(argv, "--disallowedTools"), ["mcp__platform__send_message", "WebFetch"])
+        self.assertEqual(flags(argv, "--disallowedTools"),
+                         ["mcp__platform__send_message", "WebFetch", *never_rules(self.e.data)])
         # Scout has the browser tools, and its brief says how to use them; Byte and Patch have them denied.
         agents = json.loads(flag(argv, "--agents"))
         self.assertEqual(agents, crew.claude_agents("platform", browser=True))
@@ -327,8 +333,10 @@ class ClaudeRunnerTest(unittest.TestCase):
             self.assertEqual([t for t in agents[member]["tools"] if "browser" in t], [])
             for tool in BROWSER_TOOLS:
                 self.assertIn(tool, agents[member]["disallowedTools"])
-        # The lead's gate is the same hook as without the browser, and it guards the browser tools.
-        self.assertEqual(call["settings"], render_settings())
+        # The lead's gate is the same hook as without the browser, and it guards the browser tools. Textcrew's
+        # gate is told the browser is on (network commands then need the user's OK).
+        self.assertEqual(call["settings"], render_settings(GateConfig.from_env(self.e.env, self.e.data, True)))
+        self.assertIn("--browser", shlex.split(call["settings"]["hooks"]["PreToolUse"][1]["hooks"][0]["command"]))
         self.assertEqual(call["settings"]["hooks"]["PreToolUse"][0]["matcher"], "|".join(WEB_TOOLS))
         self.assertIn("--strict-mcp-config", argv)
 
@@ -1000,8 +1008,8 @@ class LeadGateTest(unittest.TestCase):
         hook that ran."""
         ran = []
         for group in render_settings()["hooks"]["PreToolUse"]:
-            if event["tool_name"] not in matcher_names(group["matcher"]):
-                continue
+            if event["tool_name"] not in matcher_names(group["matcher"]) or LEAD_GATE not in group["hooks"][0]["command"]:
+                continue  # Textcrew's gate (cc_gate.py) has tests of its own
             for hook in group["hooks"]:
                 self.assertEqual((hook["type"], "args" in hook), ("command", False), "shell form")
                 done = subprocess.run(["sh", "-c", hook["command"]], input=json.dumps(event), capture_output=True,
@@ -1013,7 +1021,11 @@ class LeadGateTest(unittest.TestCase):
         self.assertEqual(crew.claude_lead_gate("platform"), self.GUARDED)
         self.assertEqual(crew.claude_session_allowed(), ["WebSearch"])
         self.assertEqual(crew.claude_session_denied("platform"), ["mcp__platform__send_message", "WebFetch"])
-        (group,) = render_settings()["hooks"]["PreToolUse"]
+        lead, gate = render_settings()["hooks"]["PreToolUse"]
+        group = lead
+        # The second group is Textcrew's gate, for the commands and file changes (tests/test_cc_gate.py).
+        self.assertEqual(matcher_names(gate["matcher"]), list(GATED_TOOLS))
+        self.assertEqual(shlex.split(gate["hooks"][0]["command"])[:3], [sys.executable, "-I", CC_GATE])
         # Only letters, digits, "_" and "|": Claude Code reads such a matcher as a list of exact tool names.
         self.assertEqual(group["matcher"],
                          "WebSearch|mcp__platform__web_search|mcp__platform__read_page|"
@@ -1037,7 +1049,7 @@ class LeadGateTest(unittest.TestCase):
     def test_the_gate_guards_what_scout_has_and_nothing_else(self):
         # The matcher, the names the gate is given and Scout's own tool list (with the browser turned on)
         # are the same seventeen names, so the lead is refused exactly the tools Scout is given.
-        (group,) = render_settings()["hooks"]["PreToolUse"]
+        group = render_settings()["hooks"]["PreToolUse"][0]
         command = shlex.split(group["hooks"][0]["command"])
         scout = crew.claude_agents("platform", browser=True)["scout"]["tools"]
         self.assertEqual(matcher_names(group["matcher"]), scout)

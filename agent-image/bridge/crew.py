@@ -99,7 +99,10 @@ BYTE = Member(
         "pushing to it is refused.\n"
         "- Git is already set up for the user's GitHub repositories and goes through the platform, so you never "
         "need a token or a password. If git refuses something, say so in your report; do not look for another "
-        "way in.\n"
+        "way in. Pushing a branch you made goes through; a push to a branch that already existed, or a force "
+        "push, needs the user's OK (git's refusal says they were asked).\n"
+        "- A command or file change that needs the user's OK is refused with a reason that says so. Stop, and say "
+        "in your report what waits for their OK; never try another way to do it.\n"
         "- Read the code around the change first and follow the project's own conventions. Keep the change as small "
         "as the job allows.\n"
         "- Run the project's tests or build when it has them, and fix what you broke.\n"
@@ -351,8 +354,11 @@ def job_instructions(member_id: str, folder: str) -> str:
         f"outside it. Hand the job to {member.name} as the brief says, with the whole brief and the job folder."
         f"{split} Before the report, every program the job started is stopped. After this turn the platform stops "
         "anything still running from the job folder and deletes the folder, so nothing in it is kept: what must "
-        "be kept is pushed, or is in the report. Your final answer is the job's report, in the shape the message "
-        "gives, and nothing else."
+        "be kept is pushed, or is in the report. The brief is the user's yes for what it asks and nothing more: "
+        "a command or a push it does not cover is refused (nothing is asked during a job). Go on without it, and "
+        "name it in the report under **Needs your OK**; the user can approve it after the job, and the job then "
+        "runs again with it allowed. Your final answer is the job's report, in the shape the message gives, and "
+        "nothing else."
     )
 
 

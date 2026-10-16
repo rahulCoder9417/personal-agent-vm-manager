@@ -6,7 +6,7 @@ import unittest
 
 from bridge import crew
 from bridge.core import (ANSWER_RULES, APP_RULES, APPS_PAGE, AUTOMATION_RULES, CLAUDE_EFFORTS, FORMAT_PLAIN,
-                         FORMAT_WEB, IDENTITY, KINDS, MEMORY_RULES, Bridge, DeliverRequest, DeliveryStore, Draft,
+                         FORMAT_WEB, IDENTITY, KINDS, MEMORY_RULES, OWN_ACTION_RULES, Bridge, DeliverRequest, DeliveryStore, Draft,
                          Turn, TurnOptions, build_input, build_instructions, event, format_rules)
 
 from tests.fakes import CLAUDE_CODE_MODELS, FakeRunner, FakeSender
@@ -427,6 +427,14 @@ class RequestTest(unittest.TestCase):
             self.assertIn(FORMAT_WEB, build_instructions(req(kind=kind, channel="web", session_key="web")), kind)
             self.assertIn(FORMAT_PLAIN, build_instructions(req(kind=kind, channel="telegram")), kind)
 
+    def test_the_lead_knows_its_own_actions_may_wait_for_the_user(self):
+        # Pushes to a branch that already existed, force pushes and some commands are refused and asked about; the
+        # lead ends its turn and makes the same call again after the yes (both engines).
+        text = build_instructions(req(channel="web", session_key="web"))
+        self.assertIn(OWN_ACTION_RULES, text)
+        for words in ("a force push, needs the user's OK", "end your turn", "make exactly the same call again"):
+            self.assertIn(words, OWN_ACTION_RULES)
+
     def test_the_formatting_rules_are_the_only_new_part(self):
         # The instructions as they were before the formatting rules: with the rules taken out, the text is that
         # again, for every channel. The rules are a paragraph of their own, after the app and answer rules and
@@ -441,7 +449,7 @@ class RequestTest(unittest.TestCase):
                 "When the user's GitHub is connected, git works for their repositories: clone "
                 "https://github.com/<owner>/<repo> into your workspace, commit on a new branch and push it, "
                 "then open the pull request with the GitHub app action. Pushing to a repository's default "
-                "branch is refused, so always work on a branch.\n\n"
+                f"branch is refused, so always work on a branch. {OWN_ACTION_RULES}\n\n"
                 f"{APP_RULES}\n\n"
                 f"{ANSWER_RULES}\n\n"
                 f"{MEMORY_RULES}\n\n"
@@ -452,7 +460,7 @@ class RequestTest(unittest.TestCase):
             rules = format_rules(channel) + "\n\n"
             self.assertEqual(text.count(rules), 1, channel)
             self.assertEqual(text.replace(rules, ""), before, channel)
-            self.assertIn(f"so always work on a branch.\n\n{APP_RULES}\n\n{ANSWER_RULES}\n\n" + rules + MEMORY_RULES,
+            self.assertIn(f"so always work on a branch. {OWN_ACTION_RULES}\n\n{APP_RULES}\n\n{ANSWER_RULES}\n\n" + rules + MEMORY_RULES,
                           text, channel)
 
     def test_one_memory_the_platforms(self):
