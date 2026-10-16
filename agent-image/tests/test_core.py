@@ -5,9 +5,9 @@ import time
 import unittest
 
 from bridge import crew
-from bridge.core import (APPS_PAGE, CLAUDE_EFFORTS, FORMAT_PLAIN, FORMAT_WEB, IDENTITY, KINDS, MEMORY_RULES, Bridge,
-                         DeliverRequest, DeliveryStore, Draft, Turn, TurnOptions, build_input, build_instructions, event,
-                         format_rules)
+from bridge.core import (ANSWER_RULES, APP_RULES, APPS_PAGE, CLAUDE_EFFORTS, FORMAT_PLAIN, FORMAT_WEB, IDENTITY, KINDS,
+                         MEMORY_RULES, Bridge, DeliverRequest, DeliveryStore, Draft, Turn, TurnOptions, build_input,
+                         build_instructions, event, format_rules)
 
 from tests.fakes import CLAUDE_CODE_MODELS, FakeRunner, FakeSender
 
@@ -429,8 +429,8 @@ class RequestTest(unittest.TestCase):
 
     def test_the_formatting_rules_are_the_only_new_part(self):
         # The instructions as they were before the formatting rules: with the rules taken out, the text is that
-        # again, for every channel. The rules are a paragraph of their own, after the first one and before the
-        # memory rules.
+        # again, for every channel. The rules are a paragraph of their own, after the app and answer rules and
+        # before the memory rules.
         for channel, shown in (("web", "web"), ("telegram", "telegram"), ("whatsapp", "whatsapp"), ("", "chat")):
             before = (
                 f"{IDENTITY}\n\n"
@@ -442,6 +442,8 @@ class RequestTest(unittest.TestCase):
                 "https://github.com/<owner>/<repo> into your workspace, commit on a new branch and push it, "
                 "then open the pull request with the GitHub app action. Pushing to a repository's default "
                 "branch is refused, so always work on a branch.\n\n"
+                f"{APP_RULES}\n\n"
+                f"{ANSWER_RULES}\n\n"
                 f"{MEMORY_RULES}\n\n"
                 + crew.lead_instructions()
             )
@@ -449,7 +451,8 @@ class RequestTest(unittest.TestCase):
             rules = format_rules(channel) + "\n\n"
             self.assertEqual(text.count(rules), 1, channel)
             self.assertEqual(text.replace(rules, ""), before, channel)
-            self.assertIn("so always work on a branch.\n\n" + rules + MEMORY_RULES, text, channel)
+            self.assertIn(f"so always work on a branch.\n\n{APP_RULES}\n\n{ANSWER_RULES}\n\n" + rules + MEMORY_RULES,
+                          text, channel)
 
     def test_one_memory_the_platforms(self):
         # The lead keeps facts about the user in the platform's memory, on both engines (the same text), and
