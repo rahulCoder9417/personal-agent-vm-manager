@@ -197,7 +197,7 @@ class HermesClientTest(unittest.TestCase):
         self.assertTrue(c.healthy())
         res = c.run("hello", "be brief", "telegram:42", "evt-1#1", self.progress.append, timeout=10)
         self.assertEqual((res.status, res.output), ("completed", "All done."))
-        self.assertEqual(self.progress, ["using web_search"])
+        self.assertEqual(self.progress, ["Searched the web"])
         path, headers, body = FakeHermes.posted[0]
         self.assertEqual(path, "/v1/runs")
         self.assertEqual(headers["Authorization"], "Bearer local-key")
@@ -306,7 +306,8 @@ class HermesClientTest(unittest.TestCase):
         FakeHermes.health = [2, 1, 0, 0]
         res = self.run_turn()
         self.assertEqual((res.status, res.output), ("completed", "Here is the answer."))
-        self.assertEqual(self.progress, ["using delegate_task", "Scout: compare flight options to Goa",
+        # The hand-over itself gets no line of its own: the crew's lines say who is on what.
+        self.assertEqual(self.progress, ["Scout: compare flight options to Goa",
                                          "Byte: fix the login bug", "Byte: could not finish", "Scout: finished"])
         self.assertEqual(FakeHermes.health_calls, 4, "waited until Hermes reported no background work, twice")
         (h1, b1), (h2, b2) = self.run_posts()
@@ -345,7 +346,25 @@ class HermesClientTest(unittest.TestCase):
         self.assertEqual(states[states.index("Let me look.") + 1], "", "the tool started: the draft starts over")
         self.assertEqual(states[-1].strip(), res.output, "the reconnect notice and what came before it are gone")
         self.assertFalse(any("⚠" in st for st in states[states.index("\n\nYou have ") + 1:]))
-        self.assertEqual(self.progress, ["using web_search"])
+        self.assertEqual(self.progress, ["Searched the web"])
+
+    def test_progress_lines_say_what_was_done(self):
+        # The same plain words as on Claude Code, from Hermes's tool.started events: the tool's name (an MCP tool
+        # as mcp_<server>_<tool>, or plain) and a short preview of the call that may hold the app action.
+        FakeHermes.runs = [frames(
+            {"event": "tool.started", "tool": "mcp_platform_list_app_actions", "preview": "gmail"},
+            {"event": "tool.started", "tool": "mcp_platform_run_app_action", "preview": "GMAIL_FETCH_EMAILS"},
+            {"event": "tool.started", "tool": "run_app_action",
+             "preview": '{"action": "GOOGLECALENDAR_EVENTS_LIST", "arguments": {"timeM'},
+            {"event": "tool.started", "tool": "mcp_platform_request_approval", "preview": "Send an email to x"},
+            {"event": "tool.started", "tool": "terminal", "preview": "date"},
+            {"event": "tool.started", "tool": "some_new_tool"},
+            {"event": "run.completed", "output": "You have 2 unread emails."})]
+        c = HermesClient(self.url, "local-key", poll_interval=0.01)
+        res = c.run("check my email", "be brief", "web", "evt-1#1", self.progress.append, timeout=10)
+        self.assertEqual(res.output, "You have 2 unread emails.")
+        self.assertEqual(self.progress, ["Looked at your apps", "Checked your inbox", "Checked your calendar",
+                                         "Asked for your OK", "Ran a command", "Used a tool"])
 
     def test_each_round_of_the_crew_starts_the_draft_over(self):
         FakeHermes.runs = [
@@ -384,7 +403,7 @@ class HermesClientTest(unittest.TestCase):
         res = self.run_turn()
         self.assertEqual(res.output, "Ship it.")
         # A child whose goal names no crew member gets no crew line.
-        self.assertEqual(self.progress, ["using delegate_task", "Patch: review pull request 12", "Patch: done"])
+        self.assertEqual(self.progress, ["Patch: review pull request 12", "Patch: done"])
         self.assertEqual(len(self.run_posts()), 1)
         self.assertEqual(FakeHermes.health_calls, 0)
 

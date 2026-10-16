@@ -182,7 +182,7 @@ Header `X-Bridge-Secret: <secret>` on every call except health.
 | Call | Behaviour |
 |---|---|
 | `GET /healthz` | `200 {"ok":true,"busy":N,"runtime":"hermes\|claude_code","claude_connected":bool\|null,"claude_login_pending":bool,"browser":bool}` when the current runtime answers (Hermes API / `claude` installed), else `503`. `busy` = turns in progress; `claude_connected` is `null` until `claude auth status` has answered once; `browser` = Scout's browser is turned on in this container |
-| `POST /deliver` | Body `{"delivery_id","kind","session_key","channel","text","attachments":[{"id","name","mime_type","url"}],"approval_id","approved","metadata":{}}`, `kind` = `message` / `approval_answer` / `automation` / `app_event`. `200` with `Content-Type: application/x-ndjson`, one line per event: `{"type":"accepted\|working\|text_delta\|turn_done\|error","message":"...","platform_fault":bool}`, ending with `turn_done` or `error`; the last event also has `"timings":{...}`, the turn's stage times (see "Stage times" below; left out on a repeat of a finished delivery). A `working` message is `using <tool>`, or a crew line that starts with the member's name and a colon (`Scout: researching flight options`, `Scout: done`; see "The crew"). A `text_delta` message is the whole draft of the answer so far, sent only when the metadata asks for it; see "The answer as it is written" below. The last event also has `"browser_seconds":N,"browser_report_id":"<delivery_id>#<n>"` when Scout's browser was open: whole seconds since the Bridge's last report, and an id under which the vm-manager stores the report once (both are left out when the browser never started). `metadata` is `DeliverRequest.metadata_json` as the backend sent it; the Bridge reads three fields of it, see "What the Bridge reads in `metadata`". `channel` is where the user reads the answer (`web`, `telegram`, `whatsapp`, `imessage`); it decides how the lead formats it, see "How the answer is formatted, by channel". `401` bad secret, `400` bad body |
+| `POST /deliver` | Body `{"delivery_id","kind","session_key","channel","text","attachments":[{"id","name","mime_type","url"}],"approval_id","approved","metadata":{}}`, `kind` = `message` / `approval_answer` / `automation` / `app_event`. `200` with `Content-Type: application/x-ndjson`, one line per event: `{"type":"accepted\|working\|text_delta\|turn_done\|error","message":"...","platform_fault":bool}`, ending with `turn_done` or `error`; the last event also has `"timings":{...}`, the turn's stage times (see "Stage times" below; left out on a repeat of a finished delivery). A `working` message is a tool call in plain words (`Checked your inbox`, `Looked at your apps`, `Ran a command`; see "Tool calls in plain words" under "The crew"), or a crew line that starts with the member's name and a colon (`Scout: researching flight options`, `Scout: done`; see "The crew"). A `text_delta` message is the whole draft of the answer so far, sent only when the metadata asks for it; see "The answer as it is written" below. The last event also has `"browser_seconds":N,"browser_report_id":"<delivery_id>#<n>"` when Scout's browser was open: whole seconds since the Bridge's last report, and an id under which the vm-manager stores the report once (both are left out when the browser never started). `metadata` is `DeliverRequest.metadata_json` as the backend sent it; the Bridge reads three fields of it, see "What the Bridge reads in `metadata`". `channel` is where the user reads the answer (`web`, `telegram`, `whatsapp`, `imessage`); it decides how the lead formats it, see "How the answer is formatted, by channel". `401` bad secret, `400` bad body |
 | `POST /shutdown` | Stop taking work, stop Hermes (it saves to /data), `200` when done (< 20 s) |
 | `POST /claude/login/start` | Starts `claude auth login` (in a pty). `200 {"login_id","authorize_url","expires_at"}` (unix ms, +10 min). One pending sign-in per container; a new start replaces it. `502` no link shown, `503` Claude Code not installed |
 | `POST /claude/login/complete` | Body `{"login_id","code"}`. Types the code into the waiting CLI, waits (<= 60 s) and asks `claude auth status`. `200 {"connected":bool,"message":"..."}`; `409` unknown / expired / used; `400` missing or multi-line code. Bodies are never logged |
@@ -616,6 +616,21 @@ the lead, never instructions. Nobody calls `send_message`: the Bridge sends the 
 the user are kept with the platform's `remember` / `recall` / `forget`, never in the engine's own
 memory (see "One memory" under "Agent image").
 
+Two short paragraphs keep a turn with the user's apps to a few model rounds (on 15 October "check my
+email" took 13 rounds and 62 seconds):
+- **Apps** (`APP_RULES`): the common Gmail actions are named with their key inputs, so the lead can
+  run them without listing the apps' actions first: `GMAIL_FETCH_EMAILS` (`query` in Gmail's search
+  words, `max_results`; it gives the sender, subject, date and a snippet of each email, and
+  `include_payload` true only when the bodies are needed), `GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID`
+  (`message_id`) to read one email, and `GMAIL_SEND_EMAIL` (`recipient_email`, `subject`, `body`),
+  which needs `request_approval` first. Any other action: `list_app_actions` gives the names with one
+  line each, and `describe_app_action` that action's inputs, before it runs or is asked about. A
+  result that is too big is asked for again with less (a narrower query, a smaller `max_results`, one
+  item by its id), never paged through with commands or files. Byte's and Patch's briefs point to
+  `describe_app_action` for the GitHub action they use.
+- **Answer once** (`ANSWER_RULES`): the lead writes its answer after its last tool call, not an answer
+  and then more work (a tool call, a check with a command), and not twice.
+
 Scout's brief is the same on both engines except for one line, because the platform decides by
 engine which addresses `read_page` opens (`crew.role_prompt(..., engine=...)`).
 
@@ -738,13 +753,39 @@ and each `context` with that member's brief.
 **Progress lines.** One `working` event when a specialist starts and one when it ends, each
 starting with the member's name and a colon: `Scout: researching flight options`, then
 `Scout: done`. Other endings: `could not finish`, `stopped`, and `finished` when the engine does
-not say how it ended. A specialist's own tool calls stay `using <tool>` lines.
+not say how it ended. Every other tool call, the lead's or a specialist's, is a line of its own in plain
+words (below).
 - **Claude Code:** the start is the lead's `Agent` tool call (the line is its `description`). The
   end is that call's result, or the `task_notification` event for a specialist in the background.
   One still open when the run ends gets `finished`, or `stopped` after a timeout or a crash.
 - **Hermes:** the `subagent.start` (its `goal`) and `subagent.complete` events of a run. A child
   still working in the background when its run's event stream closes gets `finished`, sent when
   Hermes reports no background work left.
+
+**Tool calls in plain words** (`agent-image/bridge/labels.py`, the same on both engines). The web
+chat shows each line while the turn runs and keeps them as the turn's steps, so a line says what was
+done, never a tool's name (before 16 October it was `using run_app_action`, `using Bash`):
+
+| The call | The line |
+|---|---|
+| `run_app_action` with `GMAIL_FETCH_EMAILS` | Checked your inbox |
+| `run_app_action` with `GMAIL_SEND_EMAIL` | Sent an email |
+| `run_app_action` with `GOOGLECALENDAR_EVENTS_LIST` / `_CREATE_EVENT` | Checked your calendar / Added an event to your calendar |
+| `run_app_action` with `GITHUB_CREATE_A_PULL_REQUEST` | Opened a pull request |
+| `run_app_action` with another app's action | Looked in Notion (a reading verb: fetch, list, get, search, find…), else Used Notion |
+| `list_app_actions` / `describe_app_action` | Looked at your apps / Looked up how to use Gmail |
+| `request_approval` | Asked for your OK |
+| `get_profile`, `remember`, `recall`, `web_search`, `read_page`, … | Looked at your profile, Saved it to memory, Checked your memory, Searched the web, Read a web page, … |
+| Claude Code's `Bash`, `Read`, `Edit`, `Grep`; Hermes's `terminal`, `read_file`, `patch`, `search_files` | Ran a command, Read a file, Edited a file, Searched your files |
+| The browser's tools | Opened a page in the browser, Clicked on the page, Filled in a form, … |
+| A tool of one of the user's own MCP servers | Used one of your own tools |
+| Anything else | Used a tool |
+
+Some calls get no line: Claude Code's `ToolSearch` (it loads the tools it defers) and Hermes's
+`delegate_task` (the crew's own lines say who is on what). Claude Code gives the call's whole input,
+so the action is read from it. Hermes's `tool.started` event gives the tool's name (an MCP tool as
+`mcp_<server>_<tool>`) and a short preview of the call; the action is found in the preview, and a
+call whose preview doesn't name it is "Used one of your apps".
 
 **Settings.** `BRIDGE_CREW_MAX_PARALLEL` (default 3, at least 1): specialists at a time, on both
 runtimes. `BRIDGE_CLAUDE_CREW_MODEL` (default: the lead's model): a model alias or id for the

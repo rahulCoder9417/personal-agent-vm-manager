@@ -60,7 +60,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-from . import browser, crew
+from . import browser, crew, labels
 from .platform import PLATFORM_SERVER_NAME, PlatformFile, server_key
 
 log = logging.getLogger("bridge.claude")
@@ -745,7 +745,9 @@ class ClaudeRunner:
                         if lead_text is not None and not ev.get("parent_tool_use_id"):
                             lead_text.restart()  # the lead went on to a tool: what it wrote before is not the answer
                         if not crew_events.started(ev, block):
-                            on_progress(f"using {_tool_label(block.get('name'))}")
+                            label = labels.tool_label(block.get("name"), block.get("input"))
+                            if label:  # None: the engine's own housekeeping (ToolSearch), no line
+                                on_progress(label)
                             marks.tool_started(ev, block)
                 elif typ == "user":
                     for block in _blocks(ev, "tool_result"):
@@ -800,13 +802,6 @@ class ClaudeRunner:
                                effort=choice.get("effort", ""))
         failed(res.reason, res.platform_fault)
         return res, seen
-
-
-def _tool_label(name: Any) -> str:
-    name = str(name or "a tool")
-    if name.startswith("mcp__"):
-        return name.split("__")[-1]
-    return name
 
 
 def _blocks(ev: dict, typ: str) -> list[dict]:
