@@ -45,16 +45,14 @@ Usage: python -I cc_gate.py --data /data --workspace /data/workspace --gate-url 
 
 from __future__ import annotations
 
-import glob
 import json
 import os
 import re
 import shlex
 import sys
-import urllib.error
-import urllib.request
-from dataclasses import dataclass, field
-from typing import Any, Iterable, Optional
+
+# The hook starts before every command, so it imports little: no dataclasses or typing (the annotations are
+# never evaluated), and glob and urllib only when they are needed.
 
 ALLOW, ASK, NEVER = "allow", "ask", "never"
 GATED_WRITES = ("Bash", "Edit", "Write", "NotebookEdit")
@@ -76,15 +74,14 @@ NEVER_SEARCH = ("Searching from here would read the platform's own files. Search
 UNREADABLE = "The gate could not read this command, so it was not run. Write it more simply."
 
 
-@dataclass
 class Context:
-    data: str = "/data"
-    workspace: str = "/data/workspace"
-    gate_url: str = ""
-    platform_file: str = ""
-    tmp: list[str] = field(default_factory=lambda: ["/tmp"])
-    browser: bool = False
-    home: str = ""
+    """What the hook is told on its command line."""
+
+    def __init__(self, data: str = "/data", workspace: str = "/data/workspace", gate_url: str = "",
+                 platform_file: str = "", tmp: list[str] | None = None, browser: bool = False, home: str = ""):
+        self.data, self.workspace, self.gate_url, self.platform_file = data, workspace, gate_url, platform_file
+        self.tmp = ["/tmp"] if tmp is None else tmp
+        self.browser, self.home = browser, home
 
     @property
     def never_dirs(self) -> list[str]:
@@ -172,6 +169,8 @@ def expand(path: str) -> list[str]:
     """A path with glob characters: the files it names now, and the folder it starts from."""
     if not any(c in path for c in "*?["):
         return [path]
+    import glob
+
     found = glob.glob(path)
     head = path
     while any(c in head for c in "*?[") and head not in ("/", ""):
@@ -328,10 +327,17 @@ _GIT_CONFIG_READS = {"--get", "--get-all", "--get-regexp", "--list", "-l", "--ge
                      "--show-scope", "--name-only"}
 
 
-@dataclass
 class Verdict:
-    decision: str  # allow | ask | never
-    why: str = ""
+    """allow | ask | never, and why (for ask: the words the user reads; for never: the agent's reason)."""
+
+    def __init__(self, decision: str, why: str = ""):
+        self.decision, self.why = decision, why
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Verdict) and (self.decision, self.why) == (other.decision, other.why)
+
+    def __repr__(self) -> str:
+        return f"Verdict({self.decision!r}, {self.why!r})"
 
     def worse(self, other: "Verdict") -> "Verdict":
         rank = {ALLOW: 0, ASK: 1, NEVER: 2}
@@ -598,6 +604,8 @@ def container_token(path: str) -> str:
 
 def ask_backend(event: dict, why: str, ctx: Context) -> dict:
     """POST the call to the gate. Returns the backend's answer ({decision, message, approvalId?})."""
+    import urllib.request  # only here: most calls never ask, and the hook starts faster without it
+
     body = {"tool": event.get("tool_name"), "target": target_of(event), "why": why,
             "cwd": event.get("cwd") if isinstance(event.get("cwd"), str) else None}
     req = urllib.request.Request(ctx.gate_url, data=json.dumps(body).encode(), method="POST")
@@ -630,7 +638,7 @@ def run(event: Any, ctx: Context) -> tuple[str, str]:
     sub = bool(event.get("agent_id") or event.get("agent_type"))
     try:
         answer = ask_backend(event, verdict.why, ctx)
-    except (OSError, ValueError, urllib.error.URLError) as exc:
+    except (OSError, ValueError) as exc:  # urllib's errors are OSErrors
         return "deny", (f"This needs your user's OK ({verdict.why}), and they could not be asked just now "
                         f"({type(exc).__name__}). It was not run. Say so in your answer.")
     if answer["decision"] == "allow":
