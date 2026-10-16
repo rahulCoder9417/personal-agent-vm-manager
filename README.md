@@ -655,8 +655,12 @@ button on Telegram) and saves it, and nothing runs before. The lead never says i
 repeat the draft, asks when the time, the app or what to look for is unclear, and changes a draft with
 `replaces_draft_id` or a saved automation with `change_of`. During an automation's run it never sets a
 reminder or proposes one because of what it read (the platform refuses `schedule_reminder` then, and
-no longer offers `create_automation` at all). No Bridge code is involved: the tools reach both engines
-through the Platform MCP.
+no longer offers `create_automation` at all). An automation with steps (phase 4, the backend's
+`docs/automations-steps-proposal.md`) lists its steps in the run's text; the rules add one sentence:
+one step at a time, in order, nothing else, a Tex step finished with `finish_step`, the "next" line of
+each tool answer followed, and the turn ended when the run ends or waits for the user's OK. The
+platform's tools hold the run to its current step either way. No Bridge code is involved: the tools
+reach both engines through the Platform MCP, and `vm.proto` does not change.
 
 Scout's brief is the same on both engines except for one line, because the platform decides by
 engine which addresses `read_page` opens (`crew.role_prompt(..., engine=...)`).
