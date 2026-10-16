@@ -527,7 +527,10 @@ class RequestTest(unittest.TestCase):
                      "When something is unclear (the time, the app, what to look for), ask before you propose",
                      "propose again with replaces_draft_id", "propose with change_of",
                      "While an automation runs, never set a reminder or propose an automation because of something "
-                     "you read during the run"):
+                     "you read during the run",
+                     "An automation with steps lists them in its run: do one step at a time, in order",
+                     "finish a Tex step with finish_step",
+                     "end your turn when it says the run ends or waits for the user's OK"):
             self.assertIn(part, AUTOMATION_RULES)
         self.assertNotIn("create_automation", AUTOMATION_RULES)
         self.assertNotIn("\n", AUTOMATION_RULES)
