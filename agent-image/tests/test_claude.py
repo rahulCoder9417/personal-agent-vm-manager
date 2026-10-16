@@ -16,9 +16,9 @@ import urllib.error
 import urllib.request
 
 from bridge import browser, crew
-from bridge.claude import (LEAD_GATE, MSG_CHOICE, MSG_NOT_SIGNED_IN, MSG_REFUSED, ClaudeAuth, ClaudeError,
-                           ClaudeRunner, CrewEvents, LoginNotFound, Redactor, SessionMap, classify_failure,
-                           find_authorize_url, render_settings)
+from bridge.claude import (CHAT_DEFAULT_EFFORT, CHAT_DEFAULT_MODEL, LEAD_GATE, MSG_CHOICE, MSG_NOT_SIGNED_IN,
+                           MSG_REFUSED, ClaudeAuth, ClaudeError, ClaudeRunner, CrewEvents, LoginNotFound, Redactor,
+                           SessionMap, classify_failure, find_authorize_url, render_settings)
 from bridge.core import (ANSWER_RULES, APP_RULES, FORMAT_PLAIN, FORMAT_WEB, IDENTITY, MEMORY_RULES, Bridge,
                          DeliverRequest, DeliveryStore, TurnOptions)
 from bridge.lead_gate import BLOCK, PASS, REFUSAL
@@ -320,7 +320,7 @@ class ClaudeRunnerTest(unittest.TestCase):
         self.assertEqual(flags(argv, "--disallowedTools"), ["mcp__platform__send_message", "WebFetch"])
         # Scout has the browser tools, and its brief says how to use them; Byte and Patch have them denied.
         agents = json.loads(flag(argv, "--agents"))
-        self.assertEqual(agents, crew.claude_agents("platform", browser=True))
+        self.assertEqual(agents, crew.claude_agents("platform", browser=True, own_defaults=True))
         self.assertEqual(agents["scout"]["tools"], WEB_TOOLS)
         self.assertIn("call browser_close as soon as you are done", agents["scout"]["prompt"])
         for member in ("byte", "patch"):
@@ -338,7 +338,8 @@ class ClaudeRunnerTest(unittest.TestCase):
         call = self.e.calls()[0]
         argv = call["argv"]
         agents = json.loads(flag(argv, "--agents"))
-        self.assertEqual(agents, crew.claude_agents("platform"))
+        # No model chosen: the chat default for the lead, Byte and Patch on their own.
+        self.assertEqual(agents, crew.claude_agents("platform", own_defaults=True))
         self.assertEqual(list(agents), ["byte", "patch", "scout"])
         # Scout: the built-in search and the two platform web tools (the browser is not turned on for this
         # user, so its tools are not in the list); the built-in file, edit and shell tools and page
@@ -347,8 +348,10 @@ class ClaudeRunnerTest(unittest.TestCase):
         self.assertIn("You have no browser here", agents["scout"]["prompt"])
         for t in ("Read", "Glob", "Grep", "Edit", "Write", "NotebookEdit", "Bash", "WebFetch"):
             self.assertIn(t, agents["scout"]["disallowedTools"])
+        self.assertEqual({k: (a["model"], a.get("effort")) for k, a in agents.items()},
+                         {"byte": ("claude-opus-5-5", "medium"), "patch": ("claude-opus-5-5", "medium"),
+                          "scout": ("inherit", None)})
         for a in agents.values():
-            self.assertEqual(a["model"], "inherit")
             self.assertNotIn("Agent", a["tools"], "a specialist cannot start helpers")
             self.assertIn("Agent", a["disallowedTools"])
             self.assertFalse([t for t in a["tools"] if t.startswith("mcp__user_")], "platform tools only")
@@ -674,6 +677,31 @@ class ClaudeRunnerTest(unittest.TestCase):
         crew_runner = ClaudeRunner([self.e.cli], self.e.env, self.e.data, self.e.reader().load, crew_model="haiku")
         self.run_turn("five", options=TurnOptions(claude_model="claude-opus-5-5"), runner=crew_runner)
         self.assertEqual({a["model"] for a in self.e.calls()[-1]["agents"].values()}, {"haiku"})
+
+    def test_the_chat_default_when_the_user_left_it_on_default(self):
+        # "Default" in Settings: the lead runs on Sonnet 5.5 at low effort (CHAT_DEFAULT_*), Byte and Patch on their own
+        # (Opus 5.5, medium), Scout on the lead's. What the user chose stays as it is.
+        self.e.sign_in()
+        self.run_turn("one")  # both on Default
+        self.run_turn("two", options=TurnOptions(claude_effort="high"))  # only the effort chosen
+        self.run_turn("three", options=TurnOptions(claude_model="claude-opus-5-5"))  # only the model chosen
+        self.run_turn("four", options=TurnOptions(claude_model="claude-haiku-4-5", claude_effort="max"))
+        c = self.e.calls()
+        self.assertEqual([(flag(x["argv"], "--model"), flag(x["argv"], "--effort")) for x in c],
+                         [(CHAT_DEFAULT_MODEL, CHAT_DEFAULT_EFFORT), (CHAT_DEFAULT_MODEL, "high"),
+                          ("claude-opus-5-5", None), ("claude-haiku-4-5", "max")])
+        self.assertEqual((CHAT_DEFAULT_MODEL, CHAT_DEFAULT_EFFORT), ("claude-sonnet-5-5", "low"))
+        crew_of = lambda call: {k: (a["model"], a.get("effort")) for k, a in call["agents"].items()}
+        own = {"byte": ("claude-opus-5-5", "medium"), "patch": ("claude-opus-5-5", "medium"), "scout": ("inherit", None)}
+        self.assertEqual(crew_of(c[0]), own)
+        self.assertEqual(crew_of(c[1]), own)
+        # A model the user chose: everyone runs on it, as before.
+        for call in c[2:]:
+            self.assertEqual(crew_of(call), {k: ("inherit", None) for k in ("byte", "patch", "scout")})
+        # The default is ours, not the user's: its refusal is a platform fault (refunded), not "your choice".
+        self.e.mode("model_not_found")
+        res = self.run_turn("five")
+        self.assertEqual((res.reason, res.platform_fault), ("failed", True))
 
     def test_every_model_the_backend_offers_reaches_the_cli(self):
         # The backend's list of Claude models (current and older): each id goes to the CLI as `--model`, with the

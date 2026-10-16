@@ -343,6 +343,16 @@ class ClaudeAgentsTest(unittest.TestCase):
         self.assertEqual(crew.claude_session_denied("platform"), ["mcp__platform__send_message", "WebFetch"])
         self.assertFalse(set(crew.claude_session_denied("platform")) & set(crew.claude_web_tools("platform")))
 
+    def test_own_defaults_of_byte_and_patch(self):
+        # The lead on the chat default: Byte and Patch keep Opus 5.5 at medium effort, Scout inherits the lead's.
+        agents = crew.claude_agents("platform", own_defaults=True)
+        self.assertEqual({k: (a["model"], a.get("effort")) for k, a in agents.items()},
+                         {"byte": ("claude-opus-5-5", "medium"), "patch": ("claude-opus-5-5", "medium"),
+                          "scout": ("inherit", None)})
+        # A crew model set for the server wins over them.
+        agents = crew.claude_agents("platform", model="haiku", own_defaults=True)
+        self.assertEqual({(a["model"], a.get("effort")) for a in agents.values()}, {("haiku", None)})
+
     def test_cheaper_model_and_env(self):
         agents = crew.claude_agents("platform", model="haiku")
         self.assertEqual({a["model"] for a in agents.values()}, {"haiku"})

@@ -73,8 +73,10 @@ class TurnOptions:
                    engine has none for that number (claude.SessionMap, hermes.Conversations). The number may be
                    lower than the last one: the user opened an earlier conversation again. None = the delivery
                    names none: the turn goes on in the conversation of the chat's last turn on that engine.
-    claude_model   metadata "claude.model": Claude Code's `--model` for this turn; "" = the Bridge's default.
-    claude_effort  metadata "claude.effort": Claude Code's `--effort` for this turn; "" = the CLI's default.
+    claude_model   metadata "claude.model": Claude Code's `--model` for this turn; "" = the Bridge's default
+                   (claude.CHAT_DEFAULT_MODEL).
+    claude_effort  metadata "claude.effort": Claude Code's `--effort` for this turn; "" = low on the Bridge's
+                   default model (claude.CHAT_DEFAULT_EFFORT), else the CLI's default.
     stream_text    metadata "stream_text": true when the answer is read where it can be shown as it is written
                    (the backend sets it for web chat only): the lead's draft goes out as `text_delta` events
                    (Draft). Anything but true is false.

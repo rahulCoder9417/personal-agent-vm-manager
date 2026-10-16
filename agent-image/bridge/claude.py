@@ -442,6 +442,14 @@ def render_settings() -> dict[str, Any]:
     }]}}
 
 
+# The lead's model and effort when the user left both on "Default" in Settings and no BRIDGE_CLAUDE_MODEL is set:
+# Sonnet 5.5 at low effort, a quick first word for chat. Without them the CLI picks for itself: Opus 5.5 at medium
+# effort (2.1.301 against a fake API), which once thought for 14 s before its first word. An effort the user chose
+# still applies, on this model. Byte and Patch then keep their own (crew.CLAUDE_CREW_DEFAULTS).
+CHAT_DEFAULT_MODEL = "claude-sonnet-5-5"
+CHAT_DEFAULT_EFFORT = "low"
+
+
 class ClaudeRunner:
     """Runs one turn with `claude -p` (stream-json). Same interface as HermesClient.run."""
 
@@ -480,7 +488,7 @@ class ClaudeRunner:
             return lock
 
     def _args(self, pf: PlatformFile, instructions: str, session_id: str, resume: bool, model: str = "",
-              effort: str = "", stream_text: bool = False) -> list[str]:
+              effort: str = "", stream_text: bool = False, crew_defaults: bool = False) -> list[str]:
         # Permission rules are the session's: the lead's and every specialist's calls are checked against
         # them. So the allow list also names what only Scout uses (its built-in web search and, when the
         # browser is turned on for the user, the browser tools by name), and the deny list only what nobody
@@ -498,10 +506,11 @@ class ClaudeRunner:
                 "--disallowedTools", *crew.claude_session_denied(PLATFORM_SERVER_NAME),
                 "--setting-sources", "user", "--settings", self.settings_path,
                 # The crew as sub-agents of this (lead) session; each has its own tool list.
-                "--agents", json.dumps(crew.claude_agents(PLATFORM_SERVER_NAME, self.crew_model, self.with_browser)),
+                "--agents", json.dumps(crew.claude_agents(PLATFORM_SERVER_NAME, self.crew_model, self.with_browser,
+                                                          own_defaults=crew_defaults)),
                 "--append-system-prompt", f"{instructions}\n\n{crew.CLAUDE_HANDOFF}"]
-        # The model and effort: the user's choice for this turn, else the Bridge's default model and the CLI's
-        # default effort. 2.1.283 and 2.1.296 (`claude --help`): "--model <model> ... an alias for the latest model
+        # The model and effort: the user's choice for this turn, else the Bridge's default (BRIDGE_CLAUDE_MODEL, or
+        # CHAT_DEFAULT_MODEL at CHAT_DEFAULT_EFFORT). 2.1.283 and 2.1.296 (`claude --help`): "--model <model> ... an alias for the latest model
         # (e.g. 'fable', 'opus', or 'sonnet') or a model's full name"; "--effort <level> Effort level for the current
         # session (low, medium, high, xhigh, max)". Both apply to the lead; a specialist whose definition says
         # `inherit` runs on the lead's model at the session's effort (crew.claude_agents).
@@ -543,7 +552,7 @@ class ClaudeRunner:
         again. A failed turn leaves that conversation where it was and touches no other. The Bridge removes no
         session of another conversation, so an earlier one can be opened again later.
         `claude_model` / `claude_effort` are passed as --model / --effort; the model wins over the Bridge's
-        default (BRIDGE_CLAUDE_MODEL).
+        default (BRIDGE_CLAUDE_MODEL, else CHAT_DEFAULT_MODEL, and then CHAT_DEFAULT_EFFORT unless one was chosen).
 
         `on_text` (core.Draft; None = no draft for this turn): the lead's words as the model writes them, from the
         CLI's partial messages (LeadText). A run that starts again (a new session, below) starts the draft over."""
@@ -553,7 +562,9 @@ class ClaudeRunner:
         model = getattr(options, "claude_model", "") or ""
         effort = getattr(options, "claude_effort", "") or ""
         choice = {"model": model, "effort": effort}  # the user's own choice, for classify_failure
-        model = model or self.model
+        chat_default = not model and not self.model  # CHAT_DEFAULT_MODEL and, unless chosen, CHAT_DEFAULT_EFFORT
+        model = model or self.model or CHAT_DEFAULT_MODEL
+        effort = effort or (CHAT_DEFAULT_EFFORT if chat_default else "")
         pf = self.load_platform()
         os.makedirs(self.workdir, mode=0o700, exist_ok=True)
         os.makedirs(self.env["CLAUDE_CONFIG_DIR"], mode=0o700, exist_ok=True)
@@ -570,7 +581,7 @@ class ClaudeRunner:
         # A crew job's turn: its mark in the CLI's environment, inherited by everything the CLI starts (jobs.py).
         job_env = dict(getattr(options, "job_env", ()) or ())
         how = {"model": model, "effort": effort, "choice": choice, "on_text": on_text, "job_env": job_env,
-               "clock": getattr(options, "clock", None)}
+               "clock": getattr(options, "clock", None), "crew_defaults": chat_default}
         with self._session_lock(session_key):
             # Which conversation of the chat this turn is in. The platform's memory is not part of a conversation.
             epoch, moved = self.sessions.enter(session_key, chat_epoch)
@@ -663,7 +674,8 @@ class ClaudeRunner:
                   redact: Optional["Redactor"] = None, model: str = "", effort: str = "",
                   choice: Optional[dict] = None,
                   on_text: Optional[Callable[[Optional[str]], None]] = None,
-                  job_env: Optional[dict] = None, clock: Any = None) -> tuple[RunResult, Optional[str]]:
+                  job_env: Optional[dict] = None, clock: Any = None,
+                  crew_defaults: bool = False) -> tuple[RunResult, Optional[str]]:
         """One CLI run. `model` / `effort` go on the command line; `choice` is what of them the user chose
         ({"model", "effort"}), so a refusal of it is not a platform fault. `on_text`: the draft (LeadText).
         `job_env`: a crew job's mark, added to the CLI's environment. `clock`: the turn's stage times
@@ -671,7 +683,8 @@ class ClaudeRunner:
         redact = redact or Redactor([], text)
         choice = choice or {}
         marks = ClaudeMarks(clock)
-        args = self._args(pf, instructions, session_id, resume, model, effort, stream_text=on_text is not None)
+        args = self._args(pf, instructions, session_id, resume, model, effort, stream_text=on_text is not None,
+                          crew_defaults=crew_defaults)
         marks.run_started()
         proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 cwd=self.workdir, env={**self.env, **job_env} if job_env else self.env,
