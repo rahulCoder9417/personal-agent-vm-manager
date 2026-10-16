@@ -440,7 +440,19 @@ def claude_denied(member: Member, platform_server: str = "platform") -> list[str
     return out
 
 
-def claude_agents(platform_server: str = "platform", model: str = "", browser: bool = False) -> dict[str, Any]:
+# Byte and Patch write and review code, where thinking pays. When the lead runs on the chat default (the user left
+# the model on "Default": claude.CHAT_DEFAULT_MODEL, low effort) they keep what they ran on before it: the CLI's own
+# default, Opus 5.5 at medium effort (2.1.301 against a fake API, with no --model: the lead and an `inherit`
+# specialist both sent claude-opus-5-5 with effort medium). Pinned by full name: the alias `default` is not one a
+# specialist takes (sent to the API as the model "default"). Scout reads the web and inherits the lead's.
+CLAUDE_CREW_DEFAULTS: dict[str, dict[str, str]] = {
+    "byte": {"model": "claude-opus-5-5", "effort": "medium"},
+    "patch": {"model": "claude-opus-5-5", "effort": "medium"},
+}
+
+
+def claude_agents(platform_server: str = "platform", model: str = "", browser: bool = False,
+                  own_defaults: bool = False) -> dict[str, Any]:
     """The value of `--agents`: {id: {description, prompt, tools, disallowedTools, model}}.
 
     `tools` is an allow list. It leaves out `Agent`, so a specialist cannot start helpers of its own;
@@ -452,9 +464,10 @@ def claude_agents(platform_server: str = "platform", model: str = "", browser: b
     (the lead's `--model`), at the session's `--effort`: no `effort` field (the docs allow one per sub-agent; seen
     with 2.1.283 against a fake API: `inherit` and no `effort` sent the lead's model and effort for the
     specialist; a pinned model without effort levels, such as Haiku 4.5, got none). `browser`: the browser is
-    turned on for this user, so Scout's list and brief have it.
+    turned on for this user, so Scout's list and brief have it. `own_defaults`: the lead runs on the chat default,
+    so Byte and Patch get their own model and effort (CLAUDE_CREW_DEFAULTS), unless a crew model is set.
     """
-    return {
+    agents = {
         m.id: {
             "description": m.description,
             "prompt": role_prompt(m, browser, engine=CLAUDE_CODE),
@@ -464,6 +477,10 @@ def claude_agents(platform_server: str = "platform", model: str = "", browser: b
         }
         for m in CREW
     }
+    if own_defaults and not model:
+        for member_id, own in CLAUDE_CREW_DEFAULTS.items():
+            agents[member_id].update(own)
+    return agents
 
 
 # The lead and its sub-agents are one Claude Code session and share its permission rules
