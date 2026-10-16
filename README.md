@@ -195,7 +195,7 @@ as it is):
 | Field | What the Bridge does |
 |---|---|
 | `"chat_epoch": <int>` | Which conversation of the chat this turn belongs to (the chat is the `session_key`). The backend numbers a chat's conversations 0, 1, 2, ...: one more at each "New chat". Each conversation has its own engine conversation, so its own context. A number the engine has a conversation for: the turn goes on in it, whether it is the chat's newest or an earlier one the user opened again in the web app (the number is then lower than the last one). A number it has none for (a new chat, or a conversation that never ran on this engine): the turn starts a new one, on Claude Code a new session (not resumed), on Hermes a new conversation key. Missing: the conversation of the chat's last turn on that engine. Each engine keeps its own record, so a conversation that started while the chat ran on Hermes also starts anew on Claude Code the first time it runs there. The platform's memory (`remember`) is not part of a conversation and stays. See "Conversations of a chat" below |
-| `"claude": {"model": "<id>", "effort": "<level>"}` | Claude Code only (Hermes ignores it). `model` goes to the CLI as `--model`, and wins over `BRIDGE_CLAUDE_MODEL`; `effort` as `--effort`. Either may be left out: the Bridge's default model, the CLI's default effort. See "Model and effort" under "Claude Code runtime" for what the pinned CLI accepts |
+| `"claude": {"model": "<id>", "effort": "<level>"}` | Claude Code only (Hermes ignores it). `model` goes to the CLI as `--model`, and wins over `BRIDGE_CLAUDE_MODEL`; `effort` as `--effort`. Either may be left out ("Default" in Settings): the model is then the Bridge's default, Sonnet 5.5 (`claude-sonnet-5-5`, or `BRIDGE_CLAUDE_MODEL` when set), and the effort `low` on that default (the CLI's own with a chosen model or `BRIDGE_CLAUDE_MODEL`). See "The chat default" below See "Model and effort" under "Claude Code runtime" for what the pinned CLI accepts |
 | `"stream_text": true` | Send the lead's answer as it is written, as `text_delta` events (the backend sets it for web chat turns only). Anything but `true`, or missing: no `text_delta`, and nothing else changes. See "The answer as it is written" below |
 
 A value that is not what the spec says (a negative or non-integer `chat_epoch`, a `model` that is not a model
@@ -528,7 +528,7 @@ transcript once more (about 0.7 MB for the test user's main chat).
 `system/init` and `result` give the session id, `tool_use` blocks
 become `working` events, `system/api_retry` becomes "Claude is retrying (...)", the `result`
 text is the answer the Bridge sends with `send_message`. `BRIDGE_CLAUDE_MODEL` and
-`BRIDGE_CLAUDE_MAX_TURNS` are optional (default: the plan's default model, no turn limit; a model the user chose
+`BRIDGE_CLAUDE_MAX_TURNS` are optional (default: the chat default below, no turn limit; a model the user chose
 for the turn wins over `BRIDGE_CLAUDE_MODEL`); so are the crew's `BRIDGE_CLAUDE_CREW_MODEL` and
 `BRIDGE_CREW_MAX_PARALLEL` (see "The crew").
 
@@ -566,11 +566,23 @@ texts and model table were read in the binary, which was not run (`docs/build-re
 - **The crew**: a sub-agent's `model` (`--agents`, and the sub-agents page) takes `sonnet`, `opus`, `haiku`,
   `fable`, a full model id, or `inherit`; a sub-agent can have its own `effort` (same five levels; the docs list
   `effort` among the fields `--agents` takes, and 2.1.283 sent a specialist's `"effort": "low"`). The crew has
-  `model: inherit` and no `effort`, so Byte, Patch and Scout run on the model the user chose at the session's
-  effort (seen: Scout's request had `claude-opus-5-5` and `xhigh`), unless `BRIDGE_CLAUDE_CREW_MODEL` pins a
+  `model: inherit` and no `effort` when the user chose a model, so Byte, Patch and Scout run on the model the
+  user chose at the session's effort (under the chat default Byte and Patch have their own, see below) (seen: Scout's request had `claude-opus-5-5` and `xhigh`), unless `BRIDGE_CLAUDE_CREW_MODEL` pins a
   model for them; a pinned model without effort levels (Haiku 4.5) gets none.
 - A turn on an existing chat on another model than the chat's last turn resumes the chat's session as usual (seen:
   a Fable 5.1 turn after an Opus 5.5 one carried the earlier messages).
+
+**The chat default** (`claude.CHAT_DEFAULT_MODEL`, `CHAT_DEFAULT_EFFORT`; 2026-10-16). With no model from the user
+and no `BRIDGE_CLAUDE_MODEL`, the lead runs with `--model claude-sonnet-5-5 --effort low` (an effort the user chose
+replaces `low`). Before, it had neither flag and the CLI picked: with 2.1.301 against a fake Messages API, no
+`--model` sent `claude-opus-5-5` with effort `medium` for the lead and for an `inherit` specialist, and on a Max
+plan that once thought for 14 s before the first word. Under the chat default Byte and Patch get their own
+`model: claude-opus-5-5` and `effort: medium` in `--agents` (`crew.CLAUDE_CREW_DEFAULTS`), so code work runs as
+it did before; Scout keeps `inherit` (Sonnet 5.5, low). With the same fake API: the lead went out as
+`claude-sonnet-5-5` with effort `low`, the pinned specialist as `claude-opus-5-5` with `medium`, and a specialist
+with `model: default` went out as the model name `default`, so that alias is not used. A model the user chose
+runs for everyone as before (`inherit`, no `effort`). A refusal of the chat default is ours, not the user's
+choice, so it stays a platform fault.
 
 **Compliance** (https://code.claude.com/docs/en/legal-and-compliance): the binary is installed
 and run as published, and no built-in auth method is removed or disabled (we only choose, per
@@ -724,6 +736,8 @@ https://code.claude.com/docs/en/cli-reference, https://code.claude.com/docs/en/e
   fails. `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS` caps how many run at once.
 - **Model:** `inherit` (the lead's, which is the model the user chose for the turn) unless
   `BRIDGE_CLAUDE_CREW_MODEL` names another. No `effort` field: a specialist runs at the session's `--effort`.
+  Under the chat default (no model chosen) Byte and Patch get `claude-opus-5-5` at `medium` instead; Scout stays
+  `inherit` ("The chat default" under "Claude Code runtime").
 - **Background:** in `claude -p` a sub-agent runs in the background unless the lead needs its
   result first. The CLI stays open until background sub-agents are done (it gives up after 10
   idle minutes). The Bridge takes the last `result` event as the answer.
