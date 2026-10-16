@@ -19,8 +19,8 @@ from bridge import browser, crew
 from bridge.claude import (LEAD_GATE, MSG_CHOICE, MSG_NOT_SIGNED_IN, MSG_REFUSED, ClaudeAuth, ClaudeError,
                            ClaudeRunner, CrewEvents, LoginNotFound, Redactor, SessionMap, classify_failure,
                            find_authorize_url, render_settings)
-from bridge.core import (FORMAT_PLAIN, FORMAT_WEB, IDENTITY, MEMORY_RULES, Bridge, DeliverRequest, DeliveryStore,
-                         TurnOptions)
+from bridge.core import (ANSWER_RULES, APP_RULES, FORMAT_PLAIN, FORMAT_WEB, IDENTITY, MEMORY_RULES, Bridge,
+                         DeliverRequest, DeliveryStore, TurnOptions)
 from bridge.lead_gate import BLOCK, PASS, REFUSAL
 from bridge.platform import load_platform_file
 from bridge.runtime import PlatformReader, RuntimeRunner
@@ -187,7 +187,7 @@ class ClaudeRunnerTest(unittest.TestCase):
         # Thinking, tool input and a specialist's words are never in it.
         for text in ("hmm", "{}", "SPECIALIST"):
             self.assertFalse(any(text in st for st in states), text)
-        self.assertIn("using get_profile", self.progress)
+        self.assertIn("Looked at your profile", self.progress)
 
     def test_a_status_while_the_crew_works_in_the_background_is_not_left_on_screen(self):
         self.e.sign_in()
@@ -237,7 +237,7 @@ class ClaudeRunnerTest(unittest.TestCase):
         res = self.run_turn("what's up?")
         self.assertEqual(res.status, "completed")
         self.assertEqual(res.output, "reply 1 to: what's up?")
-        self.assertIn("using get_profile", self.progress)
+        self.assertIn("Looked at your profile", self.progress)
         call = self.e.calls()[0]
         argv = call["argv"]
         for a in ("-p", "--verbose", "--strict-mcp-config"):
@@ -406,10 +406,10 @@ class ClaudeRunnerTest(unittest.TestCase):
         self.assertEqual(res.output, "the crew is done")
         self.assertEqual(self.progress, [
             "Scout: researching flight options",  # the lead starts Scout
-            "using web_search",  # Scout's own tool call: the progress line it always was
+            "Searched the web",  # Scout's own tool call: a line of its own, in plain words
             "Scout: done",
             "Byte: fixing the login bug",
-            "using Agent",  # a sub-agent that is not a crew member gets no crew line
+            "Asked a helper",  # a sub-agent that is not a crew member gets no crew line
             "Byte: could not finish",
         ])
 
@@ -418,7 +418,17 @@ class ClaudeRunnerTest(unittest.TestCase):
         self.e.mode("crew_background")
         self.run_turn()
         # "done" comes with the task notification, not when the Agent call returns "launched".
-        self.assertEqual(self.progress, ["Patch: reviewing pull request 12", "using Read", "Patch: done"])
+        self.assertEqual(self.progress, ["Patch: reviewing pull request 12", "Read a file", "Patch: done"])
+
+    def test_progress_lines_say_what_was_done(self):
+        # "Check my email" (2026-10-15): the web chat showed "using Bash"; now each line says what was done, and
+        # loading a deferred tool (ToolSearch) is no step at all.
+        self.e.sign_in()
+        self.e.mode("apps")
+        res = self.run_turn("check my email")
+        self.assertEqual(res.output, "You have 2 unread emails.")
+        self.assertEqual(self.progress, ["Looked at your apps", "Checked your inbox", "Asked for your OK",
+                                         "Ran a command"])
 
     def test_every_specialist_that_started_gets_a_finish_line(self):
         self.e.sign_in()
@@ -1215,6 +1225,31 @@ class BridgeWithRuntimesTest(unittest.TestCase):
             for part in ("you are Tex, the user's own personal agent in Textcrew", "https://app.textcrew.in/apps",
                          "Never send the user to the settings or connectors of Claude",
                          "Never present yourself as Claude or Claude Code"):
+                self.assertIn(part, text)
+
+    def test_both_engines_are_told_how_to_use_apps_and_to_answer_once(self):
+        # 2026-10-15, "check my email": 13 model rounds. The lead now knows the common Gmail actions and their
+        # inputs, looks up any other action's inputs with describe_app_action, asks a tool for less instead of
+        # paging through its result, and writes its answer once, after its last tool call. The same text reaches
+        # both engines: Hermes's run instructions and Claude Code's --append-system-prompt.
+        self.e.sign_in()
+        self.deliver("d1", "check my email", session_key="web", channel="web")
+        hermes = self.hermes.calls[0]["instructions"]
+        self.e.write_platform("claude_code")
+        self.deliver("d2", "check my email", session_key="web", channel="web")
+        claude = flag(self.e.calls()[0]["argv"], "--append-system-prompt")
+        for text in (hermes, claude):
+            self.assertIn(APP_RULES, text)
+            self.assertIn(ANSWER_RULES, text)
+            for part in ("GMAIL_FETCH_EMAILS (query in Gmail search words", "max_results",
+                         "include_payload true only when you need the bodies",
+                         "GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID (message_id)",
+                         "GMAIL_SEND_EMAIL (recipient_email, subject, body) needs request_approval first",
+                         "list_app_actions gives the names with one line each",
+                         "describe_app_action gives that action's inputs",
+                         "never page through a tool's result with commands or files",
+                         "Answer once, after your last tool call",
+                         "Do not write an answer and then keep working"):
                 self.assertIn(part, text)
 
     def test_the_deliverys_metadata_reaches_the_engine(self):

@@ -25,7 +25,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Iterator, Optional
 
-from . import crew
+from . import crew, labels
 
 log = logging.getLogger("bridge.hermes")
 
@@ -427,7 +427,10 @@ class HermesClient:
                 elif name == "tool.started":
                     if draft is not None:
                         draft.restart()
-                    on_progress(f"using {ev.get('tool') or 'a tool'}")
+                    # In plain words ("Checked your inbox"); a hand-over to the crew gets the crew's own lines.
+                    label = labels.tool_label(ev.get("tool"), ev.get("args", ev.get("input")), ev.get("preview"))
+                    if label:
+                        on_progress(label)
                 elif name == "tool.completed" and ev.get("tool") == crew.HERMES_DELEGATE_TOOL:
                     detached = detached or _DISPATCHED in str(ev.get("preview") or "")
                 elif name == "subagent.start":
