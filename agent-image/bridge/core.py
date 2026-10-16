@@ -239,6 +239,32 @@ AUTOMATION_RULES = (
 )
 
 
+# How the lead uses the user's apps without wasted rounds (2026-10-15: "check my email" took 13 model rounds and
+# 62 s; the list of Gmail's 63 actions with their inputs was ~115k characters, and the lead paged through it with
+# its own tools). The backend's list_app_actions now gives names and one line each, describe_app_action one
+# action's inputs, and GMAIL_FETCH_EMAILS a summary of each email; the common Gmail actions are named here, with
+# their key inputs, so the lead can usually skip the list. The input names are Composio's (GMAIL_SEND_EMAIL has
+# recipient_email, not "to"); request_approval checks them against the action's inputs.
+APP_RULES = (
+    "Apps: the common Gmail actions can be run directly, without list_app_actions. GMAIL_FETCH_EMAILS (query in "
+    "Gmail search words, e.g. \"is:unread newer_than:2d\"; max_results, e.g. 10) gives the sender, subject, date "
+    "and a snippet of each email; add include_payload true only when you need the bodies. "
+    "GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID (message_id) reads one email in full. GMAIL_SEND_EMAIL (recipient_email, "
+    "subject, body) needs request_approval first. For any other action, list_app_actions gives the names with one "
+    "line each, then describe_app_action gives that action's inputs: look them up before you run it or ask for "
+    "approval. When a result is too big, ask the tool for less (a narrower query, a smaller max_results, one item "
+    "by its id); never page through a tool's result with commands or files."
+)
+
+
+# Write the answer once, at the end (2026-10-15: the lead wrote its answer, ran Bash, then wrote it again: one
+# more model round, and a step that flashed in the web chat). The final answer is the lead's last message.
+ANSWER_RULES = (
+    "Answer once, after your last tool call: use the tools you need first, then write the answer. Do not write "
+    "an answer and then keep working (another tool call, a check with a command), and do not write it twice."
+)
+
+
 # How the lead formats its final answer, by the delivery's channel (shared spec of 2026-10-09, "how Tex's replies
 # are formatted per channel"). The web app draws the agent's text as Markdown; a messaging app (Telegram,
 # WhatsApp, iMessage) shows the text as it was typed. The backend sends exactly `web`, `telegram`, `whatsapp` or
@@ -296,6 +322,8 @@ def build_instructions(req: DeliverRequest, job_folder: str = "") -> str:
         "https://github.com/<owner>/<repo> into your workspace, commit on a new branch and push it, "
         "then open the pull request with the GitHub app action. Pushing to a repository's default "
         "branch is refused, so always work on a branch.\n\n"
+        f"{APP_RULES}\n\n"
+        f"{ANSWER_RULES}\n\n"
         f"{format_rules(req.channel)}\n\n"
         f"{MEMORY_RULES}\n\n"
         f"{AUTOMATION_RULES}\n\n"

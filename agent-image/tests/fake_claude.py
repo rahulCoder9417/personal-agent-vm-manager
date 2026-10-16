@@ -232,6 +232,11 @@ def print_mode(args) -> int:
         out({"type": "result", "subtype": "success", "is_error": False, "session_id": sid,
              "result": "\n".join(the_web_tools(sid, settings))})
         return 0
+    if m == "apps":
+        the_apps_turn(sid)
+        out({"type": "result", "subtype": "success", "is_error": False, "result": "You have 2 unread emails.",
+             "session_id": sid})
+        return 0
     if m in CREW_MODES:
         global PARTIAL
         PARTIAL = "--include-partial-messages" in args
@@ -296,6 +301,22 @@ def msg(sid, role, content, parent=None, **extra) -> None:
 def agent_call(call_id, agent, description, tool="Agent", **extra):
     return {"type": "tool_use", "id": call_id, "name": tool,
             "input": {"subagent_type": agent, "description": description, "prompt": "the task", **extra}}
+
+
+def the_apps_turn(sid) -> None:
+    """"Check my email": the lead loads a deferred tool, looks at the user's apps, fetches the inbox, runs a
+    command and answers. Each tool call is a whole `assistant` message, as the CLI writes it."""
+    calls = (("a0", "ToolSearch", {"query": "select:mcp__platform__run_app_action"}),
+             ("a1", "mcp__platform__list_app_actions", {"app": "gmail"}),
+             ("a2", "mcp__platform__run_app_action",
+              {"action": "GMAIL_FETCH_EMAILS", "arguments": {"query": "is:unread", "max_results": 10}}),
+             ("a3", "mcp__platform__request_approval",
+              {"summary": "Send an email to x@acme.com", "action": "GMAIL_SEND_EMAIL", "arguments": {}}),
+             ("a4", "Bash", {"command": "date"}))
+    for call_id, name, tool_input in calls:
+        msg(sid, "assistant", [{"type": "tool_use", "id": call_id, "name": name, "input": tool_input}])
+        msg(sid, "user", [{"type": "tool_result", "tool_use_id": call_id, "content": "ok"}])
+    msg(sid, "assistant", [{"type": "text", "text": "You have 2 unread emails."}])
 
 
 def pre_tool_use(settings, sid, call_id, name, tool_input, agent=None):
