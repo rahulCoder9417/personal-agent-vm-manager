@@ -1222,7 +1222,7 @@ class BridgeWithRuntimesTest(unittest.TestCase):
         claude = flag(self.e.calls()[0]["argv"], "--append-system-prompt")
         for text in (hermes, claude):
             self.assertTrue(text.startswith(IDENTITY + "\n\n"))
-            for part in ("you are Tex, the user's own personal agent in Textcrew", "https://app.textcrew.in/apps",
+            for part in ("you are Tex, the user's own personal agent in Textcrew", "https://app.textcrew.in/integrations/apps",
                          "Never send the user to the settings or connectors of Claude",
                          "Never present yourself as Claude or Claude Code"):
                 self.assertIn(part, text)
