@@ -93,6 +93,9 @@ Notes on behaviour the proto leaves open:
   relative to it). Writes `<user_id>-<UTC time>.tar.gz` and returns its path and size.
   Streams /data through the Docker archive API (no helper container). Running
   containers are archived live (SQLite files may be mid-write; fine for nightly backups).
+  Archives are deleted after `SNAPSHOT_KEEP_DAYS` days (7 by default, checked every
+  `SNAPSHOT_PRUNE_INTERVAL`, 1 hour), and `DeleteSandbox` deletes all of that user's archives
+  at once. Keep `SNAPSHOT_KEEP_DAYS` equal to the backend's `BACKUP_KEEP_DAYS`.
 - `StopSandbox` (polite) on a busy sandbox is refused; use `force=true` for stuck turns. A polite stop is
   also refused while a Claude sign-in waits for its code (`FAILED_PRECONDITION`, like a busy one), the
   rule the idle reaper and eviction keep. The backend sends a polite stop right after a crew job, so the
