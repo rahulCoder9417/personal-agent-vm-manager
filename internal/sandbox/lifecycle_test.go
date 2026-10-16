@@ -523,3 +523,83 @@ func waitFor(t *testing.T, cond func() bool) {
 	}
 	t.Fatal("condition not met in time")
 }
+
+// Account deletion removes every archive of the user's /data, and only theirs; a re-run is safe.
+func TestDeleteRemovesUserSnapshots(t *testing.T) {
+	e := newEnv(t)
+	e.create(t, "u1")
+	e.create(t, "u1-b") // a user id that starts with the other one's
+	ctx := context.Background()
+	var mine []string
+	for _, day := range []string{"2026-10-01", "2026-10-02"} {
+		loc, _, err := e.m.Snapshot(ctx, "u1", filepath.Join("volumes", day))
+		if err != nil {
+			t.Fatal(err)
+		}
+		mine = append(mine, loc)
+	}
+	other, _, err := e.m.Snapshot(ctx, "u1-b", filepath.Join("volumes", "2026-10-01"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dump := filepath.Join(e.cfg.SnapshotRoot, "2026-10-01", "postgres.dump")
+	if err := os.MkdirAll(filepath.Dir(dump), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dump, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := e.m.Delete(ctx, "u1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, loc := range mine {
+		if _, err := os.Stat(loc); !os.IsNotExist(err) {
+			t.Fatalf("archive must be deleted: %s", loc)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(e.cfg.SnapshotRoot, "volumes", "2026-10-02")); !os.IsNotExist(err) {
+		t.Fatal("a folder left empty must be removed")
+	}
+	for _, keep := range []string{other, dump} {
+		if _, err := os.Stat(keep); err != nil {
+			t.Fatalf("must be kept: %s: %v", keep, err)
+		}
+	}
+}
+
+// Archives older than SNAPSHOT_KEEP_DAYS go, whoever they belong to; newer ones and other files stay.
+func TestPruneSnapshotsKeepsOnlyRecentArchives(t *testing.T) {
+	e := newEnv(t)
+	e.create(t, "u1")
+	ctx := context.Background()
+	old, _, err := e.m.Snapshot(ctx, "u1", filepath.Join("volumes", "old"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.clk.Advance(time.Duration(e.cfg.SnapshotKeepDays)*24*time.Hour - time.Hour)
+	recent, _, err := e.m.Snapshot(ctx, "u1", filepath.Join("volumes", "recent"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(e.cfg.SnapshotRoot, "volumes", "old", "notes.txt")
+	if err := os.WriteFile(other, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e.m.PruneSnapshotsOnce(ctx) // the old one is 7 days less an hour old: kept
+	if _, err := os.Stat(old); err != nil {
+		t.Fatal("an archive younger than the limit must be kept")
+	}
+	e.clk.Advance(2 * time.Hour)
+	e.m.PruneSnapshotsOnce(ctx)
+	e.m.PruneSnapshotsOnce(ctx) // safe to run again
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Fatal("an archive older than the limit must be deleted")
+	}
+	for _, keep := range []string{recent, other} {
+		if _, err := os.Stat(keep); err != nil {
+			t.Fatalf("must be kept: %s", keep)
+		}
+	}
+}

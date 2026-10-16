@@ -569,8 +569,9 @@ func (m *Manager) markStoppedLocked(ctx context.Context, sb store.Sandbox, final
 	return nil
 }
 
-// Delete removes the container, the /data volume and the egress rules. Only
-// for account deletion. Idempotent. Awake periods are kept for billing.
+// Delete removes the container, the /data volume, the egress rules and every
+// archive of /data under SNAPSHOT_ROOT. Only for account deletion. Idempotent.
+// Awake periods are kept for billing.
 func (m *Manager) Delete(ctx context.Context, userID string) error {
 	if err := validateUserID(userID); err != nil {
 		return err
@@ -597,6 +598,10 @@ func (m *Manager) Delete(ctx context.Context, userID string) error {
 		return err
 	}
 	if err := m.eg.Remove(userID); err != nil {
+		return err
+	}
+	// The nightly archives of the user's /data go too: no copy of the files outlives the account.
+	if err := m.removeUserSnapshots(userID); err != nil {
 		return err
 	}
 	if err := m.store.EndAwake(ctx, userID, m.clk.Now()); err != nil {

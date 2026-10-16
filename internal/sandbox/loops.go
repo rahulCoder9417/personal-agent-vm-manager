@@ -32,11 +32,12 @@ func (m *Manager) Run(ctx context.Context) {
 			}
 		}
 	}
-	done := make(chan struct{}, 3)
+	done := make(chan struct{}, 4)
 	go func() { loop("idle-reaper", m.cfg.ReaperInterval, m.ReapOnce); done <- struct{}{} }()
 	go func() { loop("health-checker", m.cfg.HealthInterval, m.HealthOnce); done <- struct{}{} }()
 	go func() { loop("reconciler", m.cfg.ReconcileInterval, m.ReconcileOnce); done <- struct{}{} }()
-	for range 3 {
+	go func() { loop("snapshot-pruner", m.cfg.SnapshotPruneInterval, m.PruneSnapshotsOnce); done <- struct{}{} }()
+	for range 4 {
 		<-done
 	}
 }

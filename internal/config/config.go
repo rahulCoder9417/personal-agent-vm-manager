@@ -80,6 +80,10 @@ type Config struct {
 
 	// Backups
 	SnapshotRoot string // SNAPSHOT_ROOT (default "/backups"): SnapshotVolume destinations must be inside it
+	// SNAPSHOT_KEEP_DAYS (default 7): archives older than this are deleted. Keep it equal to the
+	// backend's BACKUP_KEEP_DAYS, which deletes the database dumps after the same time.
+	SnapshotKeepDays      int
+	SnapshotPruneInterval time.Duration // SNAPSHOT_PRUNE_INTERVAL (default 1h)
 }
 
 // Load reads the config through getenv (os.Getenv in main, a map in tests).
@@ -129,7 +133,9 @@ func Load(getenv func(string) string) (*Config, error) {
 		ShutdownGrace:               p.dur("SHUTDOWN_GRACE", 20*time.Second),
 		WakeTimeout:                 p.dur("WAKE_TIMEOUT", 90*time.Second),
 
-		SnapshotRoot: p.str("SNAPSHOT_ROOT", "/backups"),
+		SnapshotRoot:          p.str("SNAPSHOT_ROOT", "/backups"),
+		SnapshotKeepDays:      p.int("SNAPSHOT_KEEP_DAYS", 7),
+		SnapshotPruneInterval: p.dur("SNAPSHOT_PRUNE_INTERVAL", time.Hour),
 	}
 	c.AgentImageVersion = p.str("AGENT_IMAGE_VERSION", c.AgentImage)
 
@@ -184,6 +190,12 @@ func Load(getenv func(string) string) (*Config, error) {
 	}
 	if c.BridgePort <= 0 || c.BridgePort > 65535 {
 		p.fail("BRIDGE_PORT", "must be a valid port")
+	}
+	if c.SnapshotKeepDays < 1 {
+		p.fail("SNAPSHOT_KEEP_DAYS", "must be >= 1")
+	}
+	if c.SnapshotPruneInterval <= 0 {
+		p.fail("SNAPSHOT_PRUNE_INTERVAL", "must be > 0")
 	}
 	if c.AwakeCap < 1 {
 		p.fail("AWAKE_CAP", "must be >= 1")
