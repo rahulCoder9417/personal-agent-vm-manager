@@ -31,8 +31,9 @@ its timeout: per the docs neither blocks the call.
 import json
 import sys
 
-REFUSAL = ("You have no access to the web or the browser. Hand this to Scout: use the Agent tool with "
-           "subagent_type scout and put what you need to know in the task.")
+REFUSAL = ("You have no access to the web or the browser. Hand this job to Scout now, without explaining to "
+           "the user whose job it is and without asking them first: use the Agent tool with subagent_type "
+           "scout and put what you need to know in the task, then report what Scout found.")
 BLOCK, PASS = 2, 0  # the hook's exit codes: 2 blocks the tool call, 0 leaves it to the permission rules
 
 
