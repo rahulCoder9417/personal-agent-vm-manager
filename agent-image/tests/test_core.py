@@ -5,7 +5,7 @@ import time
 import unittest
 
 from bridge import crew
-from bridge.core import (ANSWER_RULES, APP_RULES, APPS_PAGE, AUTOMATION_RULES, CLAUDE_EFFORTS, FORMAT_PLAIN,
+from bridge.core import (ANSWER_RULES, APP_ACCOUNT_RULES, APP_RULES, APPS_PAGE, AUTOMATION_RULES, CLAUDE_EFFORTS, FORMAT_PLAIN,
                          FORMAT_WEB, IDENTITY, KINDS, MEMORY_RULES, OWN_ACTION_RULES, Bridge, DeliverRequest, DeliveryStore, Draft,
                          Turn, TurnOptions, build_input, build_instructions, event, format_rules)
 
@@ -453,6 +453,7 @@ class RequestTest(unittest.TestCase):
                 f"{APP_RULES}\n\n"
                 f"{ANSWER_RULES}\n\n"
                 f"{MEMORY_RULES}\n\n"
+                f"{APP_ACCOUNT_RULES}\n\n"
                 f"{AUTOMATION_RULES}\n\n"
                 + crew.lead_instructions()
             )
@@ -479,6 +480,34 @@ class RequestTest(unittest.TestCase):
         # Before the crew's part, after the rules for approvals and git.
         self.assertLess(text.index("request_approval"), text.index(MEMORY_RULES))
         self.assertLess(text.index(MEMORY_RULES), text.index("You are Tex"))
+
+    def test_the_lead_takes_who_the_user_is_from_the_app_and_asks_once(self):
+        # 2026-10-17: asked about his repositories, the lead asked the founder for his GitHub username, was told,
+        # saved nothing, and asked again in the next chat. The backend now shows each connected app's account
+        # (get_profile, list_app_actions); the lead uses it, asks the app when it is missing, and only then asks
+        # the user, once, and saves the answer to the platform's memory.
+        for part in ("get_profile and list_app_actions give each connected app's account",
+                     "GitHub: their username, the owner of their own repositories; Gmail: their address",
+                     "never ask the user for their username, email or account in a connected app",
+                     "A repository the user names without its owner is most likely their own: look for it in their "
+                     "repositories rather than asking",
+                     "When an app's account is null, ask the app itself if it has an action for it (GitHub: "
+                     "GITHUB_GET_THE_AUTHENTICATED_USER)",
+                     "Only when the app cannot tell, use recall",
+                     "ask the user once and save the answer with remember",
+                     "so you never ask again"):
+            self.assertIn(part, APP_ACCOUNT_RULES)
+        self.assertNotIn("\n", APP_ACCOUNT_RULES)
+        # Every channel and kind of delivery, and a crew job's lead, gets it once, right after the memory rules.
+        for channel in ("web", "telegram", "whatsapp", ""):
+            for kind in sorted(KINDS):
+                text = build_instructions(req(kind=kind, channel=channel))
+                self.assertEqual(text.count(APP_ACCOUNT_RULES), 1, (channel, kind))
+                self.assertIn(MEMORY_RULES + "\n\n" + APP_ACCOUNT_RULES + "\n\n", text)
+        job = DeliverRequest.from_json({"delivery_id": "j", "kind": "message", "session_key": "web",
+                                        "channel": "web", "text": "[Crew job crj_1] Review acme/web#42.",
+                                        "metadata": {"crew_job": {"id": "crj_1", "member": "patch"}}})
+        self.assertIn(APP_ACCOUNT_RULES, build_instructions(job, "/data/workspace/jobs/crj_1"))
 
     def test_the_lead_knows_who_it_is(self):
         # 2026-10-13: on Claude Code the lead sent the founder to "your Claude settings" to connect Google Calendar.
@@ -534,12 +563,13 @@ class RequestTest(unittest.TestCase):
             self.assertIn(part, AUTOMATION_RULES)
         self.assertNotIn("create_automation", AUTOMATION_RULES)
         self.assertNotIn("\n", AUTOMATION_RULES)
-        # Every channel and every kind of delivery gets it once, after the memory rules and before the crew.
+        # Every channel and every kind of delivery gets it once, after the memory rules (and who the user is in
+        # their apps) and before the crew.
         for channel in ("web", "telegram", ""):
             for kind in sorted(KINDS):
                 text = build_instructions(req(kind=kind, channel=channel))
                 self.assertEqual(text.count(AUTOMATION_RULES), 1, (channel, kind))
-                self.assertIn(MEMORY_RULES + "\n\n" + AUTOMATION_RULES + "\n\n", text)
+                self.assertIn(MEMORY_RULES + "\n\n" + APP_ACCOUNT_RULES + "\n\n" + AUTOMATION_RULES + "\n\n", text)
                 self.assertLess(text.index(AUTOMATION_RULES), text.index("You are Tex, the lead"))
                 self.assertNotIn("create_automation", text)
 

@@ -20,7 +20,7 @@ from bridge.claude import (CHAT_DEFAULT_EFFORT, CHAT_DEFAULT_MODEL, LEAD_GATE, M
                            MSG_REFUSED, ClaudeAuth, ClaudeError, ClaudeRunner, CrewEvents, LoginNotFound, Redactor,
                            SessionMap, classify_failure, find_authorize_url, render_settings, GateConfig, never_rules,
                            CC_GATE, GATED_TOOLS)
-from bridge.core import (ANSWER_RULES, APP_RULES, FORMAT_PLAIN, FORMAT_WEB, IDENTITY, MEMORY_RULES, Bridge,
+from bridge.core import (ANSWER_RULES, APP_ACCOUNT_RULES, APP_RULES, FORMAT_PLAIN, FORMAT_WEB, IDENTITY, MEMORY_RULES, Bridge,
                          DeliverRequest, DeliveryStore, TurnOptions)
 from bridge.lead_gate import BLOCK, PASS, REFUSAL
 from bridge.platform import load_platform_file
@@ -1417,6 +1417,20 @@ class BridgeWithRuntimesTest(unittest.TestCase):
         self.assertFalse(self.bridge.healthy())
         self.e.write_platform("claude_code")
         self.assertTrue(self.bridge.healthy())
+
+    def test_both_engines_take_who_the_user_is_from_the_app(self):
+        # 2026-10-17: the lead asked the founder for his GitHub username in two chats, though GitHub was connected.
+        # Hermes and Claude Code get the same rule: the app's account from get_profile or list_app_actions, the
+        # app's own action when it is missing, and only then the user, once, saved with remember.
+        self.e.sign_in()
+        self.deliver("d1", "list my repos", session_key="web", channel="web")
+        hermes = self.hermes.calls[0]["instructions"]
+        self.e.write_platform("claude_code")
+        self.deliver("d2", "list my repos", session_key="web", channel="web")
+        claude = flag(self.e.calls()[0]["argv"], "--append-system-prompt")
+        for text in (hermes, claude):
+            self.assertEqual(text.count(APP_ACCOUNT_RULES), 1)
+            self.assertIn(MEMORY_RULES + "\n\n" + APP_ACCOUNT_RULES, text)
 
     def test_one_memory_the_platforms(self):
         # The lead on Claude Code is told to keep the user's facts in the platform's memory, and the CLI's own
