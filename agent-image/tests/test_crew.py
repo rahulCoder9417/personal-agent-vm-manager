@@ -247,9 +247,12 @@ class CrewDefinitionTest(unittest.TestCase):
                      "name a specialist only with who it is (\"Patch, my code reviewer\"), or not at all (\"the review "
                      "is done\")",
                      "When a card already asks the user's OK (your request_approval, or a command or a push waiting "
-                     "for their OK), your answer does not ask again",
-                     "that they can approve or deny it on the card"):
+                     "for their OK), the card is the question: your answer does not ask again and does not point at "
+                     "the card"):
             self.assertIn(part, text)
+        # 2026-10-17: told to say "that they can approve or deny it on the card", Tex wrote "The approval card is
+        # waiting for you above — approve or deny it there." under the merge card. The card is the message now.
+        self.assertNotIn("that they can approve or deny it on the card", text)
 
     def test_lead_instructions(self):
         text = crew.lead_instructions()
