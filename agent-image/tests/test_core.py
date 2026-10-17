@@ -6,8 +6,9 @@ import unittest
 
 from bridge import crew
 from bridge.core import (ANSWER_RULES, APP_ACCOUNT_RULES, APP_RULES, APPS_PAGE, AUTOMATION_RULES, CLAUDE_EFFORTS, FORMAT_PLAIN,
-                         FORMAT_WEB, IDENTITY, KINDS, MEMORY_RULES, OWN_ACTION_RULES, Bridge, DeliverRequest, DeliveryStore, Draft,
-                         CrewChoice, Turn, TurnOptions, build_input, build_instructions, event, format_rules)
+                         FORMAT_WEB, IDENTITY, KINDS, MEMORY_RULES, NO_REPLY, OWN_ACTION_RULES, Bridge, CrewChoice,
+                         DeliverRequest, DeliveryStore, Draft, Turn, TurnOptions, build_input, build_instructions,
+                         could_be_no_reply, event, format_rules, is_no_reply, no_reply_removed)
 
 from tests.fakes import CLAUDE_CODE_MODELS, FakeRunner, FakeSender
 
@@ -153,6 +154,21 @@ class BridgeCoreTest(unittest.TestCase):
         self.assertEqual(types(events)[-1], "turn_done")
         self.assertEqual(self.sender.sent, [])
 
+    def test_the_no_reply_marker_is_never_sent(self):
+        # 2026-10-17: after raising a merge card, Tex wrote "The approval card is waiting for you above — approve or
+        # deny it there.". After a card the lead now answers NO_REPLY, and nothing is sent: the turn just ends.
+        for n, output in enumerate(("NO_REPLY", " `NO_REPLY` ", "**NO_REPLY**", "NO_REPLY.", "no_reply", "[NO_REPLY]")):
+            with self.subTest(output=output):
+                self.runner.output = output
+                events = list(self.bridge.deliver(req(f"evt-nr-{n}")))
+                self.assertEqual(types(events)[-1], "turn_done")
+                self.assertFalse(any(e.get("platform_fault") for e in events))
+        self.assertEqual(self.sender.sent, [])
+        # Something to say, then the marker on a line of its own: what it said goes, without the marker.
+        self.runner.output = "The review found two problems: …\n\nNO_REPLY"
+        list(self.bridge.deliver(req("evt-nr-said")))
+        self.assertEqual(self.sender.sent, [("The review found two problems: …", "telegram:42")])
+
     def test_closing_refuses_new_work(self):
         stopped = []
         self.bridge.shutdown(lambda: stopped.append(True), wait_turns=0)
@@ -208,6 +224,18 @@ class DraftTest(unittest.TestCase):
         self.now += 1
         self.draft("z")
         self.assertEqual(self.sent, ["x" * 15, "x" * 15 + "y" * 5])
+
+    def test_the_no_reply_marker_is_never_shown(self):
+        # What may still become NO_REPLY is kept back, so the marker never flashes in the web chat.
+        for piece in ("N", "O_RE", "PLY"):
+            self.draft(piece)
+            self.now += 1
+        self.assertEqual(self.sent, [])
+        draft = Draft(self.sent.append, interval=0.25, clock=lambda: self.now)
+        draft("No")  # could still be the marker: not shown yet
+        self.now += 1
+        draft(" problem, merging it now.")  # it is not: shown whole
+        self.assertEqual(self.sent, ["No problem, merging it now."])
 
     def test_nothing_after_close(self):
         sent = []
@@ -292,6 +320,42 @@ class StreamTextTest(unittest.TestCase):
             turn.publish(ev)
         self.assertEqual([(e["type"], e["message"]) for e in turn.subscribe()],
                          [("accepted", ""), ("working", "using gmail"), ("text_delta", ""), ("turn_done", "")])
+
+
+class NoReplyTest(unittest.TestCase):
+    """The NO_REPLY marker: the lead's answer when the card it raised says everything (core.ANSWER_RULES)."""
+
+    def test_only_the_marker_alone_is_no_reply(self):
+        for text in ("NO_REPLY", "no_reply", " NO_REPLY\n", "`NO_REPLY`", "**NO_REPLY**.", "NO REPLY", "[NO_REPLY]"):
+            self.assertTrue(is_no_reply(text), text)
+        for text in ("", "   ", None, "NO", "NO_REPLY_PLEASE", "I will answer NO_REPLY when a card is up.",
+                     "No reply came from the app"):
+            self.assertFalse(is_no_reply(text), text)
+
+    def test_a_draft_that_could_still_become_the_marker(self):
+        for text in ("N", "NO", "NO_", "no_rep", "NO_REPLY", "`NO_R", "[NO_"):
+            self.assertTrue(could_be_no_reply(text), text)
+        for text in ("", "Hi", "No problem", "NO_REPLY and more", "Nope", "x" * 70):
+            self.assertFalse(could_be_no_reply(text), text)
+
+    def test_what_is_sent(self):
+        self.assertEqual(no_reply_removed("NO_REPLY"), "")
+        self.assertEqual(no_reply_removed("   "), "")
+        self.assertEqual(no_reply_removed("Merged ✅"), "Merged ✅")
+        self.assertEqual(no_reply_removed("Here is the review.\nNO_REPLY"), "Here is the review.")
+        self.assertEqual(no_reply_removed("NO_REPLY\nHere is the review."), "Here is the review.")
+        # The marker inside a sentence is the lead's text, sent as it is.
+        self.assertEqual(no_reply_removed("I answered NO_REPLY by mistake."), "I answered NO_REPLY by mistake.")
+
+    def test_the_lead_is_told_the_card_is_its_message(self):
+        # Both engines get ANSWER_RULES (test_claude); after a card the answer is the marker, never a pointer.
+        text = build_instructions(req(channel="web", session_key="web"))
+        self.assertIn(ANSWER_RULES, text)
+        for part in ("After you ask for the user's OK (request_approval, or a command or a push that waits for their "
+                     "OK), the user sees the question with Approve and Deny: that card is your message",
+                     "Never point at it, repeat its question or say you are waiting for their answer",
+                     f"your final answer is exactly {NO_REPLY} (that word alone, nothing is sent)"):
+            self.assertIn(part, ANSWER_RULES)
 
 
 class RequestTest(unittest.TestCase):

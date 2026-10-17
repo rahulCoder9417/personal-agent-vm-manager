@@ -256,7 +256,8 @@ A repeat of a finished delivery also sends that delivery's browser report again,
 
 The Bridge never returns the final answer in the event stream. It sends it itself by calling the
 Platform MCP tool `send_message` `{"text","session_key"}` with the container's bearer
-token. The agent (Hermes or Claude Code) sees the other Platform MCP tools but not `send_message`.
+token. An empty answer, or the lead's `NO_REPLY` (see "The card is the message" under "The crew"),
+is not sent: the turn ends with `turn_done` and no message. The agent (Hermes or Claude Code) sees the other Platform MCP tools but not `send_message`.
 The platform's MCP server is stateless (it gives no `Mcp-Session-Id`), so the Bridge sends
 `initialize` once per process and then each answer as one `tools/call`: one round trip through the
 egress proxy per answer instead of three. A server that gives a session id keeps it, and a 404 for
@@ -651,6 +652,17 @@ email" took 13 rounds and 62 seconds):
   `describe_app_action` for the GitHub action they use.
 - **Answer once** (`ANSWER_RULES`): the lead writes its answer after its last tool call, not an answer
   and then more work (a tool call, a check with a command), and not twice.
+- **The card is the message** (`ANSWER_RULES`, 17 October): after the lead asks for the user's OK
+  (`request_approval`, or a command or a push that waits for it), the user already sees the question
+  with Approve and Deny. The lead never points at the card, repeats its question or says it is waiting.
+  With nothing else to say, its final answer is exactly `NO_REPLY`, and the Bridge sends nothing: the
+  turn just ends (`no_reply_removed`; the marker on a line of its own before or after real text is
+  dropped, the text is sent). The draft keeps back anything that could still become the marker
+  (`could_be_no_reply`), so it never flashes in the web chat. An empty answer is not used for this:
+  after a tool call Hermes answers an empty reply with a nudge, then retries, and at last answers
+  "(empty)" (the pinned commit's `agent/turn_empty_response.py`); `NO_REPLY` is the marker Hermes's own
+  chat gateways keep back. The lead's crew rules say the same: a card already asking is not asked
+  again and not pointed at.
 
 **Automations go through a draft** (`AUTOMATION_RULES`, founder's decision of 16 October; the backend's
 `docs/automations-flow-proposal.md`). A plain one-time reminder ("remind me Friday at 10 to call the

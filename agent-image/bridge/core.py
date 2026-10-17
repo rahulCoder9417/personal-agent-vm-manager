@@ -354,10 +354,59 @@ APP_RULES = (
 
 # Write the answer once, at the end (2026-10-15: the lead wrote its answer, ran Bash, then wrote it again: one
 # more model round, and a step that flashed in the web chat). The final answer is the lead's last message.
+# After a card asks the user's OK, the card is the message (2026-10-17: Tex raised a merge card, then wrote "The
+# approval card is waiting for you above — approve or deny it there.", which stayed under the card after the yes).
+# The lead then answers NO_REPLY and nothing is sent (no_reply_removed, below).
 ANSWER_RULES = (
     "Answer once, after your last tool call: use the tools you need first, then write the answer. Do not write "
-    "an answer and then keep working (another tool call, a check with a command), and do not write it twice."
+    "an answer and then keep working (another tool call, a check with a command), and do not write it twice. "
+    "After you ask for the user's OK (request_approval, or a command or a push that waits for their OK), the user "
+    "sees the question with Approve and Deny: that card is your message. Never point at it, repeat its question "
+    "or say you are waiting for their answer. If you have nothing else they need to know, your final answer is "
+    "exactly NO_REPLY (that word alone, nothing is sent); if you have (what they asked for, or why you asked "
+    "again), write only that."
 )
+
+
+# The answer that is no answer. An empty final answer is not reliable for this: after a tool call, Hermes answers an
+# empty reply with a nudge ("You just executed tool calls but returned an empty response…"), then retries, and at
+# last answers "(empty)" (the pinned commit's agent/turn_empty_response.py). So the lead writes this marker, the
+# same Hermes's own chat gateways keep back (gateway/response_filters.py), and the Bridge sends nothing.
+NO_REPLY = "NO_REPLY"
+_NO_REPLY_FORMS = ("NO_REPLY", "NO REPLY", "[NO_REPLY]", "NOREPLY")
+_NO_REPLY_EDGES = " \t\r\n`*_.,!~'\"()"
+
+
+def _no_reply_form(text: str) -> str:
+    """A short text as the marker would be compared: no edge punctuation (`NO_REPLY`, **NO_REPLY**.), upper case."""
+    return " ".join(text.strip(_NO_REPLY_EDGES).upper().split())
+
+
+def is_no_reply(text: Optional[str]) -> bool:
+    """Whether a whole answer is the NO_REPLY marker (with stray edge punctuation): nothing is sent."""
+    return isinstance(text, str) and 0 < len(text.strip()) <= 64 and _no_reply_form(text) in _NO_REPLY_FORMS
+
+
+def could_be_no_reply(text: str) -> bool:
+    """Whether a draft could still turn out to be the marker ("N", "NO_RE"): the draft keeps it back, so the marker
+    is never shown and then taken away."""
+    form = " ".join(text.lstrip(_NO_REPLY_EDGES).upper().split())
+    if not form or len(text) > 64:
+        return False
+    return is_no_reply(text) or any(m.startswith(form) for m in _NO_REPLY_FORMS)
+
+
+def no_reply_removed(output: str) -> str:
+    """The answer to send: "" when it is only the marker, else without a line that is only the marker at its start or
+    end (the lead wrote something it had to say and then the marker); otherwise unchanged."""
+    if not output.strip() or is_no_reply(output):
+        return ""
+    lines = output.strip().splitlines()
+    if len(lines) > 1 and is_no_reply(lines[-1]):
+        return "\n".join(lines[:-1]).strip()
+    if len(lines) > 1 and is_no_reply(lines[0]):
+        return "\n".join(lines[1:]).strip()
+    return output
 
 
 # How the lead formats its final answer, by the delivery's channel (shared spec of 2026-10-09, "how Tex's replies
@@ -513,8 +562,11 @@ class Draft:
                 self._flush()
 
     def _flush(self) -> None:
-        # Leading blank lines are dropped (an engine may start a new piece with a paragraph break).
+        # Leading blank lines are dropped (an engine may start a new piece with a paragraph break). What may still
+        # become the NO_REPLY marker is kept back: it is never shown.
         text = self._text.lstrip()
+        if could_be_no_reply(text):
+            text = ""
         if text == self._sent:
             return
         self._sent = text
@@ -746,6 +798,8 @@ class Bridge:
                     return
                 output = result.output or ""
                 self.store.put(req.delivery_id, state="answered", output=output)
+            # The NO_REPLY marker (after a card that asks the user's OK) is never sent.
+            output = no_reply_removed(output)
             if output.strip():
                 if not self._send(output, req.session_key):
                     self._end(req, turn, event(ERROR, "could not deliver the reply", platform_fault=True), clock)
