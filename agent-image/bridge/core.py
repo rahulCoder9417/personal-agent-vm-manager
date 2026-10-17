@@ -224,6 +224,22 @@ MEMORY_RULES = (
 )
 
 
+# Who the user is in their apps (2026-10-17: asked about his repositories, the lead asked the founder for his GitHub
+# username, was told, saved nothing, and asked again in the next chat). The backend now asks each app that can say
+# (GitHub, Gmail) who the connection is signed in as, once, and get_profile and list_app_actions show it as the
+# app's `account`. For an app that cannot say, the user is asked once and the answer goes to the platform's memory.
+APP_ACCOUNT_RULES = (
+    "Who the user is in their apps: get_profile and list_app_actions give each connected app's account, the "
+    "username or email the user is signed in as there (GitHub: their username, the owner of their own "
+    "repositories; Gmail: their address). Use it: never ask the user for their username, email or account in a "
+    "connected app. A repository the user names without its owner is most likely their own: look for it in their "
+    "repositories rather than asking. When an app's account is null, ask the app itself if it has an action for "
+    "it (GitHub: GITHUB_GET_THE_AUTHENTICATED_USER). Only when the app cannot tell, use recall; if it is not "
+    "saved, ask the user once and save the answer with remember (e.g. \"Their Notion workspace is Acme\"), so you "
+    "never ask again."
+)
+
+
 # Automations go through a draft the user saves (founder's decision of 2026-10-16, backend docs
 # automations-flow-proposal.md, decision 2): the platform has no tool that makes a repeating or app-event
 # automation for the agent, only propose_automation. A plain one-time reminder stays one step. The platform
@@ -354,6 +370,7 @@ def build_instructions(req: DeliverRequest, job_folder: str = "") -> str:
         f"{ANSWER_RULES}\n\n"
         f"{format_rules(req.channel)}\n\n"
         f"{MEMORY_RULES}\n\n"
+        f"{APP_ACCOUNT_RULES}\n\n"
         f"{AUTOMATION_RULES}\n\n"
         + crew.lead_instructions()
         + job_rules
