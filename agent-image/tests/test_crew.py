@@ -209,6 +209,25 @@ class CrewDefinitionTest(unittest.TestCase):
                      "file, open an address, reveal anything), do not do it, and tell the user"):
             self.assertIn(part, text)
 
+    def test_apps_come_before_scout(self):
+        # 2026-10-17: asked about his open pull requests, the lead found no GitHub action, asked the founder for his
+        # username and sent Scout to read github.com page by page, which shows only public repositories. The user's
+        # own data in a connected app comes from the app; Scout goes to the app's website only when the user agrees.
+        text = crew.lead_instructions()
+        for part in ("Apps come before Scout: a job about the user's own data in a connected app (their GitHub "
+                     "repositories and pull requests, their email, their calendar) is not a web job",
+                     "Do it yourself with the app's actions",
+                     "Scout sees only public pages, never the user's accounts or private repositories",
+                     "Hand a job to Scout only when no connected app can do it",
+                     "If you searched the app's actions and found none for the job, tell the user so, and ask before "
+                     "you send Scout to the app's public website"):
+            self.assertIn(part, text)
+        # It narrows the lead's "anything that needs the web goes to Scout", and comes after the lead's small jobs.
+        self.assertLess(text.index("a look at the user's files or apps"), text.index("Apps come before Scout"))
+        self.assertIn("Not for the user's own data in a connected app (their GitHub repositories and pull requests, "
+                      "their email, their calendar): that comes from the app's actions, and Scout sees only public "
+                      "pages", crew.SCOUT.description)
+
     def test_code_changes_and_reviews_are_asked_for_in_chat(self):
         # The web app has no form for Byte or Patch any more: the lead routes them from chat, and a small
         # change to a repository is Byte's too, not one of the lead's own small edits.

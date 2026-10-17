@@ -1292,6 +1292,28 @@ class BridgeWithRuntimesTest(unittest.TestCase):
                          "Do not write an answer and then keep working"):
                 self.assertIn(part, text)
 
+    def test_both_engines_take_the_users_own_app_data_from_the_app(self):
+        # 2026-10-17: the lead asked the founder for his GitHub username and sent Scout to github.com for his open
+        # pull requests. Both engines are told that the user's own data in a connected app comes from the app's
+        # actions, how to search for one, and the GitHub actions that answer "my pull requests" directly.
+        self.e.sign_in()
+        self.deliver("d1", "any open pr?", session_key="web", channel="web")
+        hermes = self.hermes.calls[0]["instructions"]
+        self.e.write_platform("claude_code")
+        self.deliver("d2", "any open pr?", session_key="web", channel="web")
+        claude = flag(self.e.calls()[0]["argv"], "--append-system-prompt")
+        for text in (hermes, claude):
+            for part in ("comes from the app's actions, never from the app's website",
+                         "search list_app_actions with the app and a few plain words (app \"github\", search "
+                         "\"pull request\")",
+                         "try other words before you decide the app cannot do it",
+                         "GITHUB_FIND_PULL_REQUESTS finds pull requests across the user's repositories",
+                         "GITHUB_LIST_REPOSITORIES_FOR_THE_AUTHENTICATED_USER lists their repositories",
+                         "GITHUB_GET_THE_AUTHENTICATED_USER gives their username",
+                         "do not ask the user for what the app can tell you",
+                         "Apps come before Scout"):
+                self.assertIn(part, text)
+
     def test_the_deliverys_metadata_reaches_the_engine(self):
         # The vm-manager passes DeliverRequest.metadata_json through as the body's "metadata" (no proto change).
         self.e.sign_in()
