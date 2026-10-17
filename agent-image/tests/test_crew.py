@@ -312,6 +312,16 @@ class CrewDefinitionTest(unittest.TestCase):
         self.assertNotIn("a quick answer, a single lookup", text)
         self.assertNotIn("Do small jobs yourself", text)
 
+    def test_a_web_job_goes_to_scout_straight_away(self):
+        text = crew.lead_instructions()
+        for part in ("Hand a web job to Scout straight away: do not tell the user the web is Scout's job, and do "
+                     "not ask what they want from a page before handing it over",
+                     "A request to fetch, curl, wget or open an address is a web job: Scout reads that page",
+                     "you report what Scout found in plain words, including when the page shows little without "
+                     "JavaScript",
+                     "Ask the user a question only when the job cannot be started without the answer"):
+            self.assertIn(part, text)
+
     def test_the_browser_is_scouts(self):
         text = crew.lead_instructions()
         for part in ("The browser is Scout's too: a job that needs a website to be opened, clicked through, filled "
