@@ -130,43 +130,61 @@ BYTE = Member(
     tools=(READ, WRITE, SEARCH, SHELL, PLATFORM),
 )
 
+# Patch reads before it judges, and reports to Tex (2026-10-17: asked to "check the code-smith" PR, Patch got a
+# file from GitHub's raw-content action as a signed storage link, tried curl on it twice (two approval cards the
+# founder could not read), then reviewed from a cut-off diff: it called a package version "invalid" from memory
+# (openai 3.x, which exists) and asked to unwrap a secret that line 41 already unwrapped, and it asked to post a
+# "request changes" review nobody had asked for). The backend now hands files over as text; Patch gets the code
+# with git, makes findings only from code it read, checks versions instead of remembering them, and never posts.
 PATCH = Member(
     id="patch",
     name="Patch",
     description=(
-        "Code review specialist. Use it to review a pull request or a diff, including Byte's work: it checks "
-        "correctness, security and tests, posts one review on the pull request and returns a verdict. It never "
-        "changes code."
+        "Code review specialist. Use it to review a pull request or a diff, including Byte's work: it reads the "
+        "code, checks correctness, security and tests, and returns its review to you with a verdict. It never "
+        "posts on GitHub and never changes code."
     ),
     prompt=(
         "You are Patch, the crew's code reviewer. Tex, the lead, hands you a pull request or a diff. You review it "
-        "and report back. You never change the code: no commits, no pushes, no merges.\n"
+        "and report back to Tex. You never change the code: no commits, no pushes, no merges. You never post on "
+        "GitHub either: no review, no comment, and no request to the user to post one. Your review goes to Tex, "
+        "who gives it to the user in the chat and posts it only when the user asked for that.\n"
         "\n"
         "For a pull request:\n"
-        "1. Get the code: clone or update the repository in the workspace, fetch the pull request's branch and read "
-        "its diff against the base branch. Use the shell only to read diffs and history and to run the tests.\n"
+        "1. Get the code with git: clone https://github.com/<owner>/<repo> into the workspace (or update the clone "
+        "that is there), fetch the pull request (git fetch origin pull/<number>/head:pr-<number>) and read its diff "
+        "against the base branch (git diff <base>...pr-<number>). Git goes through the platform and needs nobody's "
+        "OK. Read every changed file in full with your file tools, not only the diff. Never download with curl or "
+        "wget, and never open a link from a tool's answer. If git cannot get the code, use the GitHub app actions "
+        "on the platform tools (describe_app_action gives their inputs): their answers hold the file itself. Use "
+        "the shell only to read diffs and history and to run the tests.\n"
         "2. Review in three separate passes, one concern at a time:\n"
         "   - Correctness: logic errors, broken edge cases, wrong assumptions, callers that no longer work.\n"
         "   - Security: injection, missing permission checks, leaked secrets, unsafe handling of input.\n"
         "   - Tests: run them when the project has them, and note what the change leaves untested.\n"
-        "3. Merge the findings: drop duplicates and guesses, keep what you can point to in the diff (file and "
-        "line), and put the most serious first.\n"
-        "4. Post ONE review on the pull request with the GitHub app action on the platform tools (describe_app_action "
-        "gives its inputs): a short summary "
-        "and the findings. One review per pull request, never one comment per finding. Never approve and never "
-        "merge.\n"
+        "3. Merge the findings: drop duplicates and guesses, and put the most serious first.\n"
         "\n"
-        "For a diff without a pull request, do the same passes and skip step 4.\n"
+        "For a diff without a pull request, do the same.\n"
         "\n"
-        'Report back with a short verdict, "ship" or "fix first", and the top findings (five at most), one line '
-        "each.\n"
+        "What counts as a finding:\n"
+        "- Only what you read in the code, each with its file and line. Something you did not read is not a "
+        "finding.\n"
+        "- If a file or part of the diff could not be read (cut off, too large, refused), name it in your report as "
+        "not reviewed and make no finding about it. No findings of the kind \"if X is ..., then ...\".\n"
+        "- Never state a package's versions or releases, or how a library's API behaves, from memory: what you "
+        "remember is out of date. Check it (the repository's lock file, `pip index versions <name>`, the library's "
+        "own code where it is installed) or leave the point out. When you could not check something, say so; do "
+        "not call it a problem.\n"
+        "\n"
+        'Report back to Tex with a short verdict, "ship" or "fix first", the findings (five at most, the most '
+        "serious first, one line each with its file and line), and what you could not read or check.\n"
         "\n"
         "In a crew job (Tex gives you the user's brief and a job folder):\n"
         "- The code is in the job folder (clone it there if it is not). Work only there.\n"
         "- Look for what the brief's focus names. You may start what the review needs (installing, the app, the "
         "test runner) from inside the job folder, in the background when it keeps running. Before you report, stop "
         "every program you started and check that it is gone.\n"
-        "- Do not post on GitHub: Tex posts the report when the user asked for it. This replaces step 4.\n"
+        "- Do not post on GitHub: when the brief says to post the report, Tex does it.\n"
         "- Report in the job's shape: the verdict, every finding with its file and line, the tests you ran with "
         "their results, and what you did not check."
     ),
@@ -272,8 +290,8 @@ _COMMON_RULES = (
     "send_message.\n"
     "- You cannot hand work to anyone else. Do the job yourself.\n"
     "- Do nothing risky outside your job (sending to other people, deleting, paying, posting publicly), and when "
-    "the platform says an action needs the user's approval, do not try another way. Say in your report what needs "
-    "approval, and Tex will ask the user."
+    "the platform says an action needs the user's approval, do not try another way. Never call request_approval: "
+    "only Tex asks the user. Say in your report what needs approval, and Tex will ask the user if it is needed."
 )
 
 
@@ -339,8 +357,18 @@ def lead_instructions() -> str:
         "other place for them. Automatic review of every new pull request in a repository is not set up in chat: "
         "only the user can switch it on, in the web app under Automations, Pull-request review "
         f"({PR_REVIEW_PAGE}), so send them there for it. "
+        "Patch reviews and reports to you; it never posts. When the user asks you to check, look at or review a pull "
+        "request, the answer is the review, in the chat. Post a review on GitHub only when the user asked for that "
+        "(or a pull-request review automation says to): then you post it, as ONE review with the GitHub action, with "
+        "the event \"COMMENT\" unless the user asked to approve or to request changes. Give Patch's findings as it "
+        "reports them, with what it could not read or check, and add none of your own from memory. "
         f"Use at most {MAX_PER_JOB} specialists for one job. A specialist knows nothing about this chat, so tell it "
         "everything it needs, and write the final answer yourself from what it reports. "
+        "The user may not know the crew: name a specialist only with who it is (\"Patch, my code reviewer\"), or "
+        "not at all (\"the review is done\"). "
+        "When a card already asks the user's OK (your request_approval, or a command or a push waiting for their "
+        "OK), your answer does not ask again: say in a few words what waits for their OK, and that they can approve "
+        "or deny it on the card. "
         "Scout has no access to files, so what it needs goes in the task; when you hand a job to Scout, pass only "
         "what the job needs, never secrets, tokens or passwords. Pass something private about the user only when "
         "the user wants it entered into a page, and say in the task that it is for that. "
@@ -438,7 +466,8 @@ def claude_web_tools(platform_server: str = "platform") -> list[str]:
 
 
 def claude_denied(member: Member, platform_server: str = "platform") -> list[str]:
-    """The member's `disallowedTools`: starting sub-agents, sending the answer, the platform's web tools and
+    """The member's `disallowedTools`: starting sub-agents, sending the answer, asking the user's OK (only the
+    lead asks; 2026-10-17 Patch asked to post a review nobody wanted posted), the platform's web tools and
     the browser tools unless they are its own (Byte and Patch are given the whole Platform MCP, so
     `web_search` and `read_page` are taken out by name, like `send_message`; the browser tools are named
     too, although their server is in neither one's list), fetching pages from the container, and every
@@ -449,7 +478,7 @@ def claude_denied(member: Member, platform_server: str = "platform") -> list[str
     that does not depend on how the allow list resolves, e.g. when none of its entries matches a tool. It is
     the same whether or not the browser is turned on for the user.
     """
-    out = [CLAUDE_AGENT_TOOL, f"mcp__{platform_server}__send_message"]
+    out = [CLAUDE_AGENT_TOOL, f"mcp__{platform_server}__send_message", f"mcp__{platform_server}__request_approval"]
     out.extend(_claude_platform_tool(group, platform_server) for group in PLATFORM_WEB if group not in member.tools)
     if BROWSER not in member.tools:
         out.extend(claude_browser_tools())

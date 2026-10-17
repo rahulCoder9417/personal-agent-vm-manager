@@ -60,7 +60,13 @@ READERS = ("Read", "Glob", "Grep")
 GATED_TOOLS = (*GATED_WRITES, *READERS)
 HTTP_TIMEOUT = 15  # seconds; the hook's own timeout (claude.GATE_TIMEOUT) is longer
 
-WHY_NETWORK = "it reaches the internet, and Scout's browser is on, so any website can be reached"
+# The words the user reads under "Why" on the card ("It needs your OK because ..."). Network commands are asked
+# about only while Scout's browser is on, because only then can the container reach any website; the user is not
+# told that part (17 Oct 2026: the founder found "and Scout's browser is on, so any website can be reached"
+# unreadable). The meaning is the same: the command reaches the internet.
+WHY_NETWORK = "it connects to the internet"
+WHY_DOWNLOAD = "it downloads from the internet"
+WHY_UPLOAD = "it sends data over the internet"
 WHY_REMOTE = "it changes where git fetches from or pushes to"
 WHY_OUTSIDE = "it deletes or overwrites files outside the workspace"
 WHY_UNKNOWN = "the files it changes could not be told, and they may be outside the workspace"
@@ -344,6 +350,28 @@ class Verdict:
         return other if rank[other.decision] > rank[self.decision] else self
 
 
+# curl's and wget's options that send something (a body, a form, a file), and the methods that do.
+_SENDS_LONG = re.compile(r"^--(data|data-[a-z]+|form|form-string|upload-file|json|post-data|post-file|body-data|"
+                         r"body-file)(=|$)")
+_CURL_SENDS_SHORT = re.compile(r"^-[a-zA-Z]*[dFT]")  # -d, -F, -T, also inside a cluster such as -sd
+_SEND_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def _why_network(program: str, args: list[str]) -> str:
+    """Why a network program needs the user's OK, in their words: curl and wget download, or send data when an
+    option sends a body, a form or a file or names another method than GET; anything else connects."""
+    if program not in ("curl", "wget"):
+        return WHY_NETWORK
+    for i, a in enumerate(args):
+        if _SENDS_LONG.match(a) or (program == "curl" and _CURL_SENDS_SHORT.match(a)):
+            return WHY_UPLOAD
+        method = a.split("=", 1)[1] if a.startswith(("--request=", "--method=")) else (
+            args[i + 1] if a in ("-X", "--request", "--method") and i + 1 < len(args) else "")
+        if method.upper() in _SEND_METHODS:
+            return WHY_UPLOAD
+    return WHY_DOWNLOAD
+
+
 def _non_github_url(words: Iterable[str]) -> bool:
     for w in words:
         for m in _URL.finditer(w):
@@ -535,7 +563,7 @@ def bash(command: str, cwd: Optional[str], ctx: Context, depth: int = 0) -> Verd
             continue
         if ctx.browser:
             if program in NET_PROGRAMS:
-                v = v.worse(Verdict(ASK, WHY_NETWORK))
+                v = v.worse(Verdict(ASK, _why_network(program, args)))
             elif program == "rsync" and any(":" in a and not a.startswith("-") for a in args):
                 v = v.worse(Verdict(ASK, WHY_NETWORK))
             elif program in INTERPRETERS or re.match(r"^python3?\.[0-9]+$", program):
