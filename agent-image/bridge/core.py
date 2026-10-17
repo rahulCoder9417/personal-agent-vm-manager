@@ -274,7 +274,10 @@ AUTOMATION_RULES = (
 # actions named here answer the common asks without a search, with the inputs that make them answer about the user
 # (2026-10-17, later: GITHUB_FIND_PULL_REQUESTS with no owner, repo or author searched all of GitHub, and the
 # lead's inputs had been sent beside "action", where the Platform MCP dropped them; Composio's search
-# GITHUB_SEARCH_ISSUES_AND_PULL_REQUESTS takes GitHub's own search words, with @me for the user).
+# GITHUB_SEARCH_ISSUES_AND_PULL_REQUESTS takes GitHub's own search words, with @me for the user). Asked "can u check
+# for the unchecked pr" (2026-10-17, later still), the lead searched only review-requested:@me, found none and said
+# nothing was waiting, while the founder's own repository Code-Smith had an open pull request: "unchecked", "open"
+# and "pending" mean the open ones in the user's repositories too.
 APP_RULES = (
     "Apps: the common Gmail actions can be run directly, without list_app_actions. GMAIL_FETCH_EMAILS (query in "
     "Gmail search words, e.g. \"is:unread newer_than:2d\"; max_results, e.g. 10) gives the sender, subject, date "
@@ -292,6 +295,10 @@ APP_RULES = (
     "they can see, private ones too: q \"is:pr is:open author:@me\" for their open pull requests, \"is:pr is:open "
     "review-requested:@me\" for the ones waiting for their review, \"is:issue is:open assignee:@me\" for issues "
     "assigned to them, \"repo:OWNER/REPO is:issue is:open\" for one repository's open issues; "
+    "asked about their unchecked, open or pending pull requests, search both the open ones in their own "
+    "repositories (q \"is:pr is:open user:USERNAME\" with their GitHub username, which also finds the ones others "
+    "opened there; add org:NAME for their organizations) and the ones waiting for their review "
+    "(review-requested:@me), and say what each found: no review requests does not mean no open pull requests; "
     "GITHUB_LIST_REPOSITORIES_FOR_THE_AUTHENTICATED_USER (sort \"updated\", per_page 100, no type, so their "
     "organizations' repositories are in it) lists their repositories, each with its full_name OWNER/REPO; "
     "GITHUB_LIST_COMMITS (owner, repo, since an ISO date) shows what changed in a repository; "

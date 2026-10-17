@@ -1336,7 +1336,13 @@ class BridgeWithRuntimesTest(unittest.TestCase):
                          "GITHUB_LIST_REPOSITORIES_FOR_THE_AUTHENTICATED_USER (sort \"updated\", per_page 100, no "
                          "type, so their organizations' repositories are in it)",
                          "GITHUB_LIST_COMMITS (owner, repo, since an ISO date) shows what changed in a repository",
-                         "GITHUB_FIND_PULL_REQUESTS without owner, repo or author searches all of GitHub"):
+                         "GITHUB_FIND_PULL_REQUESTS without owner, repo or author searches all of GitHub",
+                         # 2026-10-17, "check for the unchecked pr": only review-requested was searched, and the
+                         # open pull request in his own repository was missed.
+                         "asked about their unchecked, open or pending pull requests, search both the open ones in "
+                         "their own repositories (q \"is:pr is:open user:USERNAME\" with their GitHub username",
+                         "and the ones waiting for their review (review-requested:@me)",
+                         "no review requests does not mean no open pull requests"):
                 self.assertIn(part, text)
             self.assertNotIn("GITHUB_FIND_PULL_REQUESTS finds pull requests across the user's repositories", text)
 

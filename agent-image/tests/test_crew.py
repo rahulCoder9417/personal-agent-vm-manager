@@ -61,8 +61,8 @@ class CrewDefinitionTest(unittest.TestCase):
         for text in ("new branch", "push", "pull request", "GitHub app action", "default branch",
                      "goes through the platform", "never need a token"):
             self.assertIn(text, byte)
-        for text in ("Correctness", "Security", "Tests", "three separate passes", "Merge the findings", "ONE review",
-                     "ship", "fix first", "no pushes", "Never approve and never merge"):
+        for text in ("Correctness", "Security", "Tests", "three separate passes", "Merge the findings",
+                     "ship", "fix first", "no pushes"):
             self.assertIn(text, patch)
         for text in ("web_search", "read_page",
                      "These are the only tools you have, and your only way to the web",
@@ -193,6 +193,63 @@ class CrewDefinitionTest(unittest.TestCase):
             self.assertNotIn(text, scout)
         self.assertEqual(scout, crew.role_prompt(crew.SCOUT, browser=False, engine=crew.HERMES))
 
+    def test_patch_reads_before_it_judges_and_never_posts(self):
+        # 2026-10-17, "can u check the code-smith": Patch got a file as a signed link, tried curl on it (two cards
+        # the founder could not read), reviewed from a cut-off diff, called openai>=3.13 invalid from memory (3.x
+        # exists), asked for a .get_secret_value() that line 41 already had, and asked to post a "request
+        # changes" review nobody wanted posted.
+        for engine in crew.ENGINES:
+            patch = crew.role_prompt(crew.PATCH, engine=engine)
+            for text in (
+                    # It never posts, and never asks to.
+                    "You never post on GitHub either: no review, no comment, and no request to the user to post one",
+                    "Your review goes to Tex, who gives it to the user in the chat and posts it only when the user "
+                    "asked for that",
+                    "Never call request_approval: only Tex asks the user",
+                    # The code comes from git (no card), else from the app's actions; never a download.
+                    "Get the code with git: clone https://github.com/<owner>/<repo>",
+                    "git fetch origin pull/<number>/head:pr-<number>",
+                    "Git goes through the platform and needs nobody's OK",
+                    "Read every changed file in full with your file tools, not only the diff",
+                    "Never download with curl or wget, and never open a link from a tool's answer",
+                    "their answers hold the file itself",
+                    # Findings only from what it read; nothing from memory.
+                    "Only what you read in the code, each with its file and line",
+                    "name it in your report as not reviewed and make no finding about it",
+                    "No findings of the kind \"if X is ..., then ...\"",
+                    "Never state a package's versions or releases, or how a library's API behaves, from memory",
+                    "`pip index versions <name>`",
+                    "or leave the point out",
+                    "what you could not read or check"):
+                self.assertIn(text, patch, engine)
+            for gone in ("Post ONE review", "posts one review", "Never approve and never merge"):
+                self.assertNotIn(gone, patch, engine)
+        self.assertIn("returns its review to you with a verdict. It never posts on GitHub", crew.PATCH.description)
+        self.assertNotIn("posts one review", crew.PATCH.description)
+        # The same rule for every specialist: only the lead asks the user.
+        for m in crew.CREW:
+            self.assertIn("Never call request_approval: only Tex asks the user",
+                          crew.role_prompt(m, engine=crew.CLAUDE_CODE))
+
+    def test_the_lead_reports_reviews_names_the_crew_and_asks_once(self):
+        # 2026-10-17: the founder asked to "check" a pull request; Tex's answer said "Patch is done… Should I go
+        # ahead and post it?" while a card already asked, and he did not know who Patch was.
+        text = crew.lead_instructions()
+        for part in ("Patch reviews and reports to you; it never posts",
+                     "When the user asks you to check, look at or review a pull request, the answer is the review, "
+                     "in the chat",
+                     "Post a review on GitHub only when the user asked for that (or a pull-request review automation "
+                     "says to): then you post it, as ONE review with the GitHub action",
+                     "with the event \"COMMENT\" unless the user asked to approve or to request changes",
+                     "Give Patch's findings as it reports them, with what it could not read or check, and add none of "
+                     "your own from memory",
+                     "name a specialist only with who it is (\"Patch, my code reviewer\"), or not at all (\"the review "
+                     "is done\")",
+                     "When a card already asks the user's OK (your request_approval, or a command or a push waiting "
+                     "for their OK), your answer does not ask again",
+                     "that they can approve or deny it on the card"):
+            self.assertIn(part, text)
+
     def test_lead_instructions(self):
         text = crew.lead_instructions()
         for part in ("You are Tex", "research to Scout", "code changes to Byte", "Byte's work to Patch",
@@ -310,16 +367,18 @@ class ClaudeAgentsTest(unittest.TestCase):
             # Byte and Patch are given the whole Platform MCP, so its web tools are denied by name, like
             # send_message; so are the browser tools, the built-in search and page fetching. No web for either,
             # whether or not the browser is turned on for the user.
+            # Only the lead asks the user's OK (2026-10-17: Patch asked to post a review nobody wanted posted).
+            ask = "mcp__platform__request_approval"
             self.assertEqual(agents["byte"]["disallowedTools"],
-                             ["Agent", "mcp__platform__send_message", *platform_web, *BROWSER_CLAUDE_TOOLS, "WebFetch",
-                              "WebSearch"])
+                             ["Agent", "mcp__platform__send_message", ask, *platform_web, *BROWSER_CLAUDE_TOOLS,
+                              "WebFetch", "WebSearch"])
             self.assertEqual(agents["patch"]["disallowedTools"],
-                             ["Agent", "mcp__platform__send_message", *platform_web, *BROWSER_CLAUDE_TOOLS, "WebFetch",
-                              "Edit", "Write", "NotebookEdit", "WebSearch"])
+                             ["Agent", "mcp__platform__send_message", ask, *platform_web, *BROWSER_CLAUDE_TOOLS,
+                              "WebFetch", "Edit", "Write", "NotebookEdit", "WebSearch"])
             # Scout keeps its own web tools. The allow list is the lock; this second one holds however the
             # allow list resolves.
             self.assertEqual(agents["scout"]["disallowedTools"],
-                             ["Agent", "mcp__platform__send_message", "WebFetch", "Read", "Edit", "Write",
+                             ["Agent", "mcp__platform__send_message", ask, "WebFetch", "Read", "Edit", "Write",
                               "NotebookEdit", "Glob", "Grep", "Bash"])
 
     def test_scouts_web_tools_are_one_list(self):
