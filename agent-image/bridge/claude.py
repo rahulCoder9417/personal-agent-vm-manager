@@ -505,7 +505,7 @@ def render_settings(gate: Optional[GateConfig] = None) -> dict[str, Any]:
 # The lead's model and effort when the user left both on "Default" in Settings and no BRIDGE_CLAUDE_MODEL is set:
 # Sonnet 5.5 at low effort, a quick first word for chat. Without them the CLI picks for itself: Opus 5.5 at medium
 # effort (2.1.301 against a fake API), which once thought for 14 s before its first word. An effort the user chose
-# still applies, on this model. The crew has its own, whatever the lead runs on (crew.claude_member_model).
+# still applies, on this model. Byte and Patch then have their own (crew.claude_member_model).
 CHAT_DEFAULT_MODEL = "claude-sonnet-5-5"
 CHAT_DEFAULT_EFFORT = "low"
 
@@ -551,7 +551,7 @@ class ClaudeRunner:
 
     def _args(self, pf: PlatformFile, instructions: str, session_id: str, resume: bool, model: str = "",
               effort: str = "", stream_text: bool = False,
-              crew_choices: Optional[dict[str, Any]] = None) -> list[str]:
+              crew_choices: Optional[dict[str, Any]] = None, lead_chosen: bool = False) -> list[str]:
         # Permission rules are the session's: the lead's and every specialist's calls are checked against
         # them. So the allow list also names what only Scout uses (its built-in web search and, when the
         # browser is turned on for the user, the browser tools by name), and the deny list only what nobody
@@ -570,7 +570,7 @@ class ClaudeRunner:
                 "--setting-sources", "user", "--settings", self.settings_path,
                 # The crew as sub-agents of this (lead) session; each has its own tool list.
                 "--agents", json.dumps(crew.claude_agents(PLATFORM_SERVER_NAME, self.crew_model, self.with_browser,
-                                                          choices=crew_choices)),
+                                                          choices=crew_choices, lead_chosen=lead_chosen)),
                 "--append-system-prompt", f"{instructions}\n\n{crew.CLAUDE_HANDOFF}"]
         # The model and effort: the user's choice for this turn, else the Bridge's default (BRIDGE_CLAUDE_MODEL, or
         # CHAT_DEFAULT_MODEL at CHAT_DEFAULT_EFFORT). 2.1.283 and 2.1.296 (`claude --help`): "--model <model> ... an alias for the latest model
@@ -647,7 +647,7 @@ class ClaudeRunner:
         job_env = dict(getattr(options, "job_env", ()) or ())
         how = {"model": model, "effort": effort, "choice": choice, "on_text": on_text, "job_env": job_env,
                "clock": getattr(options, "clock", None),
-               "crew_choices": dict(getattr(options, "claude_crew", ()) or ())}
+               "crew_choices": dict(getattr(options, "claude_crew", ()) or ()), "lead_chosen": not chat_default}
         with self._session_lock(session_key):
             # Which conversation of the chat this turn is in. The platform's memory is not part of a conversation.
             epoch, moved = self.sessions.enter(session_key, chat_epoch)
@@ -741,7 +741,8 @@ class ClaudeRunner:
                   choice: Optional[dict] = None,
                   on_text: Optional[Callable[[Optional[str]], None]] = None,
                   job_env: Optional[dict] = None, clock: Any = None,
-                  crew_choices: Optional[dict[str, Any]] = None) -> tuple[RunResult, Optional[str]]:
+                  crew_choices: Optional[dict[str, Any]] = None,
+                  lead_chosen: bool = False) -> tuple[RunResult, Optional[str]]:
         """One CLI run. `model` / `effort` go on the command line; `choice` is what of them the user chose
         ({"model", "effort"}), so a refusal of it is not a platform fault. `on_text`: the draft (LeadText).
         `job_env`: a crew job's mark, added to the CLI's environment. `clock`: the turn's stage times
@@ -750,7 +751,7 @@ class ClaudeRunner:
         choice = choice or {}
         marks = ClaudeMarks(clock)
         args = self._args(pf, instructions, session_id, resume, model, effort, stream_text=on_text is not None,
-                          crew_choices=crew_choices)
+                          crew_choices=crew_choices, lead_chosen=lead_chosen)
         marks.run_started()
         proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 cwd=self.workdir, env={**self.env, **job_env} if job_env else self.env,

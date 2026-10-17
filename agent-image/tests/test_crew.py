@@ -426,7 +426,7 @@ class ClaudeAgentsTest(unittest.TestCase):
 
     def test_each_member_has_its_own_model_and_effort(self):
         models = lambda agents: {k: (a["model"], a.get("effort")) for k, a in agents.items()}
-        # Nothing chosen: Byte and Patch on Opus 5.5 at medium effort, whatever the lead runs on; Scout inherits the
+        # Nothing chosen and the lead on the chat default: Byte and Patch on Opus 5.5 at medium effort; Scout inherits the
         # lead's model and effort.
         defaults = {"byte": ("claude-opus-5-5", "medium"), "patch": ("claude-opus-5-5", "medium"),
                     "scout": ("inherit", None)}
@@ -448,6 +448,16 @@ class ClaudeAgentsTest(unittest.TestCase):
         # A choice for someone who is not one of the crew changes nothing; an empty choice is the default.
         self.assertEqual(models(crew.claude_agents("platform", choices={"tex": CrewChoice("claude-opus-5-5", "max"),
                                                                          "byte": CrewChoice()})), defaults)
+        # A model picked for the lead: everyone left on "Default" runs as the lead does; a member's own pick still wins,
+        # and so does a crew model set for the server.
+        self.assertEqual(models(crew.claude_agents("platform", lead_chosen=True)),
+                         {k: ("inherit", None) for k in ("byte", "patch", "scout")})
+        self.assertEqual(models(crew.claude_agents("platform", choices=choices, lead_chosen=True)),
+                         {"byte": ("inherit", "high"), "patch": ("claude-sonnet-5-5", "low"),
+                          "scout": ("claude-haiku-5-5", None)})
+        self.assertEqual(set(models(crew.claude_agents("platform", model="haiku", lead_chosen=True)).values()),
+                         {("haiku", None)})
+        self.assertEqual(crew.claude_member_model("patch", lead_chosen=True), {"model": "inherit"})
         self.assertEqual(crew.claude_member_model("byte"), {"model": "claude-opus-5-5", "effort": "medium"})
         self.assertEqual(crew.claude_member_model("scout"), {"model": "inherit"})
 
