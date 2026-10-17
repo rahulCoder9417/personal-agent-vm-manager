@@ -1307,12 +1307,38 @@ class BridgeWithRuntimesTest(unittest.TestCase):
                          "search list_app_actions with the app and a few plain words (app \"github\", search "
                          "\"pull request\")",
                          "try other words before you decide the app cannot do it",
-                         "GITHUB_FIND_PULL_REQUESTS finds pull requests across the user's repositories",
-                         "GITHUB_LIST_REPOSITORIES_FOR_THE_AUTHENTICATED_USER lists their repositories",
+                         "lists their repositories",
                          "GITHUB_GET_THE_AUTHENTICATED_USER gives their username",
                          "do not ask the user for what the app can tell you",
                          "Apps come before Scout"):
                 self.assertIn(part, text)
+
+    def test_both_engines_know_the_github_action_and_inputs_for_the_common_asks(self):
+        # 2026-10-17, later: told only that GITHUB_FIND_PULL_REQUESTS "finds pull requests across the user's
+        # repositories", the lead ran it with no owner, repo or author, which searches all of GitHub, and its inputs
+        # had been sent beside "action". Each common ask now has its action and the inputs that make it about the
+        # user: GitHub's search words with @me for pull requests and issues, the repository list with no type (so
+        # organization repositories are in it), the commits since a date for "what changed".
+        self.e.sign_in()
+        self.deliver("d1", "my open prs?", session_key="web", channel="web")
+        hermes = self.hermes.calls[0]["instructions"]
+        self.e.write_platform("claude_code")
+        self.deliver("d2", "my open prs?", session_key="web", channel="web")
+        claude = flag(self.e.calls()[0]["argv"], "--append-system-prompt")
+        for text in (hermes, claude):
+            for part in ("An action's inputs go inside run_app_action's \"arguments\"",
+                         "GITHUB_SEARCH_ISSUES_AND_PULL_REQUESTS (q in GitHub search words, @me is the user)",
+                         "private ones too",
+                         "q \"is:pr is:open author:@me\" for their open pull requests",
+                         "\"is:pr is:open review-requested:@me\" for the ones waiting for their review",
+                         "\"is:issue is:open assignee:@me\" for issues assigned to them",
+                         "\"repo:OWNER/REPO is:issue is:open\" for one repository's open issues",
+                         "GITHUB_LIST_REPOSITORIES_FOR_THE_AUTHENTICATED_USER (sort \"updated\", per_page 100, no "
+                         "type, so their organizations' repositories are in it)",
+                         "GITHUB_LIST_COMMITS (owner, repo, since an ISO date) shows what changed in a repository",
+                         "GITHUB_FIND_PULL_REQUESTS without owner, repo or author searches all of GitHub"):
+                self.assertIn(part, text)
+            self.assertNotIn("GITHUB_FIND_PULL_REQUESTS finds pull requests across the user's repositories", text)
 
     def test_the_deliverys_metadata_reaches_the_engine(self):
         # The vm-manager passes DeliverRequest.metadata_json through as the body's "metadata" (no proto change).

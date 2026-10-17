@@ -270,8 +270,11 @@ AUTOMATION_RULES = (
 # recipient_email, not "to"); request_approval checks them against the action's inputs.
 # The user's own data in an app comes from the app (2026-10-17: asked about his open pull requests, the lead found
 # no GitHub action to list them, asked the founder for his username and sent Scout to read github.com, which shows
-# only public repositories; the backend's list then held only GitHub's first 200 actions, A to C). The three GitHub
-# actions named here answer "my pull requests" and "my repositories" without a search.
+# only public repositories; the backend's list then held only GitHub's first 200 actions, A to C). The GitHub
+# actions named here answer the common asks without a search, with the inputs that make them answer about the user
+# (2026-10-17, later: GITHUB_FIND_PULL_REQUESTS with no owner, repo or author searched all of GitHub, and the
+# lead's inputs had been sent beside "action", where the Platform MCP dropped them; Composio's search
+# GITHUB_SEARCH_ISSUES_AND_PULL_REQUESTS takes GitHub's own search words, with @me for the user).
 APP_RULES = (
     "Apps: the common Gmail actions can be run directly, without list_app_actions. GMAIL_FETCH_EMAILS (query in "
     "Gmail search words, e.g. \"is:unread newer_than:2d\"; max_results, e.g. 10) gives the sender, subject, date "
@@ -284,9 +287,16 @@ APP_RULES = (
     "The user's own data in a connected app (their GitHub repositories, pull requests and issues, their email, "
     "their calendar) comes from the app's actions, never from the app's website: search list_app_actions with the "
     "app and a few plain words (app \"github\", search \"pull request\"), and try other words before you decide "
-    "the app cannot do it. On GitHub, GITHUB_FIND_PULL_REQUESTS finds pull requests across the user's repositories, "
-    "GITHUB_LIST_REPOSITORIES_FOR_THE_AUTHENTICATED_USER lists their repositories and "
-    "GITHUB_GET_THE_AUTHENTICATED_USER gives their username: do not ask the user for what the app can tell you."
+    "the app cannot do it. An action's inputs go inside run_app_action's \"arguments\". On GitHub: "
+    "GITHUB_SEARCH_ISSUES_AND_PULL_REQUESTS (q in GitHub search words, @me is the user) searches every repository "
+    "they can see, private ones too: q \"is:pr is:open author:@me\" for their open pull requests, \"is:pr is:open "
+    "review-requested:@me\" for the ones waiting for their review, \"is:issue is:open assignee:@me\" for issues "
+    "assigned to them, \"repo:OWNER/REPO is:issue is:open\" for one repository's open issues; "
+    "GITHUB_LIST_REPOSITORIES_FOR_THE_AUTHENTICATED_USER (sort \"updated\", per_page 100, no type, so their "
+    "organizations' repositories are in it) lists their repositories, each with its full_name OWNER/REPO; "
+    "GITHUB_LIST_COMMITS (owner, repo, since an ISO date) shows what changed in a repository; "
+    "GITHUB_GET_THE_AUTHENTICATED_USER gives their username: do not ask the user for what the app can tell you. "
+    "GITHUB_FIND_PULL_REQUESTS without owner, repo or author searches all of GitHub, not the user's repositories."
 )
 
 
