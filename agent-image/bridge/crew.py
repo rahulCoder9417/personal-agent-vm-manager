@@ -19,6 +19,11 @@ runs inside the user's own container (bridge/browser.py): a feature of the Max p
 by the platform and charged for every minute the browser is open. Signing in to sites is not part of
 this version: no agent ever types a password.
 
+The user's own data in a connected app is not a web job (2026-10-17): asked about his open pull requests,
+the lead found no GitHub action, asked for his username and sent Scout to read github.com, which shows
+only public repositories. The lead now uses the app's actions for it, and asks the user before it sends
+Scout to the app's public website.
+
 The lead, Byte and Patch have no web tool and no browser tool. Scout's web tools are one list (WEB_GROUPS):
 Scout's tool list, the deny lists of Byte and Patch and the lead's gate are all made from it. Claude Code
 enforces the rule (see "Claude Code" below); on Hermes it is an instruction, because tools cannot be
@@ -178,7 +183,9 @@ SCOUT = Member(
         "Research specialist. Use it for anything that needs the web: finding facts, comparing options, reading "
         "pages, and jobs on a website that has to be opened in a browser (clicked through, filled in or scraped; "
         "the browser is part of the Max plan). It returns a short answer with links. It sees no files and none of "
-        "the user's apps, so put what it needs to know in the task."
+        "the user's apps, so put what it needs to know in the task. Not for the user's own data in a connected app "
+        "(their GitHub repositories and pull requests, their email, their calendar): that comes from the app's "
+        "actions, and Scout sees only public pages."
     ),
     prompt=(
         "You are Scout, the crew's researcher. Tex, the lead, hands you a question or a job on a website. You do "
@@ -320,6 +327,13 @@ def lead_instructions() -> str:
         "available yet, so when a job needs a sign-in, tell the user that. "
         "Do small jobs that need no web yourself, without a specialist: a quick answer, a look at the user's files "
         "or apps, a small edit. "
+        "Apps come before Scout: a job about the user's own data in a connected app (their GitHub repositories and "
+        "pull requests, their email, their calendar) is not a web job. Do it yourself with the app's actions (a change "
+        "to a repository's code still goes to Byte, and a review to Patch), even when the same data is on a "
+        "website: Scout sees only public pages, never the user's accounts or private "
+        "repositories, and is slower and costs more. Hand a job to Scout only when no connected app can do it. If "
+        "you searched the app's actions and found none for the job, tell the user so, and ask before you send Scout "
+        "to the app's public website. "
         "A change to the code or files of a repository goes to Byte however small it is, even a typo in a README, "
         "and every review of a pull request goes to Patch: the user asks for both in chat, and the web app has no "
         "other place for them. Automatic review of every new pull request in a repository is not set up in chat: "

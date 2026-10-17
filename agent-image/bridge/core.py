@@ -252,6 +252,10 @@ AUTOMATION_RULES = (
 # action's inputs, and GMAIL_FETCH_EMAILS a summary of each email; the common Gmail actions are named here, with
 # their key inputs, so the lead can usually skip the list. The input names are Composio's (GMAIL_SEND_EMAIL has
 # recipient_email, not "to"); request_approval checks them against the action's inputs.
+# The user's own data in an app comes from the app (2026-10-17: asked about his open pull requests, the lead found
+# no GitHub action to list them, asked the founder for his username and sent Scout to read github.com, which shows
+# only public repositories; the backend's list then held only GitHub's first 200 actions, A to C). The three GitHub
+# actions named here answer "my pull requests" and "my repositories" without a search.
 APP_RULES = (
     "Apps: the common Gmail actions can be run directly, without list_app_actions. GMAIL_FETCH_EMAILS (query in "
     "Gmail search words, e.g. \"is:unread newer_than:2d\"; max_results, e.g. 10) gives the sender, subject, date "
@@ -260,7 +264,13 @@ APP_RULES = (
     "subject, body) needs request_approval first. For any other action, list_app_actions gives the names with one "
     "line each, then describe_app_action gives that action's inputs: look them up before you run it or ask for "
     "approval. When a result is too big, ask the tool for less (a narrower query, a smaller max_results, one item "
-    "by its id); never page through a tool's result with commands or files."
+    "by its id); never page through a tool's result with commands or files. "
+    "The user's own data in a connected app (their GitHub repositories, pull requests and issues, their email, "
+    "their calendar) comes from the app's actions, never from the app's website: search list_app_actions with the "
+    "app and a few plain words (app \"github\", search \"pull request\"), and try other words before you decide "
+    "the app cannot do it. On GitHub, GITHUB_FIND_PULL_REQUESTS finds pull requests across the user's repositories, "
+    "GITHUB_LIST_REPOSITORIES_FOR_THE_AUTHENTICATED_USER lists their repositories and "
+    "GITHUB_GET_THE_AUTHENTICATED_USER gives their username: do not ask the user for what the app can tell you."
 )
 
 
