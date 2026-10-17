@@ -7,7 +7,7 @@ import unittest
 from bridge import crew
 from bridge.core import (ANSWER_RULES, APP_ACCOUNT_RULES, APP_RULES, APPS_PAGE, AUTOMATION_RULES, CLAUDE_EFFORTS, FORMAT_PLAIN,
                          FORMAT_WEB, IDENTITY, KINDS, MEMORY_RULES, OWN_ACTION_RULES, Bridge, DeliverRequest, DeliveryStore, Draft,
-                         Turn, TurnOptions, build_input, build_instructions, event, format_rules)
+                         CrewChoice, Turn, TurnOptions, build_input, build_instructions, event, format_rules)
 
 from tests.fakes import CLAUDE_CODE_MODELS, FakeRunner, FakeSender
 
@@ -332,6 +332,37 @@ class RequestTest(unittest.TestCase):
             self.assertEqual(req(metadata={"chat_epoch": 2, "claude": "opus"}).options(), TurnOptions(chat_epoch=2))
         self.assertEqual(req(metadata={"chat_epoch": None, "claude": None}).options(), TurnOptions())
         self.assertEqual(req(metadata=["not", "an", "object"]).options(), TurnOptions())
+
+    def test_the_crew_in_the_metadata_of_a_turn(self):
+        # "claude": {"crew": {"byte" | "patch" | "scout": {"model", "effort"}}}: each member's own choice, in the
+        # crew's order. A member or a field left out keeps its default.
+        meta = {"claude": {"model": "claude-opus-5-5", "crew": {
+            "scout": {"model": "claude-haiku-5-5"},
+            "patch": {"model": "claude-sonnet-5-5", "effort": "low"},
+            "byte": {"effort": "high"},
+        }}}
+        self.assertEqual(req(metadata=meta).options(), TurnOptions(
+            claude_model="claude-opus-5-5",
+            claude_crew=(("byte", CrewChoice(effort="high")),
+                         ("patch", CrewChoice("claude-sonnet-5-5", "low")),
+                         ("scout", CrewChoice(model="claude-haiku-5-5")))))
+        self.assertEqual(req(metadata={"claude": {"crew": {}}}).options(), TurnOptions())
+        # Anything else is left out (logged): the member, or only the bad field, keeps its default.
+        with self.assertLogs("bridge.core", "WARNING") as logs:
+            for crew_value in ("opus", ["byte"], 3):
+                self.assertEqual(req(metadata={"claude": {"crew": crew_value}}).options(), TurnOptions(), crew_value)
+            bad = {"claude": {"crew": {
+                "tex": {"model": "claude-opus-5-5"},  # the lead is not one of the crew
+                "Byte": {"model": "claude-opus-5-5"},
+                "patch": "claude-opus-5-5",
+                "scout": {"model": "--dangerously-skip-permissions", "effort": "ultra"},
+            }}}
+            self.assertEqual(req(metadata=bad).options(), TurnOptions())
+            half = {"claude": {"crew": {"byte": {"model": "a b", "effort": "max"}, "patch": {"model": "opus",
+                                                                                          "effort": 3}}}}
+            self.assertEqual(req(metadata=half).options().claude_crew,
+                             (("byte", CrewChoice(effort="max")), ("patch", CrewChoice(model="opus"))))
+        self.assertFalse([line for line in logs.output if "dangerously" in line], "a bad value is not logged")
 
     def test_the_bridge_passes_them_to_the_runner(self):
         runner = FakeRunner()

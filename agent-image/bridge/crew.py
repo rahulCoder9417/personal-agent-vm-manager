@@ -33,7 +33,7 @@ narrowed per agent there.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Mapping, Optional
 
 LEAD_NAME = "Tex"
 # The two engines, by the names the platform uses for them (platform.json "runtime").
@@ -489,47 +489,61 @@ def claude_denied(member: Member, platform_server: str = "platform") -> list[str
     return out
 
 
-# Byte and Patch write and review code, where thinking pays. When the lead runs on the chat default (the user left
-# the model on "Default": claude.CHAT_DEFAULT_MODEL, low effort) they keep what they ran on before it: the CLI's own
-# default, Opus 5.5 at medium effort (2.1.301 against a fake API, with no --model: the lead and an `inherit`
-# specialist both sent claude-opus-5-5 with effort medium). Pinned by full name: the alias `default` is not one a
-# specialist takes (sent to the API as the model "default"). Scout reads the web and inherits the lead's.
+# Byte and Patch write and review code, where thinking pays. Left on "Default" in Settings they run on what they ran
+# on before the chat default came in: the CLI's own default, Opus 5.5 at medium effort (2.1.301 against a fake API,
+# with no --model: the lead and an `inherit` specialist both sent claude-opus-5-5 with effort medium), whatever the
+# lead runs on. Pinned by full name: the alias `default` is not one a specialist takes (sent to the API as the model
+# "default"). Scout reads the web and inherits the lead's. The backend tells the web app the same
+# (beckend, orchestrator/agent-settings.ts CLAUDE_CREW_DEFAULTS): change both together.
 CLAUDE_CREW_DEFAULTS: dict[str, dict[str, str]] = {
     "byte": {"model": "claude-opus-5-5", "effort": "medium"},
     "patch": {"model": "claude-opus-5-5", "effort": "medium"},
 }
 
 
+def claude_member_model(member_id: str, crew_model: str = "", choice: Any = None) -> dict[str, str]:
+    """A specialist's `model` and `effort` in `--agents`. The model, in order: the one the user chose for this
+    member in Settings (`choice`, a core.CrewChoice from the delivery's metadata), else BRIDGE_CLAUDE_CREW_MODEL
+    (`crew_model`) when it is set, else the member's default (CLAUDE_CREW_DEFAULTS; Scout: `inherit`, the lead's).
+    The effort: the one the user chose for this member, else the default's (none with BRIDGE_CLAUDE_CREW_MODEL or
+    `inherit`: the specialist then runs at the session's `--effort`). The two are chosen apart, so a member with only
+    an effort chosen keeps its default model, and the other way round. A pinned model without effort levels, such
+    as Haiku 4.5, gets none whatever is set (seen with 2.1.283)."""
+    out = {"model": crew_model} if crew_model else dict(CLAUDE_CREW_DEFAULTS.get(member_id, {"model": "inherit"}))
+    model, effort = getattr(choice, "model", "") or "", getattr(choice, "effort", "") or ""
+    if model:
+        out["model"] = model
+    if effort:
+        out["effort"] = effort
+    return out
+
+
 def claude_agents(platform_server: str = "platform", model: str = "", browser: bool = False,
-                  own_defaults: bool = False) -> dict[str, Any]:
-    """The value of `--agents`: {id: {description, prompt, tools, disallowedTools, model}}.
+                  choices: Optional[Mapping[str, Any]] = None) -> dict[str, Any]:
+    """The value of `--agents`: {id: {description, prompt, tools, disallowedTools, model[, effort]}}.
 
     `tools` is an allow list. It leaves out `Agent`, so a specialist cannot start helpers of its own;
     `disallowedTools` (applied first, see claude_denied) says the same again, keeps `send_message` and,
     for everyone but Scout, the web and browser tools away, and names the built-in tools the member must
     not have. No `mcpServers`: a specialist shares the lead's MCP connections, narrowed by `tools`. No
-    `permissionMode`: a specialist runs in the lead's mode. `model` is the lead's (`inherit`) unless a
-    cheaper one is set (BRIDGE_CLAUDE_CREW_MODEL). So a specialist runs on the model the user chose for the turn
-    (the lead's `--model`), at the session's `--effort`: no `effort` field (the docs allow one per sub-agent; seen
-    with 2.1.283 against a fake API: `inherit` and no `effort` sent the lead's model and effort for the
-    specialist; a pinned model without effort levels, such as Haiku 4.5, got none). `browser`: the browser is
-    turned on for this user, so Scout's list and brief have it. `own_defaults`: the lead runs on the chat default,
-    so Byte and Patch get their own model and effort (CLAUDE_CREW_DEFAULTS), unless a crew model is set.
+    `permissionMode`: a specialist runs in the lead's mode. `model` and `effort`: each member's own
+    (claude_member_model): what the user chose for it (`choices`: {member id: core.CrewChoice}, from the delivery's
+    metadata), else `model` (BRIDGE_CLAUDE_CREW_MODEL) when set, else its default. The docs allow an `effort` per
+    sub-agent; seen with 2.1.283 against a fake API: `inherit` and no `effort` sent the lead's model and effort for
+    the specialist, and a pinned specialist's `"effort": "low"` was sent as given. `browser`: the browser is turned on
+    for this user, so Scout's list and brief have it.
     """
-    agents = {
+    choices = choices or {}
+    return {
         m.id: {
             "description": m.description,
             "prompt": role_prompt(m, browser, engine=CLAUDE_CODE),
             "tools": claude_tools(m, platform_server, browser),
             "disallowedTools": claude_denied(m, platform_server),
-            "model": model or "inherit",
+            **claude_member_model(m.id, model, choices.get(m.id)),
         }
         for m in CREW
     }
-    if own_defaults and not model:
-        for member_id, own in CLAUDE_CREW_DEFAULTS.items():
-            agents[member_id].update(own)
-    return agents
 
 
 # The lead and its sub-agents are one Claude Code session and share its permission rules

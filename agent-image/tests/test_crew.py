@@ -4,6 +4,7 @@ import json
 import unittest
 
 from bridge import crew
+from bridge.core import CrewChoice
 
 # The browser tools Scout gets: these names on the MCP server `scout_browser` (Playwright MCP 0.0.83 behind
 # bridge/browser_mcp.py). The server's other tools (file upload, running code, screenshots, ...) are not
@@ -341,10 +342,12 @@ class ClaudeAgentsTest(unittest.TestCase):
             agents = crew.claude_agents("platform", browser=browser)
             self.assertEqual(list(agents), ["byte", "patch", "scout"])
             for agent_id, a in agents.items():
-                self.assertEqual(set(a), {"description", "prompt", "tools", "disallowedTools", "model"}, agent_id)
+                own = {"effort"} if agent_id in ("byte", "patch") else set()
+                self.assertEqual(set(a), {"description", "prompt", "tools", "disallowedTools", "model", *own}, agent_id)
                 self.assertEqual(a["description"], crew.BY_ID[agent_id].description)
                 self.assertEqual(a["prompt"], crew.role_prompt(crew.BY_ID[agent_id], browser, engine=crew.CLAUDE_CODE))
-                self.assertEqual(a["model"], "inherit", "a specialist uses the lead's model by default")
+                self.assertEqual(a["model"], "claude-opus-5-5" if own else "inherit",
+                                 "Byte and Patch have their own model by default, Scout uses the lead's")
                 self.assertEqual(a["disallowedTools"][:2], ["Agent", "mcp__platform__send_message"])
                 for t in ("Agent", "Task", "mcp__platform__send_message"):
                     self.assertNotIn(t, a["tools"], "a specialist cannot start helpers or send the answer")
@@ -421,15 +424,32 @@ class ClaudeAgentsTest(unittest.TestCase):
         self.assertEqual(crew.claude_session_denied("platform"), ["mcp__platform__send_message", "WebFetch"])
         self.assertFalse(set(crew.claude_session_denied("platform")) & set(crew.claude_web_tools("platform")))
 
-    def test_own_defaults_of_byte_and_patch(self):
-        # The lead on the chat default: Byte and Patch keep Opus 5.5 at medium effort, Scout inherits the lead's.
-        agents = crew.claude_agents("platform", own_defaults=True)
-        self.assertEqual({k: (a["model"], a.get("effort")) for k, a in agents.items()},
-                         {"byte": ("claude-opus-5-5", "medium"), "patch": ("claude-opus-5-5", "medium"),
-                          "scout": ("inherit", None)})
-        # A crew model set for the server wins over them.
-        agents = crew.claude_agents("platform", model="haiku", own_defaults=True)
-        self.assertEqual({(a["model"], a.get("effort")) for a in agents.values()}, {("haiku", None)})
+    def test_each_member_has_its_own_model_and_effort(self):
+        models = lambda agents: {k: (a["model"], a.get("effort")) for k, a in agents.items()}
+        # Nothing chosen: Byte and Patch on Opus 5.5 at medium effort, whatever the lead runs on; Scout inherits the
+        # lead's model and effort.
+        defaults = {"byte": ("claude-opus-5-5", "medium"), "patch": ("claude-opus-5-5", "medium"),
+                    "scout": ("inherit", None)}
+        self.assertEqual(models(crew.claude_agents("platform")), defaults)
+        self.assertEqual(models(crew.claude_agents("platform", choices={})), defaults)
+        # A crew model set for the server wins over the defaults, with no effort of its own.
+        self.assertEqual(set(models(crew.claude_agents("platform", model="haiku")).values()), {("haiku", None)})
+        # The user's choice for a member wins over both; model and effort apart, the rest stays.
+        choices = {"patch": CrewChoice("claude-sonnet-5-5", "low"), "byte": CrewChoice(effort="high"),
+                   "scout": CrewChoice(model="claude-haiku-5-5")}
+        self.assertEqual(models(crew.claude_agents("platform", choices=choices)),
+                         {"byte": ("claude-opus-5-5", "high"), "patch": ("claude-sonnet-5-5", "low"),
+                          "scout": ("claude-haiku-5-5", None)})
+        self.assertEqual(models(crew.claude_agents("platform", model="haiku", choices=choices)),
+                         {"byte": ("haiku", "high"), "patch": ("claude-sonnet-5-5", "low"),
+                          "scout": ("claude-haiku-5-5", None)})
+        self.assertEqual(models(crew.claude_agents("platform", choices={"scout": CrewChoice(effort="max")})),
+                         {**defaults, "scout": ("inherit", "max")})
+        # A choice for someone who is not one of the crew changes nothing; an empty choice is the default.
+        self.assertEqual(models(crew.claude_agents("platform", choices={"tex": CrewChoice("claude-opus-5-5", "max"),
+                                                                         "byte": CrewChoice()})), defaults)
+        self.assertEqual(crew.claude_member_model("byte"), {"model": "claude-opus-5-5", "effort": "medium"})
+        self.assertEqual(crew.claude_member_model("scout"), {"model": "inherit"})
 
     def test_cheaper_model_and_env(self):
         agents = crew.claude_agents("platform", model="haiku")

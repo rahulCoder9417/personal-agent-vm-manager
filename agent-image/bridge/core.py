@@ -63,6 +63,15 @@ _CLAUDE_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._\[\]-]{0,99}")
 
 
 @dataclass(frozen=True)
+class CrewChoice:
+    """One crew member's model and effort as the user chose them in Settings (metadata "claude.crew.<id>");
+    "" = that member's default (crew.claude_member_model)."""
+
+    model: str = ""
+    effort: str = ""
+
+
+@dataclass(frozen=True)
 class TurnOptions:
     """What the backend says about a turn in the delivery's metadata (shared spec "New chat", "Chat history" and
     "Claude Code model and effort"):
@@ -77,6 +86,9 @@ class TurnOptions:
                    (claude.CHAT_DEFAULT_MODEL).
     claude_effort  metadata "claude.effort": Claude Code's `--effort` for this turn; "" = low on the Bridge's
                    default model (claude.CHAT_DEFAULT_EFFORT), else the CLI's default.
+    claude_crew    metadata "claude.crew": {"byte" | "patch" | "scout": {"model", "effort"}}, the model and effort
+                   the user chose for each crew member on its own, as (member id, CrewChoice) pairs in the crew's
+                   order. A member left out, or a field left out, is that member's default (crew.claude_member_model).
     stream_text    metadata "stream_text": true when the answer is read where it can be shown as it is written
                    (the backend sets it for web chat only): the lead's draft goes out as `text_delta` events
                    (Draft). Anything but true is false.
@@ -85,6 +97,7 @@ class TurnOptions:
     chat_epoch: Optional[int] = None
     claude_model: str = ""
     claude_effort: str = ""
+    claude_crew: tuple[tuple[str, CrewChoice], ...] = ()
     stream_text: bool = False
     # Set by the Bridge, not read from the metadata: for a crew job's turn, what the engine's process adds to its
     # environment (jobs.CrewJob.env), so everything started for the job is known as the job's and stopped after it.
@@ -114,7 +127,39 @@ class TurnOptions:
             log.warning("metadata claude.effort is not one of %s; the default effort is used", ", ".join(CLAUDE_EFFORTS))
             effort = None
         return cls(chat_epoch=epoch, claude_model=model or "", claude_effort=effort or "",
-                   stream_text=meta.get("stream_text") is True)
+                   claude_crew=_crew_choices(claude.get("crew")), stream_text=meta.get("stream_text") is True)
+
+
+def _crew_choices(raw: Any) -> tuple[tuple[str, CrewChoice], ...]:
+    """metadata "claude.crew", read as leniently as the rest: a member that is not one of the crew, or a value that
+    is not a model name or an effort level, is left out (logged), and that member or field keeps its default."""
+    if raw is None:
+        return ()
+    if not isinstance(raw, dict):
+        log.warning("metadata claude.crew is not an object; the crew keeps its defaults")
+        return ()
+    ids = [m.id for m in crew.CREW]
+    if any(key not in ids for key in raw):
+        log.warning("metadata claude.crew names someone who is not one of the crew (%s); left out", ", ".join(ids))
+    out = []
+    for member in ids:
+        choice = raw.get(member)
+        if choice is None:
+            continue
+        if not isinstance(choice, dict):
+            log.warning("metadata claude.crew.%s is not an object; %s keeps its default", member, member)
+            continue
+        model, effort = choice.get("model"), choice.get("effort")
+        if model is not None and not (isinstance(model, str) and _CLAUDE_MODEL.fullmatch(model)):
+            log.warning("metadata claude.crew.%s.model is not a model name; %s keeps its default model", member, member)
+            model = None
+        if effort is not None and effort not in CLAUDE_EFFORTS:
+            log.warning("metadata claude.crew.%s.effort is not one of %s; %s keeps its default effort", member,
+                        ", ".join(CLAUDE_EFFORTS), member)
+            effort = None
+        if model or effort:
+            out.append((member, CrewChoice(model=model or "", effort=effort or "")))
+    return tuple(out)
 
 
 @dataclass
