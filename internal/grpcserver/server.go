@@ -149,9 +149,9 @@ func (s *Server) toStatus(err error) error {
 	case errors.Is(err, sandbox.ErrCapacity):
 		return status.Error(codes.ResourceExhausted, "awake cap reached; retry later")
 	case errors.Is(err, sandbox.ErrDiskFull):
-		return status.Error(codes.ResourceExhausted, "server disk is nearly full; not waking sandboxes")
+		return status.Error(codes.ResourceExhausted, "disk_guard: server disk is nearly full; not waking sandboxes")
 	case errors.Is(err, sandbox.ErrStorageLimit):
-		return status.Error(codes.ResourceExhausted, "storage limit reached for this user")
+		return status.Error(codes.ResourceExhausted, "disk_limit: storage limit reached for this user")
 	case errors.Is(err, sandbox.ErrBusy):
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, sandbox.ErrUnavailable):
