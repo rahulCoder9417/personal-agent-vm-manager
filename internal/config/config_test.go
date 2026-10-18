@@ -48,8 +48,8 @@ func TestLoadDefaults(t *testing.T) {
 		t.Errorf("image version should default to the image: %q vs %q", c.AgentImageVersion, c.AgentImage)
 	}
 	if strings.Join(c.ClaudeEgressDomains, ",") != "api.anthropic.com,claude.ai,claude.com,platform.claude.com" ||
-		c.ClaudeLoginTTL != 10*time.Minute {
-		t.Errorf("unexpected claude defaults: %v %v", c.ClaudeEgressDomains, c.ClaudeLoginTTL)
+		c.ClaudeLoginTTL != 5*time.Minute || c.ClaudeLoginsMax != 2 {
+		t.Errorf("unexpected claude defaults: %v %v %d", c.ClaudeEgressDomains, c.ClaudeLoginTTL, c.ClaudeLoginsMax)
 	}
 }
 
@@ -98,6 +98,7 @@ func TestLoadRejectsBadValues(t *testing.T) {
 		"bad opts":     {"SANDBOX_VOLUME_OPTS": "novalue"},
 		"bad domains":  {"CLAUDE_EGRESS_DOMAINS": "api.anthropic.com,10.0.0.1"},
 		"zero ttl":     {"CLAUDE_LOGIN_TTL": "0s"},
+		"zero logins":  {"CLAUDE_LOGINS_MAX": "0"},
 		// A container with the browser never gets less than one without.
 		"small browser memory": {"SANDBOX_BROWSER_MEMORY_MB": "512"},
 		"browser memory below": {"SANDBOX_MEMORY_MB": "4096"},

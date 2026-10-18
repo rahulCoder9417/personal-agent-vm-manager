@@ -36,10 +36,29 @@ func ParseRuntime(name string) (store.Runtime, error) {
 
 // --- pending sign-ins and sign-outs (memory only) ---
 
-func (m *Manager) setLoginPending(userID string, until time.Time) {
+// reserveLogin marks a sign-in of userID as pending until `until`, unless ClaudeLoginsMax
+// sign-ins of other users already wait (each holds an awake place: it is never stopped to make
+// room). The user's own earlier sign-in doesn't count: a new start replaces it. Expired ones are
+// dropped first. Check and mark are one step, so two starts at once can't both take the last place.
+func (m *Manager) reserveLogin(userID string, until time.Time) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	now := m.clk.Now()
+	waiting := 0
+	for u, t := range m.logins {
+		if !now.Before(t) {
+			delete(m.logins, u)
+			continue
+		}
+		if u != userID {
+			waiting++
+		}
+	}
+	if waiting >= m.cfg.ClaudeLoginsMax {
+		return false
+	}
 	m.logins[userID] = until
+	return true
 }
 
 func (m *Manager) clearLoginPending(userID string) {
@@ -209,14 +228,20 @@ func (m *Manager) SetAgentRuntime(ctx context.Context, userID string, rt store.R
 
 // StartClaudeLogin wakes the sandbox if needed and starts the official Claude Code sign-in in
 // it. It returns Anthropic's authorize URL; the user signs in on Anthropic's page. Until the
-// sign-in completes or expires, the sandbox is treated as busy (not stopped when idle, not
-// evicted) and can reach Anthropic's hosts.
+// sign-in completes or expires (CLAUDE_LOGIN_TTL, 5 minutes), the sandbox is treated as busy (not
+// stopped when idle, not evicted) and can reach Anthropic's hosts. At most CLAUDE_LOGINS_MAX
+// sign-ins wait at once on the server (ErrLoginsFull, before anything is woken), so waiting
+// sign-ins never hold more than that many of the AWAKE_CAP places.
 func (m *Manager) StartClaudeLogin(ctx context.Context, userID string) (bridge.ClaudeLogin, error) {
 	if err := validateUserID(userID); err != nil {
 		return bridge.ClaudeLogin{}, err
 	}
 	// Pending before the wake, so the egress file written by the wake already has the hosts.
-	m.setLoginPending(userID, m.clk.Now().Add(m.cfg.ClaudeLoginTTL))
+	until := m.clk.Now().Add(m.cfg.ClaudeLoginTTL)
+	if !m.reserveLogin(userID, until) {
+		m.log.Info("claude sign-in refused: too many waiting", "user_id", userID, "max", m.cfg.ClaudeLoginsMax)
+		return bridge.ClaudeLogin{}, ErrLoginsFull
+	}
 	sb, _, err := m.wake(ctx, userID, 0, true) // counted as in flight until we return
 	if err != nil {
 		m.clearLoginPending(userID)
@@ -238,6 +263,11 @@ func (m *Manager) StartClaudeLogin(ctx context.Context, userID string) (bridge.C
 		m.clearLoginPending(userID)
 		m.refreshEgress(ctx, userID)
 		return bridge.ClaudeLogin{}, m.claudeBridgeErr(userID, "sign-in start", err)
+	}
+	// The sign-in ends here when its time is up, whatever an older Bridge would wait: the user is
+	// told the earlier of the two.
+	if limit := until.UnixMilli(); login.ExpiresAt == 0 || login.ExpiresAt > limit {
+		login.ExpiresAt = limit
 	}
 	_ = m.store.Touch(ctx, userID, m.clk.Now())
 	m.log.Info("claude sign-in started", "user_id", userID)

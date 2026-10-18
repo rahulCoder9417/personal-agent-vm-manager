@@ -331,3 +331,24 @@ func TestErrorCodes(t *testing.T) {
 		t.Fatalf("stuck turn: %v", evs)
 	}
 }
+
+// More than CLAUDE_LOGINS_MAX (2) waiting Claude sign-ins: RESOURCE_EXHAUSTED (retry later), with
+// a message the backend can tell apart.
+func TestClaudeLoginsFullIsResourceExhausted(t *testing.T) {
+	h := newHarness(t, 5)
+	ctx := authed()
+	for _, u := range []string{"a", "b", "c"} {
+		if _, err := h.client.CreateSandbox(ctx, &vmv1.CreateSandboxRequest{UserId: u, LitellmKey: "k"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, u := range []string{"a", "b"} {
+		if _, err := h.client.StartClaudeLogin(ctx, &vmv1.StartClaudeLoginRequest{UserId: u}); err != nil {
+			t.Fatalf("%s: %v", u, err)
+		}
+	}
+	_, err := h.client.StartClaudeLogin(ctx, &vmv1.StartClaudeLoginRequest{UserId: "c"})
+	if code(err) != codes.ResourceExhausted || !strings.HasPrefix(status.Convert(err).Message(), "logins_full:") {
+		t.Fatalf("third sign-in: %v", err)
+	}
+}

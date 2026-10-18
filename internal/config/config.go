@@ -73,7 +73,11 @@ type Config struct {
 	// CLAUDE_EGRESS_DOMAINS (comma-separated, default DefaultClaudeEgressDomains): added to a user's
 	// egress file while their runtime is claude_code or a Claude sign-in / sign-out is in progress.
 	ClaudeEgressDomains []string
-	ClaudeLoginTTL      time.Duration // CLAUDE_LOGIN_TTL (default 10m): a pending sign-in keeps the sandbox awake this long
+	ClaudeLoginTTL      time.Duration // CLAUDE_LOGIN_TTL (default 5m): a pending sign-in keeps the sandbox awake this long
+	// CLAUDE_LOGINS_MAX (default 2): at most this many Claude sign-ins may wait at once on the
+	// server. A waiting sign-in holds an awake place (it is never stopped to make room), so this
+	// keeps sign-ins from taking more than this many of the AWAKE_CAP places.
+	ClaudeLoginsMax int
 
 	// Capacity and loops
 	AwakeCap                    int           // AWAKE_CAP (default 20)
@@ -134,7 +138,8 @@ func Load(getenv func(string) string) (*Config, error) {
 		EgressReloadMinInterval: p.dur("EGRESS_RELOAD_MIN_INTERVAL", time.Second),
 
 		ClaudeEgressDomains: p.domains("CLAUDE_EGRESS_DOMAINS", DefaultClaudeEgressDomains),
-		ClaudeLoginTTL:      p.dur("CLAUDE_LOGIN_TTL", 10*time.Minute),
+		ClaudeLoginTTL:      p.dur("CLAUDE_LOGIN_TTL", 5*time.Minute),
+		ClaudeLoginsMax:     p.int("CLAUDE_LOGINS_MAX", 2),
 
 		AwakeCap:                    p.int("AWAKE_CAP", 20),
 		IdleTimeout:                 p.dur("IDLE_TIMEOUT", 3*time.Minute),
@@ -216,6 +221,9 @@ func Load(getenv func(string) string) (*Config, error) {
 	}
 	if c.SnapshotPruneInterval <= 0 {
 		p.fail("SNAPSHOT_PRUNE_INTERVAL", "must be > 0")
+	}
+	if c.ClaudeLoginsMax < 1 {
+		p.fail("CLAUDE_LOGINS_MAX", "must be >= 1")
 	}
 	if c.AwakeCap < 1 {
 		p.fail("AWAKE_CAP", "must be >= 1")

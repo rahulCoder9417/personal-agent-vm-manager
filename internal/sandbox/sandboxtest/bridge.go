@@ -159,7 +159,7 @@ func (b *FakeBridge) ClaudeLogout(_ context.Context, addr, secret string) (bool,
 	return false, nil
 }
 
-// ExpireLogin drops a user's pending sign-in (the Bridge's 10-minute expiry).
+// ExpireLogin drops a user's pending sign-in (the Bridge's 5-minute expiry).
 func (b *FakeBridge) ExpireLogin(uid string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()

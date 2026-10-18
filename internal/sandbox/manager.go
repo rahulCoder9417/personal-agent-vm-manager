@@ -38,6 +38,9 @@ var (
 	// ErrStorageLimit: the user's folder is over its size limit, so the container is not woken.
 	// RESOURCE_EXHAUSTED (the proto has no better code).
 	ErrStorageLimit = errors.New("user storage limit reached")
+	// ErrLoginsFull: CLAUDE_LOGINS_MAX Claude sign-ins already wait on the server, each holding an
+	// awake place. RESOURCE_EXHAUSTED (retryable: one ends within CLAUDE_LOGIN_TTL).
+	ErrLoginsFull = errors.New("too many Claude sign-ins are waiting")
 	// ErrLoginNotFound: no pending Claude sign-in with that id (unknown, expired, already used,
 	// or the sandbox stopped since). FAILED_PRECONDITION: start a new sign-in.
 	ErrLoginNotFound = errors.New("claude sign-in not found or expired")

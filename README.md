@@ -54,7 +54,8 @@ backend's compose sets: `GRPC_ADDR` (:9090), `SANDBOX_NETWORK` (personal-agent_s
 `EGRESS_PROXY_URL` (http://172.30.0.2:3128), `EGRESS_PROXY_CONTAINER` (egress-proxy),
 `EGRESS_ALLOWLIST_DIR` (/allowlists), `LITELLM_BASE_URL` (http://litellm:4000),
 `PLATFORM_MCP_URL` (http://api:8080/mcp). Claude Code: `CLAUDE_EGRESS_DOMAINS` (default
-`api.anthropic.com,claude.ai,claude.com,platform.claude.com`), `CLAUDE_LOGIN_TTL` (10m). Scout's
+`api.anthropic.com,claude.ai,claude.com,platform.claude.com`), `CLAUDE_LOGIN_TTL` (5m), `CLAUDE_LOGINS_MAX` (2: waiting sign-ins on the whole server, each
+holding an awake place). Scout's
 browser: `SANDBOX_BROWSER_MEMORY_MB` (2048) and `SANDBOX_BROWSER_PIDS_LIMIT` (1024), the limits of a
 container with the browser turned on (see "Scout's browser"). Tunables: `AWAKE_CAP`, `IDLE_TIMEOUT`,
 `SANDBOX_MEMORY_MB`, `SANDBOX_CPUS`, `SANDBOX_PIDS_LIMIT`, `DELIVER_TIMEOUT`, `AGENT_IMAGE`,
@@ -110,9 +111,12 @@ Notes on behaviour the proto leaves open:
   not check `claude_connected`; a Claude turn without a sign-in ends with the error
   "Connect your Claude plan again".
 - `StartClaudeLogin`: wakes the sandbox, starts `claude auth login` in it, returns
-  `{login_id, authorize_url, expires_at_unix_ms}` (10 minutes). Starting again replaces
-  the pending sign-in. Until it completes or expires, the sandbox counts as busy (idle
-  reaper and capacity guard leave it alone) and can reach Anthropic's hosts.
+  `{login_id, authorize_url, expires_at_unix_ms}` (5 minutes, `CLAUDE_LOGIN_TTL`). Starting again
+  replaces the pending sign-in. Until it completes or expires, the sandbox counts as busy (idle
+  reaper and capacity guard leave it alone) and can reach Anthropic's hosts. At most
+  `CLAUDE_LOGINS_MAX` (2) sign-ins wait at once on the server, so they hold at most 2 awake
+  places: a start beyond that is refused before anything wakes (`RESOURCE_EXHAUSTED`, message
+  starting `logins_full:`; retry in a few minutes).
 - `CompleteClaudeLogin`: passes `code` to the waiting CLI (never logged: the gRPC log line
   says `code=[REDACTED]`), returns `{connected, message}`. One attempt per sign-in. The
   sandbox must still be awake (a stopped one lost the waiting CLI: `FAILED_PRECONDITION`).

@@ -268,7 +268,7 @@ func TestClaudeLoginErrors(t *testing.T) {
 	if _, err := e.m.CompleteClaudeLogin(ctx, "u1", "not-the-id", sandboxtest.GoodCode); !errors.Is(err, ErrLoginNotFound) {
 		t.Fatalf("unknown login id: %v", err)
 	}
-	// Expired at the Bridge (its 10-minute timer).
+	// Expired at the Bridge (its 5-minute timer).
 	e.br.ExpireLogin("u1")
 	if _, err := e.m.CompleteClaudeLogin(ctx, "u1", l.LoginID, sandboxtest.GoodCode); !errors.Is(err, ErrLoginNotFound) {
 		t.Fatalf("expired login: %v", err)
@@ -299,7 +299,7 @@ func TestReaperKeepsSandboxWithPendingLogin(t *testing.T) {
 	if _, err := e.m.StartClaudeLogin(ctx, "u1"); err != nil {
 		t.Fatal(err)
 	}
-	e.clk.Advance(5 * time.Minute)
+	e.clk.Advance(4 * time.Minute) // idle past IDLE_TIMEOUT, inside CLAUDE_LOGIN_TTL (5 minutes)
 	e.m.ReapOnce(ctx)
 	if e.state(t, "u1") != store.StateAwake {
 		t.Fatal("reaper must not stop a sandbox with a pending sign-in")
@@ -319,6 +319,134 @@ func TestReaperKeepsSandboxWithPendingLogin(t *testing.T) {
 	e.m.ReapOnce(ctx)
 	if e.state(t, "u1") != store.StateStopped {
 		t.Fatal("idle again after the sign-in expired")
+	}
+}
+
+// A sign-in waits at most 5 minutes (CLAUDE_LOGIN_TTL): then it no longer counts as busy, so the
+// idle stop and the capacity guard may stop the container, and the user is told when it ends.
+func TestClaudeLoginWaitsFiveMinutes(t *testing.T) {
+	e := newEnv(t, func(c *config.Config) { c.AwakeCap = 1 })
+	ctx := context.Background()
+	if e.cfg.ClaudeLoginTTL != 5*time.Minute {
+		t.Fatalf("CLAUDE_LOGIN_TTL default: %v", e.cfg.ClaudeLoginTTL)
+	}
+	e.create(t, "u1")
+	e.create(t, "u2")
+	l, err := e.m.StartClaudeLogin(ctx, "u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The fake Bridge answers a far later expiry (as an older Bridge, which waited 10 minutes):
+	// the user is told the vm-manager's own end.
+	if want := e.clk.Now().Add(5 * time.Minute).UnixMilli(); l.ExpiresAt != want {
+		t.Fatalf("expires at %d, want %d (5 minutes)", l.ExpiresAt, want)
+	}
+	e.clk.Advance(5*time.Minute - time.Second)
+	if !e.m.loginPending("u1") {
+		t.Fatal("still waiting just before 5 minutes")
+	}
+	e.clk.Advance(time.Second)
+	if e.m.loginPending("u1") {
+		t.Fatal("a sign-in that waited 5 minutes has ended")
+	}
+	// No longer busy: another user's wake may stop it to make room.
+	if _, _, err := e.m.Wake(ctx, "u2", PriorityHigh); err != nil {
+		t.Fatalf("the place of an ended sign-in can be taken: %v", err)
+	}
+	if e.state(t, "u1") != store.StateStopped {
+		t.Fatal("the container with the ended sign-in was stopped to make room")
+	}
+}
+
+// At most CLAUDE_LOGINS_MAX (2) sign-ins wait at once on the server: each holds an awake place,
+// so waiting sign-ins never take more than 2 of them. A third is refused before anything wakes;
+// a user starting again replaces their own; a place frees when a sign-in finishes or ends.
+func TestClaudeLoginsHoldAtMostTwoAwakePlaces(t *testing.T) {
+	e := newEnv(t, func(c *config.Config) { c.AwakeCap = 4 })
+	ctx := context.Background()
+	if e.cfg.ClaudeLoginsMax != 2 {
+		t.Fatalf("CLAUDE_LOGINS_MAX default: %d", e.cfg.ClaudeLoginsMax)
+	}
+	for _, u := range []string{"u1", "u2", "u3", "u4"} {
+		e.create(t, u)
+	}
+	l1, err := e.m.StartClaudeLogin(ctx, "u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.m.StartClaudeLogin(ctx, "u2"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.m.StartClaudeLogin(ctx, "u3"); !errors.Is(err, ErrLoginsFull) {
+		t.Fatalf("third waiting sign-in: %v", err)
+	}
+	if e.state(t, "u3") != store.StateStopped || e.m.loginPending("u3") {
+		t.Fatal("a refused sign-in wakes nothing and leaves nothing pending")
+	}
+	// Starting again replaces one's own: still 2.
+	l1, err = e.m.StartClaudeLogin(ctx, "u1")
+	if err != nil {
+		t.Fatalf("a user starting again: %v", err)
+	}
+	if _, err := e.m.StartClaudeLogin(ctx, "u4"); !errors.Is(err, ErrLoginsFull) {
+		t.Fatalf("still 2 waiting: %v", err)
+	}
+	// u1 finishes: its place frees.
+	if _, err := e.m.CompleteClaudeLogin(ctx, "u1", l1.LoginID, sandboxtest.GoodCode); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.m.StartClaudeLogin(ctx, "u3"); err != nil {
+		t.Fatalf("after one finished: %v", err)
+	}
+	// Both waiting ones run out of time (5 minutes): two new ones may wait.
+	e.clk.Advance(5 * time.Minute)
+	for _, u := range []string{"u4", "u1"} {
+		if _, err := e.m.StartClaudeLogin(ctx, u); err != nil {
+			t.Fatalf("after the others ended, %s: %v", u, err)
+		}
+	}
+	// Two sign-ins hold two places; the other awake containers can still be stopped for room.
+	busy := 0
+	for _, u := range []string{"u1", "u2", "u3", "u4"} {
+		if e.m.loginPending(u) {
+			busy++
+		}
+	}
+	if busy != 2 {
+		t.Fatalf("waiting sign-ins: %d, want 2", busy)
+	}
+}
+
+// Many sign-ins started at the same moment: still at most 2 wait.
+func TestClaudeLoginsLimitHoldsUnderRace(t *testing.T) {
+	e := newEnv(t, func(c *config.Config) { c.AwakeCap = 10 })
+	users := []string{"r1", "r2", "r3", "r4", "r5", "r6"}
+	for _, u := range users {
+		e.create(t, u)
+	}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	ok, full := 0, 0
+	for _, u := range users {
+		wg.Add(1)
+		go func(u string) {
+			defer wg.Done()
+			_, err := e.m.StartClaudeLogin(context.Background(), u)
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err == nil:
+				ok++
+			case errors.Is(err, ErrLoginsFull):
+				full++
+			default:
+				t.Errorf("%s: %v", u, err)
+			}
+		}(u)
+	}
+	wg.Wait()
+	if ok != 2 || full != 4 {
+		t.Fatalf("started %d, refused %d; want 2 and 4", ok, full)
 	}
 }
 
