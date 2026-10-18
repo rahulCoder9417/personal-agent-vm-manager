@@ -66,6 +66,8 @@ type Engine interface {
 	CopyFrom(ctx context.Context, id, path string) (io.ReadCloser, error)
 	// Signal sends a signal (e.g. "SIGHUP") to a running container.
 	Signal(ctx context.Context, container, signal string) error
+	// VolumeSize is the bytes a volume holds on disk (0 when it does not exist yet).
+	VolumeSize(ctx context.Context, name string) (int64, error)
 	// MemoryUsage is the container's current memory use in bytes (like `docker stats`).
 	MemoryUsage(ctx context.Context, id string) (int64, error)
 }

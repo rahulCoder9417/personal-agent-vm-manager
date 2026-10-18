@@ -8,6 +8,7 @@ import (
 	"time"
 
 	cerrdefs "github.com/containerd/errdefs"
+	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/mount"
@@ -229,6 +230,21 @@ func (c *Client) Signal(ctx context.Context, name, signal string) error {
 		return fmt.Errorf("signal %s to %s: %w", signal, name, notFound(err))
 	}
 	return nil
+}
+
+// VolumeSize implements Engine: Docker's own disk-usage report, so the vm-manager needs no
+// access to the volume folders on the host.
+func (c *Client) VolumeSize(ctx context.Context, name string) (int64, error) {
+	du, err := c.api.DiskUsage(ctx, types.DiskUsageOptions{Types: []types.DiskUsageObject{types.VolumeObject}})
+	if err != nil {
+		return 0, fmt.Errorf("disk usage: %w", err)
+	}
+	for _, v := range du.Volumes {
+		if v != nil && v.Name == name && v.UsageData != nil {
+			return max(v.UsageData.Size, 0), nil
+		}
+	}
+	return 0, nil
 }
 
 // MemoryUsage implements Engine. Same number `docker stats` shows: usage minus inactive file cache.

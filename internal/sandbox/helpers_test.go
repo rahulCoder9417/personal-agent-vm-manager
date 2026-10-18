@@ -68,6 +68,7 @@ func newEnv(t *testing.T, mutate ...func(*config.Config)) *testEnv {
 	clk := clock.NewFake(t0)
 	m := New(cfg, st, eng, br, eg, clk, log)
 	m.PollInterval = 5 * time.Millisecond
+	m.diskUsedPercent = func(string) (float64, error) { return 40, nil } // never the laptop's real disk
 	return &testEnv{m: m, st: st, eng: eng, br: br, eg: eg, clk: clk, cfg: cfg, dir: cfg.EgressAllowlistDir}
 }
 
@@ -76,6 +77,7 @@ func (e *testEnv) restart() {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	e.m = New(e.cfg, e.st, e.eng, e.br, e.eg, e.clk, log)
 	e.m.PollInterval = 5 * time.Millisecond
+	e.m.diskUsedPercent = func(string) (float64, error) { return 40, nil }
 }
 
 func (e *testEnv) create(t *testing.T, userID string, opts ...func(*CreateRequest)) (store.Sandbox, string) {

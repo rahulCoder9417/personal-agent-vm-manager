@@ -192,6 +192,10 @@ func (m *Manager) wakeTimed(ctx context.Context, userID string, priority int32, 
 		sb.State = store.StateStopped
 	}
 
+	if err := m.checkDiskLocked(ctx, sb.UserID); err != nil {
+		return store.Sandbox{}, false, t, err
+	}
+
 	reserving := time.Now()
 	evicted, err := m.reserveCapacity(ctx, sb)
 	t.CapacityWait, t.Evicted = time.Since(reserving), evicted

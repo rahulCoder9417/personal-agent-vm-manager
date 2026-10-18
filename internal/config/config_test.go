@@ -116,3 +116,23 @@ func TestLoadRejectsBadValues(t *testing.T) {
 		})
 	}
 }
+
+func TestDiskLimitDefaultsAndBadValues(t *testing.T) {
+	base := map[string]string{"VM_INTERNAL_SECRET": strings.Repeat("x", 32), "DATABASE_URL": "postgres://x"}
+	c, err := Load(func(k string) string { return base[k] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.UserDiskLimitBytes != 2048<<20 || c.DiskGuardPercent != 90 || c.DiskGuardPath != "/" {
+		t.Fatalf("defaults wrong: %d %v %q", c.UserDiskLimitBytes, c.DiskGuardPercent, c.DiskGuardPath)
+	}
+	for k, v := range map[string]string{"SANDBOX_DISK_LIMIT_MB": "-1", "DISK_GUARD_PERCENT": "120"} {
+		env := map[string]string{k: v}
+		for bk, bv := range base {
+			env[bk] = bv
+		}
+		if _, err := Load(func(n string) string { return env[n] }); err == nil {
+			t.Fatalf("%s=%s should be rejected", k, v)
+		}
+	}
+}

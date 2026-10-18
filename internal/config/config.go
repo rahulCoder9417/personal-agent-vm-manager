@@ -43,6 +43,11 @@ type Config struct {
 	AgentUID       int               // SANDBOX_AGENT_UID (default 10001): owner of files written into /data
 	BridgePort     int               // BRIDGE_PORT (default 8765)
 
+	// Disk limits (soft: checked when a sleeping container is about to wake).
+	UserDiskLimitBytes int64   // SANDBOX_DISK_LIMIT_MB (default 2048; 0 turns the per-user limit off)
+	DiskGuardPercent   float64 // DISK_GUARD_PERCENT (default 90; 0 turns the server-wide guard off)
+	DiskGuardPath      string  // DISK_GUARD_PATH (default "/"): the folder whose disk is measured
+
 	// Scout's browser (a Max-plan feature): a container with the browser turned on gets these
 	// limits instead of MemoryBytes and PidsLimit. A headless Chromium needs far more memory and
 	// far more processes and threads than the agent alone.
@@ -111,6 +116,10 @@ func Load(getenv func(string) string) (*Config, error) {
 		AgentUID:       p.int("SANDBOX_AGENT_UID", 10001),
 		BridgePort:     p.int("BRIDGE_PORT", 8765),
 
+		UserDiskLimitBytes: int64(p.int("SANDBOX_DISK_LIMIT_MB", 2048)) * 1024 * 1024,
+		DiskGuardPercent:   p.float("DISK_GUARD_PERCENT", 90),
+		DiskGuardPath:      p.str("DISK_GUARD_PATH", "/"),
+
 		BrowserMemoryBytes: int64(p.int("SANDBOX_BROWSER_MEMORY_MB", 2048)) * 1024 * 1024,
 		BrowserPidsLimit:   int64(p.int("SANDBOX_BROWSER_PIDS_LIMIT", 1024)),
 
@@ -145,6 +154,12 @@ func Load(getenv func(string) string) (*Config, error) {
 	c.AgentImageVersion = p.str("AGENT_IMAGE_VERSION", c.AgentImage)
 
 	// Validation.
+	if c.UserDiskLimitBytes < 0 {
+		p.fail("SANDBOX_DISK_LIMIT_MB", "must not be negative")
+	}
+	if c.DiskGuardPercent < 0 || c.DiskGuardPercent > 100 {
+		p.fail("DISK_GUARD_PERCENT", "must be between 0 and 100")
+	}
 	if len(c.InternalSecret) < 32 {
 		p.fail("VM_INTERNAL_SECRET", "is required and must be at least 32 characters")
 	}

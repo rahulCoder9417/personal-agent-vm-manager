@@ -32,6 +32,12 @@ var (
 	ErrCapacity    = errors.New("awake cap reached")          // RESOURCE_EXHAUSTED (retryable)
 	ErrBusy        = errors.New("sandbox is in a turn")       // FAILED_PRECONDITION
 	ErrUnavailable = errors.New("sandbox could not be woken") // UNAVAILABLE
+	// ErrDiskFull: the server disk is over the guard percent, so no sleeping container is woken.
+	// RESOURCE_EXHAUSTED (the proto has no better code).
+	ErrDiskFull = errors.New("server disk is nearly full")
+	// ErrStorageLimit: the user's folder is over its size limit, so the container is not woken.
+	// RESOURCE_EXHAUSTED (the proto has no better code).
+	ErrStorageLimit = errors.New("user storage limit reached")
 	// ErrLoginNotFound: no pending Claude sign-in with that id (unknown, expired, already used,
 	// or the sandbox stopped since). FAILED_PRECONDITION: start a new sign-in.
 	ErrLoginNotFound = errors.New("claude sign-in not found or expired")
@@ -87,6 +93,9 @@ type Manager struct {
 	clk   clock.Clock
 	log   *slog.Logger
 
+	// diskUsedPercent reports how full the server disk is (tests replace it).
+	diskUsedPercent func(path string) (float64, error)
+
 	// PollInterval is how often Wake polls the Bridge health while starting.
 	PollInterval time.Duration
 	// reaperLockWait is how long the idle reaper waits for a user's lock that another short operation
@@ -111,7 +120,8 @@ type Manager struct {
 func New(cfg *config.Config, st store.Store, eng docker.Engine, br BridgeAPI, eg Egress, clk clock.Clock, log *slog.Logger) *Manager {
 	return &Manager{
 		cfg: cfg, store: st, eng: eng, br: br, eg: eg, clk: clk, log: log,
-		PollInterval: 250 * time.Millisecond,
+		diskUsedPercent: diskUsedPercent,
+		PollInterval:    250 * time.Millisecond,
 		// A health check holds the lock for an inspect and one /healthz call (5 s timeout).
 		reaperLockWait: 10 * time.Second,
 		locks:          map[string]*sync.Mutex{},

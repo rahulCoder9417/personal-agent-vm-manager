@@ -30,6 +30,8 @@ type Fake struct {
 	OnStart func(c Container)
 	// OnStop runs (outside the lock) after a container stops.
 	OnStop func(c Container)
+	// SizeOverride sets what VolumeSize reports for a volume (bytes), for tests.
+	SizeOverride map[string]int64
 	// Memory returned by MemoryUsage for running containers.
 	Memory int64
 
@@ -315,6 +317,24 @@ func (f *Fake) Signal(_ context.Context, name, signal string) error {
 	defer f.mu.Unlock()
 	f.Signals = append(f.Signals, name+":"+signal)
 	return nil
+}
+
+// VolumeSize implements Engine: the total of the volume's files, or SizeOverride[name] when set.
+func (f *Fake) VolumeSize(_ context.Context, name string) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if n, ok := f.SizeOverride[name]; ok {
+		return n, nil
+	}
+	v := f.volumes[name]
+	if v == nil {
+		return 0, nil
+	}
+	var n int64
+	for _, b := range v.Files {
+		n += int64(len(b))
+	}
+	return n, nil
 }
 
 // MemoryUsage implements Engine.
