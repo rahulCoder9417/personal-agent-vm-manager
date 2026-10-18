@@ -1544,7 +1544,7 @@ class ClaudeAuthTest(unittest.TestCase):
             start = self.auth.start_login()
             self.assertTrue(start["authorize_url"].startswith("https://claude.ai/oauth/authorize?code=true"))
             self.assertIn("platform.claude.com", start["authorize_url"], "the code-paste URL, not localhost")
-            self.assertAlmostEqual(start["expires_at"] / 1000, time.time() + 600, delta=30)
+            self.assertAlmostEqual(start["expires_at"] / 1000, time.time() + 300, delta=30)  # 5 minutes
             self.assertTrue(self.auth.login_pending())
             res = self.auth.complete_login(start["login_id"], GOOD)
         self.assertEqual(res, {"connected": True, "message": "Claude plan connected"})

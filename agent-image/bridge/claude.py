@@ -1142,7 +1142,9 @@ class _Pending:
 class ClaudeAuth:
     """Sign-in / status / sign-out, all done by the official CLI itself."""
 
-    def __init__(self, cmd: list[str], env: dict[str, str], login_ttl: float = 600, url_timeout: float = 30,
+    # A sign-in waits 5 minutes for its code (it was 10 until 18 Oct 2026); the vm-manager's
+    # CLAUDE_LOGIN_TTL is the same, and a waiting sign-in keeps the container awake.
+    def __init__(self, cmd: list[str], env: dict[str, str], login_ttl: float = 300, url_timeout: float = 30,
                  complete_timeout: float = 60, status_max_age: float = 300, clock: Callable[[], float] = time.time):
         self.cmd = cmd
         self.env = child_env(env)
